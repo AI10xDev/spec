@@ -91,6 +91,32 @@ test("real API: history, independent tabs, dirty protection, split panes and rel
   await page.screenshot({ path: testInfo.outputPath("workspace-mobile.png"), fullPage: true })
 })
 
+test("rainbow theme supports keyboard focus, reduced motion and narrow screens", async ({ page }, testInfo) => {
+  await page.emulateMedia({ reducedMotion: "reduce" })
+  await page.goto(new URL("/", url).href)
+  const tokenInput = page.getByLabel("Server access token")
+  await expect(tokenInput).toBeVisible()
+  await expect(page.locator(".brand-mark")).toHaveCSS("animation-name", "none")
+  await page.keyboard.press("Tab")
+  await expect(tokenInput).toBeFocused()
+  await expect(tokenInput).toHaveCSS("outline-style", "solid")
+  await page.screenshot({ path: testInfo.outputPath("connect-desktop.png"), fullPage: true })
+  await page.setViewportSize({ width: 320, height: 740 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath("connect-mobile.png"), fullPage: true })
+
+  await tokenInput.fill(new URLSearchParams(new URL(url).hash.slice(1)).get("token")!)
+  await page.getByRole("button", { name: /Open workspace/ }).click()
+  await expect(page.getByRole("button", { name: "Create file" })).toBeVisible()
+  await expect(page.locator(".brand-mark")).toHaveCSS("animation-name", "none")
+  await expect(page.getByRole("heading", { name: "Start with a spec." })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath("empty-workspace-mobile.png"), fullPage: true })
+
+  await page.emulateMedia({ reducedMotion: "no-preference" })
+  await expect(page.locator(".brand-mark")).toHaveCSS("animation-name", "spectrum-flow")
+})
+
 test("stale writes return conflicts without losing the browser buffer", async ({ page, context }) => {
   await page.goto(url)
   await page.getByRole("textbox", { name: "New filename" }).fill("conflict.md")

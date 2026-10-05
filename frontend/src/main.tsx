@@ -157,8 +157,8 @@ function App() {
   }
 
   if (!connected) return <main className="connect">
-    <div className="brand">spec<span> / local workspace</span></div>
-    <h1>A place to think.<br />A space to build.</h1>
+    <div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ local workspace</span></div>
+    <h1>A place to think.<br /><span className="rainbow-text">A space to build.</span></h1>
     <p>Connect to your Rust server. Your files stay on this machine.</p>
     <form onSubmit={(event) => void connect(event).catch(fail)}>
       <label htmlFor="token">Server access token</label>
@@ -169,7 +169,7 @@ function App() {
   </main>
 
   return <div className="app">
-    <header className="topbar"><div className="brand">spec<span> / workspace</span></div><div className="connection"><i /> Local · Rust + TypeScript</div></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ workspace</span></div><div className="connection"><i /> Local · Rust + TypeScript</div></header>
     <div className="workspace">
       <aside>
         <div className="sidebar-heading">YOUR WORKSPACE <button title="Refresh file list" aria-label="Refresh file list" onClick={() => void refresh().catch(fail)}>↻</button></div>
@@ -206,7 +206,7 @@ function App() {
               setTabs((items) => items.map((item) => item.name === active ? { ...item, content } : item))
             }} onKeyDown={(event) => {
               if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void save() }
-            }} /> : <div className="empty-editor"><span>✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
+            }} /> : <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
             <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || output?.status === "running"} onClick={() => {
               if (window.confirm("Run this saved spec with spec build? Automatic tool approval is enabled (SPEC_BUILD_AUTO=1). It can modify files, execute tools, access the network, and incur provider costs.")) void save(true)
             }}>Save & run ↗</button></div></footer>
