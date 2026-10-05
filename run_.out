@@ -1,0 +1,91 @@
+Using spec: /home/opencode/spec/run_
+opencode server listening on http://127.0.0.1:43877
+[spec-session] Model: azure/gpt-6-astra
+[spec-session] Ready: ses_f6786891c3d05ee8ee4f07a17fe7326e; inbox /home/opencode/.local/state/spec/sessions/544804-1791187395361774995
+[spec-session] Accepted 00000000000000000001.json: msg_37e5cbd04084972c6176d8247693676360583a162b6ad0357804414cac126980
+[tool] read
+[tool] read completed
+[tool] read
+[tool] read
+[tool] read completed
+[tool] bash
+[tool] read completed
+[tool] bash completed
+[tool] grep
+[tool] grep completed
+I’ll check why the remote build can’t find `opencode-source` and replace machine-specific IP addresses with generic host examples. I’ll keep loopback addresses used for local-only networking.
+
+
+[tool] glob
+[tool] read
+[tool] grep
+[tool] bash
+[tool] glob completed
+[tool] read failed: Unable to read backend/src/remote.sh
+[tool] grep completed
+[tool] bash completed
+[tool] read
+[tool] read completed
+[tool] read
+[tool] read
+[tool] read
+[tool] read completed
+[tool] read failed: Unable to read backend/src/remote-supervisor.bash
+[tool] read completed
+[tool] read
+[tool] read completed
+[tool] read
+[tool] read completed
+The remote build shell skips login profiles, so binaries installed in `~/.local/bin` can be missing from its `PATH`. I’ll add the standard user binary directories before loading `~/.bash_aliases`, preserve any PATH overrides there, and add a regression test. I’ll also add a clearer error hint if a command is still missing.
+
+
+[tool] apply_patch
+[tool] apply_patch failed: Tool execution failed: Failed to find expected lines in /home/opencode/spec/docs/SECURITY.md:
+The remote child sources trusted `~/.bash_aliases` with alias expansion enabled and invokes only `spec build <snapshot>`. Both `SPEC_BUILD_FOREGROUND=1` and `SPEC_BUILD_AUTO=1` are set.
+[tool] bash
+[tool] bash completed
+[tool] apply_patch
+[tool] apply_patch completed
+[tool] edit
+[tool] edit completed
+[tool] read
+[tool] read completed
+[tool] apply_patch
+[tool] apply_patch completed
+[tool] bash
+[tool] bash
+[tool] bash completed
+[tool] bash completed
+[tool] bash
+[tool] bash completed
+[tool] bash
+[tool] bash completed
+Updated the remote build adapter to include `~/.local/bin` and `~/.bun/bin` in PATH, addressing the missing `opencode-source` error for standard user installs. Added troubleshooting guidance for custom installations.
+
+Replaced machine-specific IP addresses with generic hostnames in the README and matching local spec/log files. Kept loopback addresses for local-only networking.
+
+Validation: all 17 backend tests, formatting, and Clippy passed on rerun.
+
+Restart with `./run.sh` to load the fix. Live remote execution was not tested.
+
+[spec-session] Accepted 00000000000000000002.json: msg_ba8a90d4116930e0fba01e7c55ec42e324c0808249fb5590ceeb7a0c4bb7638a
+[tool] bash
+[tool] bash completed
+I’ll commit and push the PATH fix, regression tests, and documentation cleanup to `dev`. I’ll leave the untracked local specs and logs out of the commit.
+
+
+[tool] bash
+[tool] bash completed
+[tool] bash
+[tool] bash completed
+Committed and pushed to `origin/dev`.
+
+**Commit:** `8d43dcd` — `fix: expose user-installed engines to remote spec builds`
+
+- Added remote PATH support for `opencode-source` user installs.
+- Replaced machine-specific IP examples with generic hostnames; retained loopback networking addresses.
+- All 17 tests, formatting, and Clippy passed.
+- Untracked local specs/logs were not committed.
+
+Restart with `./run.sh` to load the fix.
+

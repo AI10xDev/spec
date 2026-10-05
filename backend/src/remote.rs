@@ -1,4 +1,6 @@
-use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+use sha2::{Digest, Sha256};
+use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Stdio, time::Duration};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 #[derive(Clone)]
@@ -60,7 +62,17 @@ impl Remote {
         Ok(())
     }
 
-    pub fn command(&self, bytes: usize) -> Command {
+    pub fn identity(&self) -> String {
+        format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(&self.binary, &self.target, &self.directory, &self.key,))
+                    .unwrap()
+            )
+        )
+    }
+
+    fn ssh(&self, script: String) -> Command {
         let mut command = Command::new(&self.binary);
         command.args([
             "-T",
@@ -103,15 +115,100 @@ impl Remote {
         }
         // SSH joins remote arguments as shell code. Quote each operator-controlled
         // value; document content travels only over stdin, never in this command.
-        command.arg("--").arg(&self.target).arg(format!(
-            "bash -c {} -- {} {} {} {}",
+        command.arg("--").arg(&self.target).arg(script);
+        command
+    }
+
+    pub fn command(&self, bytes: usize, id: &str) -> Command {
+        self.ssh(format!(
+            "bash -c {} -- {} {} {} {} {}",
             quote(include_str!("remote-build.bash")),
             quote(&self.directory),
             bytes,
             quote(include_str!("remote-alias.bash")),
             quote(include_str!("remote-supervisor.bash")),
-        ));
-        command
+            quote(id),
+        ))
+    }
+
+    pub async fn snapshot(
+        &self,
+        id: &str,
+        cancel: bool,
+    ) -> Result<(String, Vec<u8>, bool), String> {
+        let mut child = self
+            .ssh(format!(
+                "bash -c {} -- {} {} {}",
+                quote(include_str!("remote-recover.bash")),
+                quote(&self.directory),
+                quote(id),
+                if cancel { "cancel" } else { "snapshot" },
+            ))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let pid = child.id().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let mut stdout = stdout.take((super::MAX_OUTPUT + 129) as u64);
+            let mut stderr = stderr.take(4097);
+            let (a, b) = tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err),);
+            a.map_err(|e| e.to_string())?;
+            b.map_err(|e| e.to_string())?;
+            if out.len() > super::MAX_OUTPUT + 128 || err.len() > 4096 {
+                return Err("remote recovery response exceeded limit".into());
+            }
+            let exit = child.wait().await.map_err(|e| e.to_string())?;
+            if !exit.success() {
+                return Err(format!(
+                    "remote recovery {exit}: {}",
+                    String::from_utf8_lossy(&err).trim()
+                ));
+            }
+            let end = out
+                .iter()
+                .position(|b| *b == b'\n')
+                .ok_or("missing recovery header")?;
+            let header = std::str::from_utf8(&out[..end]).map_err(|_| "invalid recovery header")?;
+            let parts: Vec<_> = header.split(' ').collect();
+            if parts.len() != 3 || parts[0] != "SPEC-RUN-1" || !["0", "1"].contains(&parts[2]) {
+                return Err("invalid recovery header".into());
+            }
+            let status = match parts[1] {
+                "running" => "running".into(),
+                "unknown" => "unknown (remote status unavailable)".into(),
+                "0" => "completed".into(),
+                "124" => "timed out".into(),
+                "130" => "cancelled".into(),
+                code => match code.parse::<u8>() {
+                    Ok(code) => format!("failed (exit status: {code})"),
+                    Err(_) => return Err("invalid remote status".into()),
+                },
+            };
+            let truncated = parts[2] == "1";
+            let bytes = out[end + 1..].to_vec();
+            if bytes.len() > super::MAX_OUTPUT {
+                return Err("remote output exceeded limit".into());
+            }
+            Ok((status, bytes, truncated))
+        })
+        .await
+        .unwrap_or_else(|_| Err("remote recovery timed out".to_owned()));
+        if result.is_err() {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+            let _ = child.kill().await;
+        }
+        result
     }
 }
 

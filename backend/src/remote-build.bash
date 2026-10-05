@@ -1,9 +1,10 @@
-# SSH attachment. Arguments: workspace, snapshot bytes, alias script, supervisor.
+# SSH attachment. Arguments: workspace, snapshot bytes, alias script, supervisor, run UUID.
 # Only an explicit C byte after the snapshot cancels; EOF/signals detach.
 set -eu
 umask 077
 cd -- "$1"
-command -v setsid stdbuf >/dev/null
+command -v setsid stdbuf flock >/dev/null
+[[ $5 =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 125
 mkdir -p .spec-runs
 [[ ! -L .spec-runs && -O .spec-runs && $(stat -c %a .spec-runs) == 700 ]] || {
     echo '[remote] .spec-runs must be an owned, private (0700) directory' >&2
@@ -12,7 +13,9 @@ mkdir -p .spec-runs
 # Retain completed runs for seven days; never prune a running supervisor.
 find .spec-runs -mindepth 2 -maxdepth 2 -name status -type f -mmin +10080 -printf '%h\0' |
     xargs -0 -r rm -rf --
-directory=$(mktemp -d "$PWD/.spec-runs/run-XXXXXXXXXX")
+directory="$PWD/.spec-runs/run-$5"
+# Exclusive creation is intentional: retrying an ID must never launch twice.
+mkdir -- "$directory" || exit 125
 launched=
 reader=
 cleanup() {
@@ -34,7 +37,7 @@ head -c "$2" > "$directory/snapshot.md"
 # Ownership transfers before launch so an attachment signal cannot delete live input.
 trap '' HUP
 launched=1
-setsid bash --noprofile --norc -c "$4" -- "$directory" "$3" </dev/null >/dev/null 2>&1 &
+setsid flock --exclusive --nonblock --close "$directory/lease" bash --noprofile --norc -c "$4" -- "$directory" "$3" </dev/null >/dev/null 2>&1 &
 trap 'exit 125' HUP
 # Control must not wait for log writes (or the session notice) to reach SSH.
 attachment=$$

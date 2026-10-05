@@ -1,0 +1,5 @@
+error `Using spec: /tmp/spec-build-p3dEQ881SO/snapshot.md
+/home/opencode/opencode-source/script/run-spec.sh: line 30: opencode-source: command not found
+`
+remove the IP address formating in the readme and everywhere else
+commit and push

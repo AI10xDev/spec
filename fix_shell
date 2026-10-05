@@ -1,0 +1,9 @@
+error - `Execution is disabled.
+
+To enable it, set SPEC_COMMAND to an absolute trusted spec launcher and restart the Rust server.
+
+Editing and saving work without a model or credentials.`
+
+
+refactor by enabling remote shell execution of only `spec build` alias command remotely - not the web backend, that runs at the client side 
+#commit and push

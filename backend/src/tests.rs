@@ -12,6 +12,8 @@ pub(super) fn app(root: &FsPath) -> App {
         completion: None,
         files: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(Vec::new())),
+        recovered: Arc::new(Mutex::new(false)),
+        recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
     }
 }
 
@@ -72,6 +74,7 @@ async fn all_api_routes_require_authentication() {
     for (method, path) in [
         ("GET", "/api/files"),
         ("GET", "/api/files/a.md"),
+        ("GET", "/api/files/a.md/run"),
         ("PUT", "/api/files/a.md"),
         ("GET", "/api/config"),
         ("POST", "/api/completions"),
@@ -298,6 +301,11 @@ fn output_buffers_are_bounded() {
         output: VecDeque::new(),
         truncated: false,
         stop,
+        remote_identity: "0".repeat(64),
+        recover: true,
+        attached: true,
+        dirty: false,
+        persistence_error: None,
     });
     append(&state, "id", &vec![b'x'; MAX_OUTPUT + 50]);
     append(&state, "id", b"last");
@@ -544,5 +552,529 @@ wait
     assert_eq!(
         fs::read_to_string(snapshot.parent().unwrap().join("status")).unwrap(),
         "130\n"
+    );
+}
+
+pub(super) async fn wait_for_file(path: &FsPath) {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while !path.is_file() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn restart_recovers_running_and_disconnected_completed_runs_without_relaunch() {
+    for cancel_run in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let runner = root.path().join("runner");
+        fs::write(
+            &runner,
+            r#"#!/bin/bash
+id=${2%/snapshot.md}
+id=${id##*/run-}
+# Both durable local records must precede the first actual launch.
+[[ -s .spec-output/$id.json ]] || exit 91
+[[ $(cat .spec-output/latest-*) == "$id" ]] || exit 92
+printf 'launch\n' >> launches
+cat "$2" > received
+: > began
+printf 'before disconnect\n'
+while [[ ! -f finish ]]; do sleep 0.02; done
+printf 'after disconnect\n'
+exit 7
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut state = app(root.path());
+        let remote = remote_fixture(root.path(), &runner);
+        state.remote = Some(remote.clone());
+        let doc = save(
+            &state,
+            "a.md",
+            Save {
+                content: "immutable snapshot".into(),
+                revision: None,
+            },
+        )
+        .ok()
+        .unwrap();
+        let response = request(
+            state.clone(),
+            "POST",
+            "/api/runs",
+            serde_json::json!({"name":"a.md", "revision":doc.revision}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = json(response).await["id"].as_str().unwrap().to_owned();
+        wait_for_file(&root.path().join("began")).await;
+        let directory = root.path().join(format!(".spec-runs/run-{id}"));
+        let stored = root.path().join(format!(".spec-output/{id}.json"));
+        for (path, mode) in [
+            (root.path().join(".spec-output"), 0o700),
+            (stored.clone(), 0o600),
+        ] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+        fs::write(root.path().join("a.md"), "edited after launch").unwrap();
+        assert_eq!(
+            fs::read_to_string(directory.join("snapshot.md")).unwrap(),
+            doc.content
+        );
+        // Detach the old backend exactly as shutdown does, then discard its job map.
+        state.jobs.lock().unwrap()[0]
+            .stop
+            .send(RunControl::Detach)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let _guard = state.recovery_gate.lock().await;
+                if !state.jobs.lock().unwrap()[0].attached {
+                    break;
+                }
+                drop(_guard);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Wait for the old task's final recovery write before simulating a new process.
+        {
+            let _guard = state.recovery_gate.lock().await;
+        }
+        drop(state);
+        let mut fresh = app(root.path());
+        fresh.remote = Some(remote.clone());
+        if cancel_run {
+            let recovered = json(
+                request(
+                    fresh.clone(),
+                    "GET",
+                    "/api/files/a.md/run",
+                    serde_json::Value::Null,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(recovered["id"], id);
+            assert_eq!(recovered["status"], "running");
+            assert!(
+                recovered["output"]
+                    .as_str()
+                    .unwrap()
+                    .contains("before disconnect")
+            );
+            let revision = read(root.path(), "a.md").ok().unwrap().revision;
+            assert_eq!(
+                request(
+                    fresh.clone(),
+                    "POST",
+                    "/api/runs",
+                    serde_json::json!({"name":"a.md", "revision":revision})
+                )
+                .await
+                .status(),
+                StatusCode::CONFLICT
+            );
+            assert_eq!(
+                request(
+                    fresh.clone(),
+                    "POST",
+                    &format!("/api/runs/{id}/cancel"),
+                    serde_json::json!({})
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+        } else {
+            // The build completes while no backend is attached or polling it.
+            fs::write(root.path().join("finish"), "").unwrap();
+        }
+        wait_for_file(&directory.join("status")).await;
+        let response = request(
+            fresh.clone(),
+            "GET",
+            &format!("/api/runs/{id}"),
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let recovered = json(response).await;
+        assert_eq!(
+            recovered["status"],
+            if cancel_run {
+                "cancelled"
+            } else {
+                "failed (exit status: 7)"
+            }
+        );
+        assert!(
+            recovered["output"]
+                .as_str()
+                .unwrap()
+                .contains("before disconnect")
+        );
+        if !cancel_run {
+            assert!(
+                recovered["output"]
+                    .as_str()
+                    .unwrap()
+                    .contains("after disconnect")
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(root.path().join("launches")).unwrap(),
+            "launch\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("received")).unwrap(),
+            doc.content
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("a.md")).unwrap(),
+            "edited after launch"
+        );
+        assert!(!directory.join("snapshot.md").exists());
+        // Terminal output survives another restart, even with SSH disabled and logs gone.
+        fs::remove_dir_all(directory).unwrap();
+        let offline = app(root.path());
+        let latest = json(
+            request(
+                offline.clone(),
+                "GET",
+                "/api/files/a.md/run",
+                serde_json::Value::Null,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(latest, recovered);
+        assert_eq!(
+            json(
+                request(
+                    offline,
+                    "GET",
+                    &format!("/api/runs/{id}"),
+                    serde_json::Value::Null
+                )
+                .await
+            )
+            .await,
+            recovered
+        );
+    }
+}
+
+fn persisted_job(id: &str, identity: String, recover: bool) -> Job {
+    Job {
+        id: id.into(),
+        name: "a.md".into(),
+        status: if recover { "running" } else { "completed" }.into(),
+        output: VecDeque::from(b"saved output".to_vec()),
+        truncated: false,
+        remote_identity: identity,
+        recover,
+        stop: detached_control(),
+        attached: false,
+        dirty: false,
+        persistence_error: None,
+    }
+}
+
+#[tokio::test]
+async fn latest_is_null_without_a_run_and_tracks_newest_while_old_ids_remain_readable() {
+    let root = tempfile::tempdir().unwrap();
+    let state = app(root.path());
+    assert_eq!(
+        json(
+            request(
+                state.clone(),
+                "GET",
+                "/api/files/a.md/run",
+                serde_json::Value::Null
+            )
+            .await
+        )
+        .await,
+        serde_json::Value::Null
+    );
+    let first = Uuid::new_v4().to_string();
+    let second = Uuid::new_v4().to_string();
+    for id in [&first, &second] {
+        let job = persisted_job(id, "0".repeat(64), false);
+        recovery::persist(&state, &job).ok().unwrap();
+        recovery::set_latest(&state, &job).ok().unwrap();
+    }
+    let fresh = app(root.path());
+    let latest = json(
+        request(
+            fresh.clone(),
+            "GET",
+            "/api/files/a.md/run",
+            serde_json::Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(latest["id"], second);
+    assert_eq!(latest["output"], "saved output");
+    let old = json(
+        request(
+            fresh,
+            "GET",
+            &format!("/api/runs/{first}"),
+            serde_json::Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(old["id"], first);
+    assert_eq!(old["status"], "completed");
+}
+
+#[tokio::test]
+async fn changed_remote_identity_never_contacts_ssh_or_loses_cached_output() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = app(root.path());
+    let remote = remote_fixture(root.path(), &root.path().join("unused"));
+    let id = Uuid::new_v4().to_string();
+    let job = persisted_job(&id, remote.identity(), true);
+    recovery::persist(&state, &job).ok().unwrap();
+    recovery::set_latest(&state, &job).ok().unwrap();
+    fs::write(
+        &remote.binary,
+        format!(
+            "#!/bin/bash\ntouch '{}/contacted'\nexit 99\n",
+            root.path().display()
+        ),
+    )
+    .unwrap();
+    for field in ["target", "directory", "key", "binary", "disabled"] {
+        let mut changed = remote.clone();
+        match field {
+            "target" => changed.target = "other@host".into(),
+            "directory" => changed.directory.push_str("/other"),
+            "key" => changed.key = Some("/different/key".into()),
+            "binary" => changed.binary = root.path().join("different-ssh"),
+            _ => {}
+        }
+        state = app(root.path());
+        state.remote = if field == "disabled" {
+            None
+        } else {
+            Some(changed)
+        };
+        let out = json(
+            request(
+                state.clone(),
+                "GET",
+                "/api/files/a.md/run",
+                serde_json::Value::Null,
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            out["status"]
+                .as_str()
+                .unwrap()
+                .contains("configuration does not match")
+        );
+        assert_eq!(out["output"], "saved output");
+        assert_eq!(
+            request(
+                state.clone(),
+                "POST",
+                &format!("/api/runs/{id}/cancel"),
+                serde_json::json!({})
+            )
+            .await
+            .status(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert!(!root.path().join("contacted").exists());
+    }
+}
+
+#[tokio::test]
+async fn local_run_storage_rejects_unsafe_paths_permissions_and_oversized_records() {
+    for kind in [
+        "directory-symlink",
+        "directory-mode",
+        "record-symlink",
+        "record-mode",
+        "record-fifo",
+        "record-hardlink",
+        "record-large",
+        "record-corrupt",
+        "pointer-symlink",
+        "missing-record",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let state = app(root.path());
+        let id = Uuid::new_v4().to_string();
+        let job = persisted_job(&id, "0".repeat(64), false);
+        recovery::persist(&state, &job).ok().unwrap();
+        recovery::set_latest(&state, &job).ok().unwrap();
+        let directory = root.path().join(".spec-output");
+        let record = directory.join(format!("{id}.json"));
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        fs::write(outside.path(), "untouched").unwrap();
+        match kind {
+            "directory-symlink" => {
+                fs::rename(&directory, root.path().join("elsewhere")).unwrap();
+                symlink(root.path().join("elsewhere"), &directory).unwrap();
+            }
+            "directory-mode" => {
+                fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap()
+            }
+            "record-mode" => {
+                fs::set_permissions(&record, fs::Permissions::from_mode(0o644)).unwrap()
+            }
+            "record-large" => File::options()
+                .write(true)
+                .open(&record)
+                .unwrap()
+                .set_len((MAX_OUTPUT * 8) as u64)
+                .unwrap(),
+            "record-corrupt" => fs::write(&record, "{").unwrap(),
+            "pointer-symlink" => {
+                let pointer = directory.join(format!("latest-{:x}", Sha256::digest(b"a.md")));
+                fs::remove_file(&pointer).unwrap();
+                symlink(outside.path(), pointer).unwrap();
+            }
+            _ => {
+                fs::remove_file(&record).unwrap();
+                match kind {
+                    "record-symlink" => symlink(outside.path(), &record).unwrap(),
+                    "record-hardlink" => fs::hard_link(outside.path(), &record).unwrap(),
+                    "record-fifo" => {
+                        nix::unistd::mkfifo(&record, nix::sys::stat::Mode::S_IRUSR).unwrap()
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let response = request(
+            app(root.path()),
+            "GET",
+            "/api/files/a.md/run",
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_ne!(response.status(), StatusCode::OK, "{kind}");
+        if kind != "missing-record" && kind != "pointer-symlink" {
+            assert!(
+                recovery::persist(&state, &job).is_err()
+                    || ["record-large", "record-corrupt"].contains(&kind),
+                "{kind}"
+            );
+        }
+        assert_eq!(fs::read_to_string(outside.path()).unwrap(), "untouched");
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_failures_are_visible_and_retryable_and_output_is_bounded() {
+    let root = tempfile::tempdir().unwrap();
+    let state = app(root.path());
+    let id = Uuid::new_v4().to_string();
+    let job = persisted_job(&id, "0".repeat(64), false);
+    recovery::persist(&state, &job).ok().unwrap();
+    recovery::set_latest(&state, &job).ok().unwrap();
+    state.jobs.lock().unwrap().push(job);
+    append(&state, &id, &vec![b'x'; MAX_OUTPUT + 100]);
+    append(&state, &id, b"last");
+    let directory = root.path().join(".spec-output");
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+    recovery::checkpoint(&state, &id);
+    assert!(state.jobs.lock().unwrap()[0].persistence_error.is_some());
+    assert_eq!(
+        request(
+            state.clone(),
+            "GET",
+            &format!("/api/runs/{id}"),
+            serde_json::Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        request(
+            state,
+            "GET",
+            &format!("/api/runs/{id}"),
+            serde_json::Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let recovered = json(
+        request(
+            app(root.path()),
+            "GET",
+            "/api/files/a.md/run",
+            serde_json::Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(recovered["output"].as_str().unwrap().len(), MAX_OUTPUT);
+    assert!(recovered["output"].as_str().unwrap().ends_with("last"));
+    assert_eq!(recovered["truncated"], true);
+}
+
+#[tokio::test]
+async fn storage_failure_prevents_ssh_spawn_and_does_not_modify_spec() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = app(root.path());
+    let remote = remote_fixture(root.path(), &root.path().join("unused"));
+    fs::write(
+        &remote.binary,
+        format!("#!/bin/bash\ntouch '{}/spawned'\n", root.path().display()),
+    )
+    .unwrap();
+    state.remote = Some(remote);
+    let doc = save(
+        &state,
+        "a.md",
+        Save {
+            content: "unchanged input".into(),
+            revision: None,
+        },
+    )
+    .ok()
+    .unwrap();
+    let storage = root.path().join(".spec-output");
+    fs::create_dir(&storage).unwrap();
+    fs::set_permissions(&storage, fs::Permissions::from_mode(0o755)).unwrap();
+    let response = request(
+        state.clone(),
+        "POST",
+        "/api/runs",
+        serde_json::json!({"name":"a.md", "revision":doc.revision}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!root.path().join("spawned").exists());
+    assert!(state.jobs.lock().unwrap().is_empty());
+    assert_eq!(
+        fs::read_to_string(root.path().join("a.md")).unwrap(),
+        doc.content
+    );
+    assert_eq!(
+        fs::metadata(storage).unwrap().permissions().mode() & 0o777,
+        0o755
     );
 }

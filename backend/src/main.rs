@@ -30,6 +30,7 @@ use tower_http::services::ServeDir;
 use uuid::Uuid;
 
 mod completion;
+mod recovery;
 mod remote;
 use completion::Completion;
 use remote::Remote;
@@ -47,15 +48,31 @@ struct App {
     completion: Option<Completion>,
     files: Arc<Mutex<()>>,
     jobs: Arc<Mutex<Vec<Job>>>,
+    recovered: Arc<Mutex<bool>>,
+    recovery_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct Job {
     id: String,
     name: String,
     status: String,
     output: VecDeque<u8>,
     truncated: bool,
+    remote_identity: String,
+    recover: bool,
+    #[serde(skip, default = "detached_control")]
     stop: watch::Sender<RunControl>,
+    #[serde(skip)]
+    attached: bool,
+    #[serde(skip)]
+    dirty: bool,
+    #[serde(skip)]
+    persistence_error: Option<String>,
+}
+
+fn detached_control() -> watch::Sender<RunControl> {
+    watch::channel(RunControl::Detach).0
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -261,6 +278,7 @@ fn append(app: &App, id: &str, bytes: &[u8]) {
         return;
     };
     job.output.extend(bytes);
+    job.dirty = true;
     if job.output.len() > MAX_OUTPUT {
         job.output.drain(..job.output.len() - MAX_OUTPUT);
         job.truncated = true;
@@ -302,36 +320,62 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
             "spec build supports snapshots up to 120 KiB; larger files can still be edited and saved",
         ));
     }
+    let _recovery_guard = app.recovery_gate.lock().await;
+    recovery::initialize(&app)?;
+    let pending: Vec<_> = app
+        .jobs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|job| job.recover && !job.attached)
+        .map(|job| job.id.clone())
+        .collect();
+    for id in pending {
+        recovery::refresh(&app, &id, false).await?;
+    }
     let id = Uuid::new_v4().to_string();
     let (stop, mut stopped) = watch::channel(RunControl::Running);
     {
         let mut jobs = app.jobs.lock().unwrap();
-        if jobs.iter().filter(|job| job.status == "running").count() >= 4
-            || jobs
-                .iter()
-                .any(|job| job.name == input.name && job.status == "running")
+        if jobs.iter().filter(|job| job.recover).count() >= 4
+            || jobs.iter().any(|job| job.name == input.name && job.recover)
         {
             return Err(Error(
                 StatusCode::CONFLICT,
-                "A run is already active for this file, or the four-run limit was reached".into(),
+                "A run is active or its remote status is unresolved for this file, or the four-run limit was reached".into(),
             ));
         }
         if jobs.len() >= 32 {
-            let index = jobs.iter().position(|job| job.status != "running").unwrap();
+            let index = jobs.iter().position(|job| !job.recover).unwrap();
             jobs.remove(index);
         }
-        jobs.push(Job {
+        let mut job = Job {
             id: id.clone(),
             name: input.name,
             status: "running".into(),
             output: VecDeque::new(),
             truncated: false,
             stop,
-        });
+            remote_identity: remote.identity(),
+            recover: true,
+            attached: true,
+            dirty: false,
+            persistence_error: None,
+        };
+        // The durable ID and latest-file pointer must exist before SSH can launch.
+        recovery::persist(&app, &job)?;
+        if let Err(error) = recovery::set_latest(&app, &job) {
+            job.status = "failed to persist latest run; SSH was not started".into();
+            job.recover = false;
+            job.attached = false;
+            recovery::persist(&app, &job)?;
+            return Err(error);
+        }
+        jobs.push(job);
     }
     // Only the fixed remote spec-build adapter is exposed by this API.
     let child = remote
-        .command(document.content.len())
+        .command(document.content.len(), &id)
         .current_dir(&app.root)
         .process_group(0)
         .stdin(Stdio::piped())
@@ -342,7 +386,12 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
     let mut child = match child {
         Ok(child) => child,
         Err(error) => {
-            app.jobs.lock().unwrap().retain(|job| job.id != id);
+            let mut jobs = app.jobs.lock().unwrap();
+            let job = jobs.iter_mut().find(|job| job.id == id).unwrap();
+            job.status = format!("failed to start SSH ({error})");
+            job.recover = false;
+            job.attached = false;
+            recovery::persist(&app, job)?;
             return Err(error.into());
         }
     };
@@ -351,6 +400,7 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let response = Json(serde_json::json!({ "id": id }));
+    drop(_recovery_guard);
     tokio::spawn(async move {
         append(
             &app,
@@ -373,17 +423,25 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
         });
         let out = tokio::spawn(drain(app.clone(), id.clone(), stdout));
         let err = tokio::spawn(drain(app.clone(), id.clone(), stderr));
-        let mut status = tokio::select! {
-            result = child.wait() => match result {
-                Ok(exit) if exit.success() => "completed".to_owned(),
-                Ok(exit) if exit.code() == Some(124) => "timed out".to_owned(),
-                Ok(exit) if exit.code() == Some(130) => "cancelled".to_owned(),
-                Ok(exit) => format!("failed ({exit})"),
-                Err(error) => format!("failed ({error})"),
-            },
-            _ = stopped.changed() => if *stopped.borrow() == RunControl::Cancel { "cancelled" } else { "detached" }.into(),
-            _ = tokio::time::sleep(Duration::from_secs(15 * 60 + 15)) => "detached (local timeout)".into(),
-            _ = &mut upload => "detached (input closed)".into(),
+        let mut checkpoint = tokio::time::interval(Duration::from_secs(1));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60 + 15);
+        let mut status = loop {
+            break tokio::select! {
+                result = child.wait() => match result {
+                    Ok(exit) if exit.success() => "completed".to_owned(),
+                    Ok(exit) if exit.code() == Some(124) => "timed out".to_owned(),
+                    Ok(exit) if exit.code() == Some(130) => "cancelled".to_owned(),
+                    Ok(exit) => format!("failed ({exit})"),
+                    Err(error) => format!("failed ({error})"),
+                },
+                _ = stopped.changed() => if *stopped.borrow() == RunControl::Cancel { "cancelled" } else { "detached" }.into(),
+                _ = tokio::time::sleep_until(deadline) => "detached (local timeout)".into(),
+                _ = &mut upload => "detached (input closed)".into(),
+                _ = checkpoint.tick() => {
+                    recovery::checkpoint(&app, &id);
+                    continue;
+                }
+            };
         };
         // Give explicit cancellation time to reach the supervisor and confirm it.
         if status == "cancelled" {
@@ -412,21 +470,31 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
             }
         }
         append(&app, &id, format!("\n[{status}]\n").as_bytes());
+        let _guard = app.recovery_gate.lock().await;
         if let Some(job) = app.jobs.lock().unwrap().iter_mut().find(|job| job.id == id) {
             job.status = status;
+            job.attached = false;
+            job.dirty = true;
+        }
+        recovery::checkpoint(&app, &id);
+        // An SSH exit alone is not authoritative remote completion evidence.
+        if let Err(error) = recovery::refresh(&app, &id, false).await {
+            eprintln!("Run {id} recovery: {}", error.1);
         }
     });
     Ok(response)
 }
 
 async fn output(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Output>> {
+    let _guard = app.recovery_gate.lock().await;
+    recovery::initialize(&app)?;
+    recovery::restore(&app, &id)?;
+    recovery::refresh(&app, &id, false).await?;
     let jobs = app.jobs.lock().unwrap();
-    let job = jobs.iter().find(|job| job.id == id).ok_or_else(|| {
-        Error(
-            StatusCode::NOT_FOUND,
-            "Run not found (runs are in-memory)".into(),
-        )
-    })?;
+    let job = jobs
+        .iter()
+        .find(|job| job.id == id)
+        .ok_or_else(|| Error(StatusCode::NOT_FOUND, "Run not found".into()))?;
     Ok(Json(Output {
         id: job.id.clone(),
         name: job.name.clone(),
@@ -437,7 +505,34 @@ async fn output(State(app): State<App>, Path(id): Path<String>) -> Result<Json<O
     }))
 }
 
+async fn latest_output(
+    State(app): State<App>,
+    Path(name): Path<String>,
+) -> Result<Json<Option<Output>>> {
+    validate(&name)?;
+    let Some(id) = recovery::latest(&app, &name)? else {
+        return Ok(Json(None));
+    };
+    let Json(output) = output(State(app), Path(id)).await?;
+    Ok(Json(Some(output)))
+}
+
 async fn cancel(State(app): State<App>, Path(id): Path<String>) -> Result<Json<serde_json::Value>> {
+    let _guard = app.recovery_gate.lock().await;
+    recovery::initialize(&app)?;
+    recovery::restore(&app, &id)?;
+    let attached = app
+        .jobs
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|job| job.id == id)
+        .unwrap()
+        .attached;
+    if !attached {
+        recovery::refresh(&app, &id, true).await?;
+        return Ok(Json(serde_json::json!({"ok": true})));
+    }
     let jobs = app.jobs.lock().unwrap();
     let job = jobs
         .iter()
@@ -465,6 +560,7 @@ fn router(app: App) -> Router {
                 .layer(DefaultBodyLimit::max(completion::MAX_PREFIX * 6 + 1024)),
         )
         .route("/api/files/{name}", get(load).put(write))
+        .route("/api/files/{name}/run", get(latest_output))
         .route("/api/runs", post(start))
         .route("/api/runs/{id}", get(output))
         .route("/api/runs/{id}/cancel", post(cancel))
@@ -504,6 +600,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         completion,
         files: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(Vec::new())),
+        recovered: Arc::new(Mutex::new(false)),
+        recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
     };
     let port: u16 = std::env::var("SPEC_PORT")
         .unwrap_or_else(|_| "4780".into())
@@ -548,13 +646,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 });
             }
             for _ in 0..100 {
-                if !app
-                    .jobs
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|job| job.status == "running")
-                {
+                if !app.jobs.lock().unwrap().iter().any(|job| job.attached) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
