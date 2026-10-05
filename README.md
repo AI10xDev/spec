@@ -4,7 +4,11 @@ A local-first **Rust backend + Vite / React / TypeScript frontend** for writing 
 
 This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates over SSH to the remote `spec build` alias/function. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
 
-![The Vite workspace with saved files, two editor tabs, and the output pane](docs/workspace.png)
+## Workspace showcase
+
+![Animated screenshot tour highlighting saved files, multiple editor tabs, and side-by-side specification editing and output](docs/workspace.gif)
+
+[View the still screenshot](docs/workspace.png). This tour highlights an existing UI screenshot, not a live execution recording. The screenshot's execution-settings text is from an earlier version; use the current setup instructions below.
 
 ## Features
 
