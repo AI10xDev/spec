@@ -1,0 +1,10 @@
+specific includes a customized version of Kibi.
+
+Kibi copyright (c) 2020 Ilaï Deutel and Kibi Contributors.
+Upstream project: https://github.com/ilai-deutel/kibi
+License: MIT OR Apache-2.0
+
+The complete Kibi copyright and license texts are retained in editor/COPYRIGHT,
+editor/LICENSE-MIT, and editor/LICENSE-APACHE.
+
+OpenCode is an external runtime dependency. No OpenCode source is included.

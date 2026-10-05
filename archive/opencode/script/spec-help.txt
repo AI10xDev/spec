@@ -1,0 +1,18 @@
+Usage: spec [file] | spec build [file] | spec [workflow] | spec [help flag]
+
+  spec [file]             Edit/create a spec; no file reopens the last saved file
+  spec build [file]       Start a one-shot background build (last saved by default)
+  spec /eval [guidance]   Generate a hypothesis assessment in .hyp
+  spec eval [args]        Run the separate legacy evaluation tool
+  spec --eval [args]      Same as spec eval
+  spec /telle [action]    Telemetry: init, check, run, install, start, status, stop
+  spec telle [action]     Same as spec /telle; default action is status
+  spec --manual          Print the full step-by-step manual
+  spec --help, spec -h   Print this summary
+
+Editor: Ctrl+S save | Ctrl+R save and submit | Ctrl+Q quit | Ctrl+T find filename
+Builds can edit files, execute commands, and incur model charges.
+
+Start here: cd /path/to/project && spec feature.md
+Read the guide: spec --manual | less
+Edit a reserved command name as a file using ./, for example: spec ./build

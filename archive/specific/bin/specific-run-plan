@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  printf 'Usage: specific-run-plan [spec-directory]\n' >&2
+}
+
+find_opencode() {
+  local candidate
+  if [[ -n "${SPECIFIC_OPENCODE_BIN:-}" ]]; then
+    candidate=$SPECIFIC_OPENCODE_BIN
+    if [[ "$candidate" == */* ]]; then
+      [[ -x "$candidate" ]] && printf '%s\n' "$candidate" && return 0
+    elif command -v -- "$candidate" >/dev/null 2>&1; then
+      command -v -- "$candidate"
+      return 0
+    fi
+    printf 'OpenCode executable is not available: %s\n' "$candidate" >&2
+    return 1
+  fi
+
+  for candidate in opencode opencode-source; do
+    if command -v -- "$candidate" >/dev/null 2>&1; then
+      command -v -- "$candidate"
+      return 0
+    fi
+  done
+  printf 'OpenCode is not available. Install opencode or set SPECIFIC_OPENCODE_BIN.\n' >&2
+  return 1
+}
+
+read_spec() {
+  local file=$1
+  if ! SPECIFIC_SPEC_CONTENTS=$(python3 - "$file" <<'PY'
+import sys
+
+try:
+    with open(sys.argv[1], "rb") as source:
+        contents = source.read()
+except OSError as error:
+    print(f"Cannot read spec file: {error}", file=sys.stderr)
+    raise SystemExit(1)
+if b"\0" in contents:
+    print("Spec file contains a NUL byte and cannot be passed as a shell argument.", file=sys.stderr)
+    raise SystemExit(1)
+sys.stdout.buffer.write(contents + b"\x1e")
+PY
+  ); then
+    return 1
+  fi
+  SPECIFIC_SPEC_CONTENTS=${SPECIFIC_SPEC_CONTENTS%$'\x1e'}
+}
+
+if (( $# == 1 )) && [[ $1 == --help ]]; then
+  usage >&1
+  exit 0
+fi
+
+if (( $# > 1 )); then
+  usage
+  exit 1
+fi
+
+invocation_dir=$PWD
+spec_dir=${1:-${SPECIFIC_PLAN_DIR:-$HOME/specing}}
+if [[ ! -d "$spec_dir" ]]; then
+  printf 'Spec directory does not exist: %s\n' "$spec_dir" >&2
+  exit 1
+fi
+spec_dir=$(cd -- "$spec_dir" && pwd -P)
+
+mapfile -d '' -t specs < <(python3 - "$spec_dir" <<'PY'
+import os
+import sys
+
+paths = []
+for root, directories, files in os.walk(os.fsencode(sys.argv[1])):
+    directories.sort()
+    for name in sorted(files):
+        path = os.path.join(root, name)
+        if os.path.isfile(path) and not os.path.islink(path):
+            paths.append(path)
+for path in sorted(paths):
+    sys.stdout.buffer.write(path + b"\0")
+PY
+)
+if (( ${#specs[@]} == 0 )); then
+  printf 'No specs found in: %s\n' "$spec_dir" >&2
+  exit 1
+fi
+
+printf 'Choose a spec to run in plan mode:\n'
+for index in "${!specs[@]}"; do
+  printf '%3d) %s\n' "$((index + 1))" "${specs[$index]#"$spec_dir"/}"
+done
+printf 'Spec number: '
+IFS= read -r choice || choice=
+
+if [[ ! "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#specs[@]} )); then
+  printf 'Invalid spec number: %s\n' "$choice" >&2
+  exit 1
+fi
+
+selected=${specs[$((choice - 1))]}
+opencode_bin=$(find_opencode)
+SPECIFIC_SPEC_CONTENTS=
+read_spec "$selected"
+printf 'Using spec: %s\n' "${selected#"$spec_dir"/}"
+"$opencode_bin" run --dir "$invocation_dir" --agent plan "$SPECIFIC_SPEC_CONTENTS"

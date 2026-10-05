@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${FAKE_CAPTURE_DIR:?}"
+printf '%s' "${KIBI_SAVE_COPY_DIR:-}" > "$FAKE_CAPTURE_DIR/copy-dir"
+printf '%s' "${KIBI_SAVE_HISTORY_FILE:-}" > "$FAKE_CAPTURE_DIR/history-file"
+printf '%s' "$#" > "$FAKE_CAPTURE_DIR/count"
+index=0
+for argument in "$@"; do
+  printf '%s' "$argument" > "$FAKE_CAPTURE_DIR/arg-$index"
+  index=$((index + 1))
+done

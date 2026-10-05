@@ -1,0 +1,16 @@
+spec is a source-derived Rust + Vite rewrite of specific.
+Original project: https://github.com/AI10xDev/specific
+
+The new application in backend/ and frontend/ is licensed under the root MIT LICENSE.
+
+The read-only archive retains original notices:
+- specific: Copyright (c) 2026 specific contributors, MIT; see archive/specific/LICENSE.
+- Kibi: Copyright (c) 2020 Ilaï Deutel and Kibi Contributors, MIT OR Apache-2.0;
+  see archive/specific/editor/COPYRIGHT, LICENSE-MIT, and LICENSE-APACHE.
+- OpenCode: Copyright (c) 2025 opencode, MIT; see archive/opencode/LICENSE.
+- Machine shell/launcher definitions retain provenance in archive/README.md;
+  no additional license grant for nextweb or other external components is implied.
+
+OpenCode is an optional external runtime dependency. The new application does not
+implement or bundle its provider/tool orchestration. Archived source is not linked
+into the application. Source base revisions and file hashes are in archive/manifest.json.
