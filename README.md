@@ -25,7 +25,7 @@ Read the [complete feature guide](docs/FEATURES.md), [code review](docs/REVIEW.m
 Requirements: Linux, Rust/Cargo (tested with 1.98), and Bun (tested with 1.3.14) or Node.js 22.12+ with npm. Bun is recommended for reproducible frontend installs using `bun.lock`; the launcher's npm fallback does not use that lockfile. These tools are used for frontend dependency management/building only. The backend uses Unix file locking and process groups; Windows is not supported by this version.
 
 ```sh
-git clone https://github.com/ai10xdev/spec.git
+gh repo clone ai10xdev/spec
 cd spec
 ./run.sh
 ```
