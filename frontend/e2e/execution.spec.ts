@@ -21,6 +21,8 @@ test.beforeAll(async () => {
 const fs = require("node:fs")
 if (process.cwd() !== ${JSON.stringify(remoteWorkspace)}) process.exit(91)
 if (process.argv.length !== 4 || process.argv[2] !== "build" || process.env.SPEC_BUILD_AUTO !== "1" || process.env.SPEC_BUILD_FOREGROUND !== "1") process.exit(90)
+if (process.env.OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS !== "1" || process.env.OPENCODE_QUESTION_AUTO_RECOMMEND !== "1") process.exit(92)
+if ("SPEC_SESSION_DIR" in process.env || "KIBI_SPEC_SESSION" in process.env) process.exit(93)
 const content = fs.readFileSync(process.argv[3], "utf8")
 {
   process.stdout.write("fixture stdout: " + content + "\\n")
@@ -42,7 +44,11 @@ export HOME=${quote(directory)}
 exec /bin/bash -c "\${!#}"
 `)
   await chmod(ssh, 0o700)
-  await writeFile(path.join(directory, ".bash_aliases"), `alias spec=${quote(quote(executable))}\n`)
+  await writeFile(path.join(directory, ".bash_aliases"), `alias spec=${quote(quote(executable))}
+unset OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS
+export SPEC_BUILD_FOREGROUND=0 SPEC_BUILD_AUTO=0 OPENCODE_QUESTION_AUTO_RECOMMEND=0
+export SPEC_SESSION_DIR=/unused/session KIBI_SPEC_SESSION=1
+`)
   server = spawn(path.resolve("../backend/target/debug/spec"), [], {
     cwd: path.resolve("../backend"),
     env: {
@@ -55,6 +61,10 @@ exec /bin/bash -c "\${!#}"
       SPEC_SSH_WORKSPACE: remoteWorkspace,
       SPEC_SSH_BINARY: ssh,
       SPEC_SSH_KEY: undefined,
+      AZURE_OPENAI_ENDPOINT: undefined,
+      AZURE_OPENAI_API_KEY: undefined,
+      DEPLOYMENT_NAME: undefined,
+      AZURE_OPENAI_API_VERSION: undefined,
     },
     stdio: ["ignore", "pipe", "ignore"],
   })
@@ -110,6 +120,7 @@ test("enabled execution: confirmation, saved snapshot, per-file polling, complet
   expect((await confirmation).type()).toBe("confirm")
   expect((await confirmation).message()).toContain("incur provider costs")
   expect((await confirmation).message()).toContain("Automatic tool approval is requested")
+  expect((await confirmation).message()).toContain("recommended answers to runtime questions")
   await expect(pane.getByText("Idle", { exact: true })).toBeVisible()
   await expect(editor).toHaveValue(snapshot)
   await expect(run).toBeEnabled()

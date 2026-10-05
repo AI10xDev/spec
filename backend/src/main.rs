@@ -29,7 +29,9 @@ use tokio::{
 use tower_http::services::ServeDir;
 use uuid::Uuid;
 
+mod completion;
 mod remote;
+use completion::Completion;
 use remote::Remote;
 
 const MAX_FILE: usize = 2 * 1024 * 1024;
@@ -42,6 +44,7 @@ struct App {
     root: PathBuf,
     token: String,
     remote: Option<Remote>,
+    completion: Option<Completion>,
     files: Arc<Mutex<()>>,
     jobs: Arc<Mutex<Vec<Job>>>,
 }
@@ -425,10 +428,18 @@ fn router(app: App) -> Router {
         .route(
             "/api/config",
             get(|State(app): State<App>| async move {
-                Json(serde_json::json!({"execution": app.remote.is_some()}))
+                Json(serde_json::json!({
+                    "execution": app.remote.is_some(),
+                    "completion": app.completion.is_some(),
+                }))
             }),
         )
         .route("/api/files", get(list))
+        .route(
+            "/api/completions",
+            post(completion::complete)
+                .layer(DefaultBodyLimit::max(completion::MAX_PREFIX * 6 + 1024)),
+        )
         .route("/api/files/{name}", get(load).put(write))
         .route("/api/runs", post(start))
         .route("/api/runs/{id}", get(output))
@@ -461,10 +472,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let _lock = nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusiveNonblock)
         .map_err(|(_, error)| format!("Workspace is already served: {error}"))?;
     let remote = Remote::from_env()?;
+    let completion = Completion::from_env()?;
     let app = App {
         root,
         token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
         remote,
+        completion,
         files: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(Vec::new())),
     };

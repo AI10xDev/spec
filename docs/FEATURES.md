@@ -4,7 +4,7 @@
 
 Start the Rust server and open its printed URL. The fragment supplies a per-process access token; the UI removes the fragment from the address bar and stores the token in the current tab's session storage. You can also paste the token into the connection form. Restarting Rust rotates the token: use its new URL.
 
-The editor's files are on the server machine, not uploaded to an application cloud. If you enable OpenCode, that external tool may send prompts and tool context to its configured provider.
+The editor's files are on the server machine, not uploaded to an application cloud. If you enable OpenCode, that external tool may send prompts and tool context to its configured provider. Optional Azure trailing completions send recent editor text, including unsaved text, to the configured Azure provider.
 
 ## 2. Saved files tab — previously written files
 
@@ -39,6 +39,10 @@ On desktop, **Spec** occupies the left pane and **Output & logs** the right. Bot
 
 The spec editor is a plain UTF-8 textarea with spellcheck disabled. It supports native text selection, clipboard operations, and browser textarea undo. It is not Monaco, an IDE, a terminal emulator, or a syntax-aware language server.
 
+With [Azure completion configured](../README.md#trailing-sentence-part-completions), **Trailing completions** offers muted ghost text after 500 ms idle at a line's end. It completes the current word or sentence part, stopping at the first clause/sentence boundary, up to 160 characters. Press **Tab** or click **Accept part** to insert it; press **Escape** to dismiss until the next edit. Continue typing after a boundary for the next part. The toggle disables provider requests across editor tabs; editing works without any provider configuration.
+
+Suggestions never modify saved/downloaded text until accepted. Selection, composition, blur, and tab switches clear them; stale requests cannot replace a newer suggestion. Existing text after the caret on the same line suppresses completion. The ghost stays on one visual line, clipped to the pane; its full suffix is in the Accept part tooltip. Native undo includes accepted text in supported browsers; browsers without `insertText` support use a direct insertion fallback. Provider errors appear beside the toggle, without blocking saves or launching a build.
+
 The output pane is associated with the active filename and shows the latest run started for that file by this browser page. Available stdout and stderr appear as plain text, not executable HTML or interpreted terminal escape sequences. Available tool logs and concise explanations can be shown; hidden model reasoning is not requested. The run adapter does not pass `--thinking`.
 
 ## 5. Save, conflicts, and download
@@ -63,7 +67,7 @@ With `SPEC_SSH_TARGET` and `SPEC_SSH_WORKSPACE` set on the **local** Rust server
 
 1. A confirmation warns about tools, filesystem changes, provider costs, and inherited permissions.
 2. The current buffer is saved.
-3. The local server checks the saved revision and uploads an immutable snapshot over SSH. A fixed remote supervisor writes a private temporary snapshot, sources the remote `~/.bash_aliases`, and invokes `spec build <snapshot-file>` in the remote build directory with `SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1`. Automatic approval is requested; actual policy depends on the installed alias. Builds are limited to 120 KiB (local saving still supports 2 MiB). Other local files are not synced, and build changes remain remote.
+3. The local server checks the saved revision and uploads an immutable snapshot over SSH. A fixed remote supervisor writes a private temporary snapshot, sources the remote `~/.bash_aliases`, and invokes `spec build <snapshot-file>` in the remote build directory with `SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1`. It also exports `OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1 OPENCODE_QUESTION_AUTO_RECOMMEND=1` and clears persistent-session variables. Automatic approval and recommended question answers are requested to minimize runtime prompting; actual behavior depends on the installed alias/engine. Unsupported questions are not blindly answered. Builds are limited to 120 KiB (local saving still supports 2 MiB). Other local files are not synced, and build changes remain remote.
 4. The right pane follows output. Disable **Follow output** to keep your scroll position.
 5. **Stop run** closes the SSH input lease to request remote process-group cancellation and snapshot cleanup.
 
@@ -92,7 +96,7 @@ A failure to launch the local SSH client is reported immediately. SSH connection
 | Background shell build | Opt-in remote foreground build over SSH; local web server, bounded output, cancellation |
 | Basename mirror saves | No mirroring; saves only the named workspace file |
 | Persistent V2 session inbox | Not ported; one-shot runs only |
-| Azure inline completion/filename ranking | Not ported |
+| Azure inline completion/filename ranking | Optional sentence-part trailing completions; filename ranking not ported |
 | `/eval`, `/telle`, legacy eval, plan picker | Not ported |
 | Terminal keybindings/syntax highlighting | Not ported; browser editing and save shortcut only |
 

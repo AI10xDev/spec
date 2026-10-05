@@ -11,6 +11,8 @@ if [[ -f "$HOME/.bash_aliases" ]]; then
 fi
 unset SPEC_SESSION_DIR KIBI_SPEC_SESSION
 export SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1
+# Request the external engine's unattended approval and recommended answers.
+export OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1 OPENCODE_QUESTION_AUTO_RECOMMEND=1
 type spec >/dev/null 2>&1 || { echo '[remote] spec alias/function/launcher not found; configure ~/.bash_aliases' >&2; exit 127; }
 spec build "$1"
 result=$?

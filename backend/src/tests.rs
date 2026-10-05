@@ -4,11 +4,12 @@ use http_body_util::BodyExt;
 use std::os::unix::fs::symlink;
 use tower::ServiceExt;
 
-fn app(root: &FsPath) -> App {
+pub(super) fn app(root: &FsPath) -> App {
     App {
         root: root.to_owned(),
         token: "test-token".into(),
         remote: None,
+        completion: None,
         files: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(Vec::new())),
     }
@@ -41,7 +42,12 @@ pub(super) fn remote_fixture(root: &FsPath, runner: &FsPath) -> Remote {
     }
 }
 
-async fn request(app: App, method: &str, path: &str, body: serde_json::Value) -> Response {
+pub(super) async fn request(
+    app: App,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> Response {
     router(app)
         .oneshot(
             Request::builder()
@@ -56,7 +62,7 @@ async fn request(app: App, method: &str, path: &str, body: serde_json::Value) ->
         .unwrap()
 }
 
-async fn json(response: Response) -> serde_json::Value {
+pub(super) async fn json(response: Response) -> serde_json::Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
@@ -68,6 +74,7 @@ async fn all_api_routes_require_authentication() {
         ("GET", "/api/files/a.md"),
         ("PUT", "/api/files/a.md"),
         ("GET", "/api/config"),
+        ("POST", "/api/completions"),
         ("POST", "/api/runs"),
         ("GET", "/api/runs/id"),
         ("POST", "/api/runs/id/cancel"),

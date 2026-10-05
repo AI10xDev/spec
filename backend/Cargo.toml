@@ -15,6 +15,7 @@ uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 tower-http = { version = "0.6", features = ["fs", "set-header"] }
 nix = { version = "0.30", features = ["signal", "process", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

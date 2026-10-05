@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { dirty, openTab, savedTab } from "./tabs"
 import type { Document, Output, Tab } from "./tabs"
+import { Editor } from "./editor"
 import "./style.css"
 
 type Entry = { name: string; modified: number; bytes: number }
@@ -17,6 +18,8 @@ function App() {
   })
   const [connected, setConnected] = useState(false)
   const [execution, setExecution] = useState(false)
+  const [completion, setCompletion] = useState(false)
+  const [complete, setComplete] = useState(true)
   const [files, setFiles] = useState<Entry[]>([])
   const [tabs, setTabs] = useState<Tab[]>([])
   const [active, setActive] = useState("")
@@ -60,8 +63,9 @@ function App() {
     event?.preventDefault()
     setError("")
     sessionStorage.setItem("spec-token", token)
-    const config = await api<{ execution: boolean }>("/config")
+    const config = await api<{ execution: boolean; completion: boolean }>("/config")
     setExecution(config.execution)
+    setCompletion(config.completion)
     await refresh()
     setConnected(true)
   }
@@ -201,14 +205,11 @@ function App() {
         <div className="panes">
           <section className="editor-pane" aria-label="Spec editing pane">
             <div className="pane-heading"><div><span className="eyebrow">01 / SPEC</span><h2>{tab?.name ?? "Your next idea"}</h2></div><span className="badge">{tab ? dirty(tab) ? "Unsaved" : "Saved" : "Editor"}</span></div>
-            {tab ? <textarea className="code" aria-label={`Edit ${tab.name}`} spellCheck={false} value={tab.content} placeholder="# What should we build?" onChange={(event) => {
-              const content = event.target.value
+            {tab ? <Editor key={tab.name} name={tab.name} value={tab.content} token={token} available={completion} enabled={complete} onEnabled={setComplete} onSave={() => void save()} onChange={(content) => {
               setTabs((items) => items.map((item) => item.name === active ? { ...item, content } : item))
-            }} onKeyDown={(event) => {
-              if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void save() }
             }} /> : <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
             <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || output?.status === "running"} onClick={() => {
-              if (window.confirm("Send this saved spec over SSH and run remote spec build? Automatic tool approval is requested (SPEC_BUILD_AUTO=1). It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.")) void save(true)
+              if (window.confirm("Send this saved spec over SSH and run remote spec build? Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.")) void save(true)
             }}>Save & run ↗</button></div></footer>
           </section>
           <section className="output-pane" aria-label="Output and logs pane">

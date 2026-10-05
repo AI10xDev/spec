@@ -140,7 +140,7 @@ async fn remote_function_is_supported_and_missing_spec_is_reported() {
 }
 
 #[tokio::test]
-async fn remote_engine_path_reaches_child_launchers_without_login_profiles() {
+async fn remote_engine_path_and_auto_settings_reach_children_without_login_profiles() {
     for (install, status) in [
         (".local/bin", 0),
         (".bun/bin", 0),
@@ -167,13 +167,29 @@ async fn remote_engine_path_reaches_child_launchers_without_login_profiles() {
             let engine = bin.join("opencode-source");
             fs::write(
                 &engine,
-                format!("#!/bin/bash\ncat -- \"$1\"\nexit {status}\n"),
+                format!(
+                    r#"#!/bin/bash
+[[ $SPEC_BUILD_FOREGROUND == 1 && $SPEC_BUILD_AUTO == 1 ]] || exit 92
+[[ $OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS == 1 && $OPENCODE_QUESTION_AUTO_RECOMMEND == 1 ]] || exit 93
+[[ ! -v SPEC_SESSION_DIR && ! -v KIBI_SPEC_SESSION ]] || exit 94
+cat -- "$1"
+exit {status}
+"#
+                ),
             )
             .unwrap();
             fs::set_permissions(engine, fs::Permissions::from_mode(0o700)).unwrap();
         }
         let aliases = root.path().join(".bash_aliases");
         let mut definition = fs::read_to_string(&aliases).unwrap();
+        // Policy must be exported after sourcing aliases, even when they unset
+        // it or opt back into interactive sessions.
+        if install == ".local/bin" {
+            definition.push_str("unset SPEC_BUILD_FOREGROUND SPEC_BUILD_AUTO OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS OPENCODE_QUESTION_AUTO_RECOMMEND\n");
+        } else {
+            definition.push_str("export SPEC_BUILD_FOREGROUND=0 SPEC_BUILD_AUTO=0 OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=0 OPENCODE_QUESTION_AUTO_RECOMMEND=0\n");
+        }
+        definition.push_str("export SPEC_SESSION_DIR=/unused/session KIBI_SPEC_SESSION=1\n");
         if install == "custom engine/bin" {
             definition.push_str("export PATH=\"$HOME/custom engine/bin:$PATH\"\n");
         } else if install == "missing" {
