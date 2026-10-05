@@ -71,7 +71,7 @@ async function startServer(execution = true) {
     env: {
       ...process.env,
       SPEC_WORKSPACE: workspace,
-      SPEC_PORT: "0",
+      SPEC_PORT: url ? new URL(url).port : "0",
       SPEC_UI_DIR: path.resolve("dist"),
       SPEC_COMMAND: undefined,
       SPEC_SSH_TARGET: execution ? "fixture@host" : undefined,
@@ -257,7 +257,6 @@ test("output recovery failures leave editing available and stale recovery cannot
   await expect(page.getByRole("status")).toHaveText("Saved recovery-error.md")
   await page.route("**/api/files/recovery-error.md/run", (route) => route.fulfill({ status: 503, json: { error: "Recovery offline" } }))
   await page.reload()
-  await page.getByRole("tabpanel").getByRole("button", { name: /recovery-error.md/ }).click()
   await expect(page.getByRole("alert")).toContainText("Could not recover output for recovery-error.md")
   await expect(page.getByRole("textbox", { name: "Edit recovery-error.md" })).toHaveValue("COMPLETE\nNew run output.")
   await page.unroute("**/api/files/recovery-error.md/run")
@@ -291,7 +290,6 @@ test("unavailable recovered runs keep polling without permitting duplicate build
   let polls = 0
   await page.route("**/api/runs/recover-poll", (route) => route.fulfill({ json: ++polls === 1 ? recovered : { ...recovered, status: "completed", output: "reconnected output", recoverable: false } }))
   await page.reload()
-  await page.getByRole("tabpanel").getByRole("button", { name: /recover-poll.md/ }).click()
   await expect(page.getByLabel("Run output")).toHaveText("cached output")
   await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
   await expect(page.getByLabel("Run output")).toHaveText("reconnected output")
@@ -317,7 +315,7 @@ test("closing the browser does not cancel an admitted build", async ({ page, req
   expect((await (await request.get(endpoint, { headers })).json()).output).toContain("finished after browser close")
 })
 
-test("reopening a spec after server restart recovers live and completed output without relaunch", async ({ page }) => {
+test("startup restores live and completed output after server restart without relaunch", async ({ page }) => {
   await page.goto(url)
   await page.getByRole("textbox", { name: "New filename" }).fill("detached.md")
   await page.getByRole("button", { name: "Create file" }).click()
@@ -330,14 +328,21 @@ test("reopening a spec after server restart recovers live and completed output w
   expect(session).not.toBeNull()
   const remoteDirectory = session![1]
   const launches = await readFile(path.join(directory, "launches"), "utf8")
+  const buildRequests: string[] = []
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/api/runs")) buildRequests.push(request.url())
+  })
+  await page.reload()
+  await expect(page.getByRole("textbox", { name: "Edit detached.md" })).toHaveValue("DETACH\nKeep working after shutdown.")
+  await expect(output).toContainText("fixture stdout: DETACH")
   await expect(readFile(path.join(remoteDirectory, "status"), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
   await new Promise<void>((resolve) => {
     server.once("exit", () => resolve())
     server.kill("SIGTERM")
   })
   await startServer()
+  await page.goto("about:blank")
   await page.goto(url)
-  await page.getByRole("tabpanel").getByRole("button", { name: /detached.md/ }).click()
   await expect(page.getByRole("textbox", { name: "Edit detached.md" })).toHaveValue("DETACH\nKeep working after shutdown.")
   await expect(output).toContainText("fixture stdout: DETACH")
   await expect(page.getByRole("button", { name: "Stop run" })).toBeVisible()
@@ -361,10 +366,11 @@ test("reopening a spec after server restart recovers live and completed output w
     server.kill("SIGTERM")
   })
   await startServer(false)
+  await page.goto("about:blank")
   await page.goto(url)
-  await page.getByRole("tabpanel").getByRole("button", { name: /detached.md/ }).click()
   await expect(output).toContainText("finished after server shutdown")
   await expect(page.getByRole("button", { name: "Stop run" })).toBeHidden()
   await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
   expect(await readFile(path.join(directory, "launches"), "utf8")).toBe(launches)
+  expect(buildRequests).toEqual([])
 })

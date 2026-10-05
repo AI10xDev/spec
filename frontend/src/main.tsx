@@ -66,11 +66,26 @@ function App() {
     const config = await api<{ execution: boolean; completion: boolean }>("/config")
     setExecution(config.execution)
     setCompletion(config.completion)
-    await refresh()
+    const entries = await api<Entry[]>("/files")
+    setFiles(entries)
+    let remembered: string | null = null
+    try { remembered = localStorage.getItem("spec-active-file") } catch { /* Browser persistence is optional. */ }
+    if (remembered && entries.some((file) => file.name === remembered)) {
+      await open(remembered).catch(fail)
+    }
     setConnected(true)
   }
 
   useEffect(() => { if (token) void connect().catch(fail) }, [])
+
+  useEffect(() => {
+    if (!connected) return
+    // Remember only the selection, never unsaved buffers or runtime logs.
+    try {
+      if (tab?.revision) localStorage.setItem("spec-active-file", tab.name)
+      else localStorage.removeItem("spec-active-file")
+    } catch { /* Editing still works when browser storage is unavailable. */ }
+  }, [connected, tab?.name, tab?.revision])
 
   useEffect(() => {
     const listener = (event: BeforeUnloadEvent) => {
