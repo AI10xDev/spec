@@ -54,7 +54,7 @@ The entire spec becomes a positional argument after `--agent build`, without `--
 
 **Recommendation:** use a documented stdin/file-input interface, or at minimum insert `--` and enforce a supported argument-size bound. Check parser behavior against each supported CLI release.
 
-**Rewrite:** sends the immutable saved document over stdin to a trusted, explicitly configured executable; content is never part of the shell or argument vector. The expected external CLI contract is documented.
+**Current adapter:** invokes an explicitly configured `SPEC_COMMAND` launcher with `build` and a private saved-snapshot path. The backend never interpolates content into shell code. The existing launcher forwards the prompt as one argument after `--`, so builds are capped at 120 KiB and trailing newlines are stripped by Bash command substitution. See the execution contract in the README.
 
 ### 5. Medium: line-delimited history cannot represent every allowed Unix path
 
@@ -74,7 +74,7 @@ The original integration explicitly documents that the selected local OpenCode C
 
 **Recommendation:** make execution an explicit opt-in, disclose the inherited policy, and enforce permissions/sandboxing in the execution engine or OS rather than in presentation code.
 
-**Rewrite:** disabled by default, executable path selected at server startup, confirmation before every UI run, no shell interpolation, and no `--auto` added. The external runtime can still apply its own auto-approval policy. The rewrite is not a sandbox.
+**Current adapter:** disabled by default, trusted launcher path selected at server startup, confirmation before every UI run, and no shell interpolation by the backend. `SPEC_BUILD_AUTO=1` selects the existing launcher’s foreground build branch, which explicitly adds `--auto`. UI and startup warnings disclose automatic approval. The rewrite is not a sandbox.
 
 ## Positive observations
 
@@ -105,15 +105,15 @@ Executed on the development machine:
 | --- | --- |
 | Original editor: `cargo test save_` | 2 passed; other tests filtered |
 | Original OpenCode: selected run-spec/session/workflow tests | 49 passed, 1 skipped, 0 failed |
-| New Rust backend: `cargo test` | 9 passed |
+| New Rust backend: `cargo test --locked` | 11 passed |
 | New Rust: `cargo clippy --all-targets -- -D warnings` | Passed |
 | New Rust: `cargo fmt --check`, build | Passed |
 | Frontend: `bun typecheck` | Passed |
 | Frontend: `bun run test` | 5 passed |
 | Frontend: `bun run build` | Passed |
-| Browser: `bun run test:e2e` | 2 passed against an isolated real Rust server |
+| Browser: `bun run test:e2e` | 7 passed against isolated real Rust servers |
 
-Backend coverage includes authentication on every API route, encoded traversal, symlinks/FIFOs, filename/content limits, durable file reload/listing, stale-write rejection, default execution denial, bounded logs, and a deterministic child-process streaming/cancellation test. The process fixture makes no provider calls.
+Backend coverage includes authentication on every API route, encoded traversal, symlinks/FIFOs, filename/content limits, durable file reload/listing, stale-write rejection, default execution denial, bounded logs, and deterministic child-process tests for streaming/cancellation, build-size boundaries, launcher arguments, immutable snapshots, private permissions, cleanup, and exit status. The process fixtures make no provider calls.
 
 Browser coverage includes saved-file discovery, independent buffers, preserving edits when reopening an already-open file, close confirmation, desktop two-pane geometry, reload persistence, mobile overflow, default disabled execution, and conflicts between two browser pages.
 

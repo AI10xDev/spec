@@ -2,7 +2,7 @@
 
 A local-first **Rust backend + Vite / React / TypeScript frontend** for writing specifications and viewing build output side by side.
 
-This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The new application has no Bash, Python, or Bun runtime backend. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
+This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates to the existing external `spec` shell launcher. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
 
 ![The Vite workspace with saved files, two editor tabs, and the output pane](docs/workspace.png)
 
@@ -48,18 +48,22 @@ SPEC_WORKSPACE="$HOME/specs" ./run.sh
 
 The original shell function mirrors specs into `$HOME/specs`, so this can display those previously written files directly. **This edits the selected files in place.** Back them up first if needed. This version does not automatically read `~/.local/state/spec/saved-files` or traverse unrelated paths from that history. Nested folders, hidden files, symlinks, and non-UTF-8 files are not editable.
 
-### Optional OpenCode execution
+### Optional execution through `spec build`
 
-Execution is **off by default**. To enable it, first configure a trusted OpenCode CLI with your provider/model and permission policy, then start Rust with its absolute executable path:
+Execution is **off by default**. To enable it, configure your existing `spec` shell launcher and its OpenCode provider/model, then start Rust with the launcher’s absolute executable path (not the Rust web-server binary or an interactive shell function):
 
 ```sh
-# Replace the executable with the trusted CLI you intend to use.
-SPEC_OPENCODE=/absolute/path/to/opencode \
+# Use your installed spec shell launcher, not backend/target/release/spec.
+SPEC_COMMAND="$HOME/.local/bin/spec" \
 SPEC_WORKSPACE="$HOME/specs" \
 ./run.sh
 ```
 
-The adapter runs `opencode run --dir <workspace> --agent build` and supplies the saved spec on stdin. It does not use a shell, enable `--auto`, request `--thinking`, or launch a command on page load. **The chosen CLI may independently auto-approve actions.** Only run trusted specs. A run can change workspace files, execute tools, access the network, and incur provider costs under that CLI's policy. Configure those controls outside this editor; this UI is not a sandbox or permission-approval client.
+The adapter invokes `SPEC_BUILD_AUTO=1 /absolute/path/to/spec build <snapshot-file>` from the workspace. This selects the existing launcher's foreground branch, which forwards to `opencode run --auto --dir "$PWD" --agent build -- <prompt>`. **Automatic tool approval is enabled.** Only run trusted specs: the agent can modify files, execute tools, access the network, and incur provider costs. The UI asks for confirmation before each run, but is not a sandbox or a per-tool approval client.
+
+The saved revision is copied to a private temporary file (`0600`, in a `0700` directory), kept until the run ends and then removed. Later editor saves do not change the running input. The backend passes only the snapshot path as a literal argument—no shell command string or document interpolation—and captures stdout/stderr. Cancellation and the 15-minute timeout kill the process group. The launcher must remain in the foreground and propagate its exit status; a detached shell function is not supported.
+
+Build snapshots are limited to **120 KiB** because the existing launcher forwards the prompt as a single Linux process argument. Editing and saving still support 2 MiB. The launcher’s Bash command substitution strips trailing newlines from the prompt. `SPEC_OPENCODE` no longer enables web execution; migrate to `SPEC_COMMAND` and change the selected executable from OpenCode to the `spec` launcher. There is no implicit PATH lookup or shell-startup sourcing by the backend.
 
 The process adapter is tested with a deterministic local process fixture. No live provider calls were made during validation, so compatibility with a particular provider/CLI release must be checked separately.
 
@@ -81,7 +85,7 @@ Open the Vite URL and paste the Rust server's token into the connection form. Vi
 | `SPEC_WORKSPACE` | `../workspace` | File directory, relative to the backend process working directory |
 | `SPEC_PORT` | `4780` | Loopback HTTP port; `0` chooses an available port |
 | `SPEC_UI_DIR` | `../frontend/dist` | Built Vite assets, relative to process working directory |
-| `SPEC_OPENCODE` | unset | Absolute trusted executable; unset disables execution |
+| `SPEC_COMMAND` | unset | Absolute trusted `spec` shell launcher; unset disables execution; runs with `SPEC_BUILD_AUTO=1` |
 
 There are no credentials bundled in this repository and no automatic service installation. The existing `spec` shell alias is not modified. Run the new binary explicitly from `backend/target/release/spec` if the old shell function shadows its name.
 

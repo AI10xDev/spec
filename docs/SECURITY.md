@@ -26,9 +26,9 @@ Atomic replacement writes private `0600` files and does not preserve executable 
 
 ## Execution boundary
 
-Model execution is disabled unless the operator sets `SPEC_OPENCODE` to an absolute trusted executable. The API never accepts executable paths or arbitrary shell commands from the browser. Document text goes to stdin, not an argument or shell interpolation.
+Model execution is disabled unless the operator sets `SPEC_COMMAND` to an absolute trusted `spec` shell launcher. The API never accepts executable paths or arbitrary shell commands from the browser. The backend invokes the launcher directly with `build` and a private snapshot path as separate arguments, without shell interpolation. Snapshots use `0600` files in `0700` temporary directories and are removed after process cleanup (an abrupt server kill may leave a temporary snapshot). Build input is capped at 120 KiB because the existing launcher subsequently forwards the prompt as a single argument to OpenCode, after `--`; that argument may be visible to same-user process inspection. Bash command substitution in the launcher strips trailing newlines.
 
-The external CLI and its model tools run with the server user's privileges and inherited environment. Existing provider credentials and permission policies may be used. Some customized OpenCode binaries automatically approve tools. UI confirmation is disclosure, **not** a separate tool authorization boundary. No cloud keys are managed by the web app itself.
+The external CLI and its model tools run with the server user's privileges and inherited environment. Existing provider credentials and permission policies may be used. The adapter sets `SPEC_BUILD_AUTO=1` to keep the existing launcher in the foreground; that branch explicitly enables OpenCode `--auto` and automatic tool approval. UI confirmation is disclosure, **not** a separate tool authorization boundary. No cloud keys are managed by the web app itself.
 
 At most four processes run at once, one per filename. Cancellation/timeout terminates the owned process group; normal shutdown requests cancellation. Detached processes that create another group, fatal server crashes, SIGKILL, or machine failure can escape orderly cleanup. There is no durable process recovery, job registry across restarts, or automatic restart.
 

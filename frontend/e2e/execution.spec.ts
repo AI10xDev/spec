@@ -16,10 +16,10 @@ test.beforeAll(async () => {
   await mkdir(workspace, { mode: 0o700 })
   const executable = path.join(directory, "runner.cjs")
   await writeFile(executable, `#!${process.execPath}
-process.stdin.setEncoding("utf8")
-let content = ""
-process.stdin.on("data", (chunk) => { content += chunk })
-process.stdin.on("end", () => {
+const fs = require("node:fs")
+if (process.argv.length !== 4 || process.argv[2] !== "build" || process.env.SPEC_BUILD_AUTO !== "1") process.exit(90)
+const content = fs.readFileSync(process.argv[3], "utf8")
+{
   process.stdout.write("fixture stdout: " + content + "\\n")
   process.stderr.write("fixture stderr: " + content + "\\n")
   if (content.startsWith("WAIT\\n")) {
@@ -29,7 +29,7 @@ process.stdin.on("end", () => {
   } else {
     process.exitCode = content.startsWith("FAIL\\n") ? 7 : 0
   }
-})
+}
 `)
   await chmod(executable, 0o700)
   server = spawn(path.resolve("../backend/target/debug/spec"), [], {
@@ -39,7 +39,7 @@ process.stdin.on("end", () => {
       SPEC_WORKSPACE: workspace,
       SPEC_PORT: "0",
       SPEC_UI_DIR: path.resolve("dist"),
-      SPEC_OPENCODE: executable,
+      SPEC_COMMAND: executable,
     },
     stdio: ["ignore", "pipe", "ignore"],
   })
@@ -94,6 +94,7 @@ test("enabled execution: confirmation, saved snapshot, per-file polling, complet
   await run.click()
   expect((await confirmation).type()).toBe("confirm")
   expect((await confirmation).message()).toContain("incur provider costs")
+  expect((await confirmation).message()).toContain("Automatic tool approval is enabled")
   await expect(pane.getByText("Idle", { exact: true })).toBeVisible()
   await expect(editor).toHaveValue(snapshot)
   await expect(run).toBeEnabled()

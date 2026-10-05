@@ -14,7 +14,7 @@ test.beforeAll(async () => {
   directory = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "spec-e2e-"))
   server = spawn(path.resolve("../backend/target/debug/spec"), [], {
     cwd: path.resolve("../backend"),
-    env: { ...process.env, SPEC_WORKSPACE: directory, SPEC_PORT: "0", SPEC_UI_DIR: path.resolve("dist"), SPEC_OPENCODE: undefined },
+    env: { ...process.env, SPEC_WORKSPACE: directory, SPEC_PORT: "0", SPEC_UI_DIR: path.resolve("dist"), SPEC_COMMAND: undefined },
     stdio: ["ignore", "pipe", "pipe"],
   })
   url = await new Promise<string>((resolve, reject) => {

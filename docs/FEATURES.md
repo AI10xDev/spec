@@ -59,15 +59,15 @@ Limits: 2 MiB per UTF-8 file; no NUL bytes; filenames up to 180 UTF-8 bytes; no 
 
 ## 6. Save & run
 
-With `SPEC_OPENCODE` configured, **Save & run** becomes available:
+With `SPEC_COMMAND` set to the trusted `spec` shell launcher, **Save & run** becomes available:
 
 1. A confirmation warns about tools, filesystem changes, provider costs, and inherited permissions.
 2. The current buffer is saved.
-3. The server checks the saved revision and sends that snapshot on stdin to the trusted OpenCode executable.
+3. The server checks the saved revision and writes a private temporary snapshot, then invokes `SPEC_BUILD_AUTO=1 spec build <snapshot-file>` from the workspace. This foreground launcher enables automatic tool approval; the confirmation dialog discloses it. Build snapshots are limited to 120 KiB (saving still supports 2 MiB).
 4. The right pane follows output. Disable **Follow output** to keep your scroll position.
 5. **Stop run** requests cancellation of the owned Unix process group.
 
-A failure to launch is reported without claiming a run started. Process exit status is shown as completed or failed; completion means **CLI exit success**, not independent verification that generated software is correct. If writing the full prompt to stdin fails, the run does not report success.
+A failure to launch is reported without claiming a run started. Process exit status is shown as completed or failed; completion means **CLI exit success**, not independent verification that generated software is correct. Snapshot creation must succeed before launch; the snapshot is removed after process cleanup. The existing launcher strips trailing newlines when reading the prompt.
 
 ### Run limits and lifecycle
 

@@ -281,12 +281,119 @@ fn output_buffers_are_bounded() {
 }
 
 #[tokio::test]
+async fn build_size_limit_does_not_limit_saving() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = app(root.path());
+    // If validation regresses, spawning this nonexistent launcher will fail differently.
+    state.executable = Some(root.path().join("missing-launcher"));
+    let doc = save(
+        &state,
+        "large.md",
+        Save {
+            content: "x".repeat(MAX_BUILD_SPEC + 1),
+            revision: None,
+        },
+    )
+    .ok()
+    .unwrap();
+    let response = request(
+        state.clone(),
+        "POST",
+        "/api/runs",
+        serde_json::json!({"name":"large.md", "revision":doc.revision}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        json(response).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("120 KiB")
+    );
+    assert!(state.jobs.lock().unwrap().is_empty());
+    assert_eq!(
+        read(root.path(), "large.md").ok().unwrap().content,
+        doc.content
+    );
+}
+
+#[tokio::test]
+async fn build_exit_status_and_snapshot_cleanup() {
+    for exit_code in [0, 7] {
+        let root = tempfile::tempdir().unwrap();
+        let runner = root.path().join("spec launcher");
+        fs::write(
+            &runner,
+            format!(
+                "#!/bin/sh\n[ \"$#\" = 2 ] && [ \"$1\" = build ] && [ \"$SPEC_BUILD_AUTO\" = 1 ] || exit 90\nprintf '%s' \"$2\" > snapshot-path\ncat -- \"$2\" >/dev/null\nprintf 'stderr output' >&2\nexit {exit_code}\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut state = app(root.path());
+        state.executable = Some(runner);
+        let doc = save(
+            &state,
+            "a.md",
+            Save {
+                // The exact size limit must remain accepted.
+                content: "x".repeat(MAX_BUILD_SPEC),
+                revision: None,
+            },
+        )
+        .ok()
+        .unwrap();
+        let response = request(
+            state.clone(),
+            "POST",
+            "/api/runs",
+            serde_json::json!({"name":"a.md", "revision":doc.revision}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state.jobs.lock().unwrap()[0].status != "running" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let snapshot =
+            PathBuf::from(fs::read_to_string(root.path().join("snapshot-path")).unwrap());
+        assert!(!snapshot.parent().unwrap().exists());
+        let jobs = state.jobs.lock().unwrap();
+        assert_eq!(
+            jobs[0].status,
+            if exit_code == 0 {
+                "completed"
+            } else {
+                "failed (exit status: 7)"
+            }
+        );
+        let output = jobs[0].output.iter().copied().collect::<Vec<_>>();
+        assert!(String::from_utf8_lossy(&output).contains("stderr output"));
+    }
+}
+
+#[tokio::test]
 async fn run_streams_snapshot_and_can_be_cancelled() {
     let root = tempfile::tempdir().unwrap();
     // A local deterministic process fixture, never a model/provider call.
     let mut runner = tempfile::NamedTempFile::new().unwrap();
     runner
-        .write_all(b"#!/bin/sh\ncat\nprintf '\\nfixture-output\\n'\nsleep 60\n")
+        .write_all(
+            br#"#!/bin/sh
+[ "$#" = 2 ] && [ "$1" = build ] && [ "$SPEC_BUILD_AUTO" = 1 ] || exit 90
+printf '%s' "$2" > snapshot-path
+while [ ! -f ready ]; do sleep 0.02; done
+cat -- "$2"
+printf '\nfixture-output\n'
+sleep 60
+"#,
+        )
         .unwrap();
     runner
         .as_file()
@@ -299,7 +406,7 @@ async fn run_streams_snapshot_and_can_be_cancelled() {
         &state,
         "a.md",
         Save {
-            content: "snapshot".into(),
+            content: "snapshot\n$(touch injected); `touch injected`\n--help\n".into(),
             revision: None,
         },
     )
@@ -322,6 +429,8 @@ async fn run_streams_snapshot_and_can_be_cancelled() {
     )
     .await;
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    fs::write(root.path().join("a.md"), "changed after launch").unwrap();
+    fs::write(root.path().join("ready"), "").unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let response = json(
@@ -337,7 +446,7 @@ async fn run_streams_snapshot_and_can_be_cancelled() {
             if response["output"]
                 .as_str()
                 .unwrap()
-                .contains("snapshot\nfixture-output")
+                .contains(&format!("{}\nfixture-output", doc.content))
             {
                 break;
             }
@@ -346,6 +455,21 @@ async fn run_streams_snapshot_and_can_be_cancelled() {
     })
     .await
     .unwrap();
+    let snapshot = PathBuf::from(fs::read_to_string(root.path().join("snapshot-path")).unwrap());
+    assert_eq!(fs::read_to_string(&snapshot).unwrap(), doc.content);
+    assert_eq!(
+        fs::metadata(&snapshot).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(snapshot.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert!(!root.path().join("injected").exists());
     request(
         state.clone(),
         "POST",
@@ -363,4 +487,6 @@ async fn run_streams_snapshot_and_can_be_cancelled() {
     })
     .await
     .unwrap();
+    assert!(!snapshot.exists());
+    assert!(!snapshot.parent().unwrap().exists());
 }

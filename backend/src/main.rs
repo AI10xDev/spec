@@ -23,7 +23,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt},
     process::Command,
     sync::watch,
 };
@@ -31,6 +31,8 @@ use tower_http::services::ServeDir;
 use uuid::Uuid;
 
 const MAX_FILE: usize = 2 * 1024 * 1024;
+// The existing spec launcher forwards the prompt as one Linux exec argument.
+const MAX_BUILD_SPEC: usize = 120 * 1024;
 const MAX_OUTPUT: usize = 256 * 1024;
 
 #[derive(Clone)]
@@ -272,7 +274,7 @@ async fn drain(app: App, id: String, mut stream: impl AsyncRead + Unpin) {
 }
 
 async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<serde_json::Value>> {
-    let executable = app.executable.as_ref().ok_or_else(|| invalid("Execution is disabled. Set SPEC_OPENCODE to a trusted executable and restart the server."))?;
+    let executable = app.executable.as_ref().ok_or_else(|| invalid("Execution is disabled. Set SPEC_COMMAND to an absolute trusted spec launcher and restart the server."))?;
     let document = read(&app.root, &input.name)?;
     if document.revision != input.revision {
         return Err(Error(
@@ -283,6 +285,24 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
     if document.content.trim().is_empty() {
         return Err(invalid("Cannot run an empty spec"));
     }
+    if document.content.len() > MAX_BUILD_SPEC {
+        return Err(invalid(
+            "spec build supports snapshots up to 120 KiB; larger files can still be edited and saved",
+        ));
+    }
+    // Keep a private snapshot outside the editable workspace for the entire run.
+    let snapshot_dir = tempfile::Builder::new()
+        .prefix("spec-build-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()?;
+    let snapshot = snapshot_dir.path().join("snapshot.md");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&snapshot)?;
+    file.write_all(document.content.as_bytes())?;
+    drop(file);
     let id = Uuid::new_v4().to_string();
     let (stop, mut stopped) = watch::channel(false);
     {
@@ -310,16 +330,17 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
             stop,
         });
     }
-    // No shell, no --auto/--thinking. stdin carries an immutable snapshot, not a mutable file path.
+    // Execute the trusted shell launcher directly (no shell interpolation).
+    // Its AUTO mode stays in the foreground and forwards to the build agent with --auto.
     let child = Command::new(executable)
-        .args(["run", "--dir"])
-        .arg(&app.root)
-        .args(["--agent", "build"])
+        .arg("build")
+        .arg(&snapshot)
+        .env("SPEC_BUILD_AUTO", "1")
         .current_dir(&app.root)
         .process_group(0)
         .env_remove("SPEC_SESSION_DIR")
         .env_remove("KIBI_SPEC_SESSION")
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -332,7 +353,6 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
         }
     };
     let pid = child.id().unwrap();
-    let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let response = Json(serde_json::json!({ "id": id }));
@@ -340,14 +360,10 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
         append(
             &app,
             &id,
-            b"[started] Running the saved spec snapshot. Output and logs only.\n",
+            b"[started] spec build: running the saved snapshot with automatic tool approval. Output and logs only.\n",
         );
         let out = tokio::spawn(drain(app.clone(), id.clone(), stdout));
         let err = tokio::spawn(drain(app.clone(), id.clone(), stderr));
-        let mut writer = tokio::spawn(async move {
-            stdin.write_all(document.content.as_bytes()).await?;
-            stdin.shutdown().await
-        });
         let status = tokio::select! {
             result = child.wait() => match result {
                 Ok(exit) if exit.success() => "completed".to_owned(),
@@ -360,16 +376,7 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
         // Reap the process group, including tools which inherited stdout/stderr.
         let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
         let _ = child.wait().await;
-        let delivered = matches!(
-            tokio::time::timeout(Duration::from_secs(2), &mut writer).await,
-            Ok(Ok(Ok(())))
-        );
-        writer.abort();
-        let status = if status == "completed" && !delivered {
-            "failed (could not deliver the complete spec to stdin)".to_owned()
-        } else {
-            status
-        };
+        drop(snapshot_dir);
         for mut task in [out, err] {
             if tokio::time::timeout(Duration::from_secs(2), &mut task)
                 .await
@@ -454,11 +461,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     let _lock = nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusiveNonblock)
         .map_err(|(_, error)| format!("Workspace is already served: {error}"))?;
-    let executable = std::env::var_os("SPEC_OPENCODE").map(PathBuf::from);
+    let executable = std::env::var_os("SPEC_COMMAND").map(PathBuf::from);
     if let Some(path) = &executable
-        && (!path.is_absolute() || !path.is_file())
+        && (!path.is_absolute()
+            || !path.is_file()
+            || fs::metadata(path)?.permissions().mode() & 0o111 == 0)
     {
-        return Err("SPEC_OPENCODE must be an absolute executable file path".into());
+        return Err("SPEC_COMMAND must be an absolute executable spec launcher path".into());
     }
     let app = App {
         root,
@@ -479,7 +488,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("Workspace: {}", app.root.display());
     if app.executable.is_some() {
         eprintln!(
-            "WARNING: OpenCode runs with your user privileges and may auto-approve tools. Only run trusted specs."
+            "WARNING: spec build runs with SPEC_BUILD_AUTO=1 (automatic tool approval) and your user privileges. Only run trusted specs."
         );
     }
     let ui = std::env::var("SPEC_UI_DIR").unwrap_or_else(|_| "../frontend/dist".into());
