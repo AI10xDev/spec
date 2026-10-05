@@ -8,9 +8,36 @@ fn app(root: &FsPath) -> App {
     App {
         root: root.to_owned(),
         token: "test-token".into(),
-        executable: None,
+        remote: None,
         files: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(Vec::new())),
+    }
+}
+
+// Execute the actual fixed remote scripts locally, with an isolated HOME and a
+// fake spec alias. No SSH daemon, remote account, or model credentials are used.
+pub(super) fn remote_fixture(root: &FsPath, runner: &FsPath) -> Remote {
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\"'\"'"));
+    let binary = root.join("ssh-fixture");
+    fs::write(
+        &binary,
+        format!(
+            "#!/bin/bash\nexport HOME={}\nexec /bin/bash -c \"${{!#}}\"\n",
+            quote(root.to_str().unwrap())
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        root.join(".bash_aliases"),
+        format!("alias spec={}\n", quote(&quote(runner.to_str().unwrap()))),
+    )
+    .unwrap();
+    Remote {
+        binary,
+        target: "fixture@host".into(),
+        directory: root.to_str().unwrap().into(),
+        key: None,
     }
 }
 
@@ -285,7 +312,10 @@ async fn build_size_limit_does_not_limit_saving() {
     let root = tempfile::tempdir().unwrap();
     let mut state = app(root.path());
     // If validation regresses, spawning this nonexistent launcher will fail differently.
-    state.executable = Some(root.path().join("missing-launcher"));
+    state.remote = Some(remote_fixture(
+        root.path(),
+        &root.path().join("missing-launcher"),
+    ));
     let doc = save(
         &state,
         "large.md",
@@ -320,7 +350,10 @@ async fn build_size_limit_does_not_limit_saving() {
 #[tokio::test]
 async fn build_exit_status_and_snapshot_cleanup() {
     for exit_code in [0, 7] {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("spec ' $(no-injection) ")
+            .tempdir()
+            .unwrap();
         let runner = root.path().join("spec launcher");
         fs::write(
             &runner,
@@ -331,7 +364,7 @@ async fn build_exit_status_and_snapshot_cleanup() {
         .unwrap();
         fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
         let mut state = app(root.path());
-        state.executable = Some(runner);
+        state.remote = Some(remote_fixture(root.path(), &runner));
         let doc = save(
             &state,
             "a.md",
@@ -386,12 +419,14 @@ async fn run_streams_snapshot_and_can_be_cancelled() {
     runner
         .write_all(
             br#"#!/bin/sh
-[ "$#" = 2 ] && [ "$1" = build ] && [ "$SPEC_BUILD_AUTO" = 1 ] || exit 90
+[ "$#" = 2 ] && [ "$1" = build ] && [ "$SPEC_BUILD_AUTO" = 1 ] && [ "$SPEC_BUILD_FOREGROUND" = 1 ] || exit 90
 printf '%s' "$2" > snapshot-path
 while [ ! -f ready ]; do sleep 0.02; done
 cat -- "$2"
 printf '\nfixture-output\n'
-sleep 60
+sleep 60 &
+printf '%s' "$!" > descendant-pid
+wait
 "#,
         )
         .unwrap();
@@ -401,7 +436,7 @@ sleep 60
         .unwrap();
     let runner = runner.into_temp_path();
     let mut state = app(root.path());
-    state.executable = Some(runner.to_path_buf());
+    state.remote = Some(remote_fixture(root.path(), &runner));
     let doc = save(
         &state,
         "a.md",
@@ -487,6 +522,11 @@ sleep 60
     })
     .await
     .unwrap();
+    let descendant = fs::read_to_string(root.path().join("descendant-pid")).unwrap();
+    // A killed child may briefly be a zombie awaiting init's reaper.
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{descendant}/stat")) {
+        assert_eq!(stat.split(") ").nth(1).unwrap().chars().next(), Some('Z'));
+    }
     assert!(!snapshot.exists());
     assert!(!snapshot.parent().unwrap().exists());
 }

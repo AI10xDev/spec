@@ -54,7 +54,7 @@ The entire spec becomes a positional argument after `--agent build`, without `--
 
 **Recommendation:** use a documented stdin/file-input interface, or at minimum insert `--` and enforce a supported argument-size bound. Check parser behavior against each supported CLI release.
 
-**Current adapter:** invokes an explicitly configured `SPEC_COMMAND` launcher with `build` and a private saved-snapshot path. The backend never interpolates content into shell code. The existing launcher forwards the prompt as one argument after `--`, so builds are capped at 120 KiB and trailing newlines are stripped by Bash command substitution. See the execution contract in the README.
+**Current adapter:** invokes only remote `spec build` via a fixed SSH supervisor, with the web backend remaining local. Content travels over stdin into a private remote snapshot, never into shell code. Operator arguments are shell-quoted. Builds remain capped at 120 KiB for remote launchers that forward prompts as one argument. The installed alias must use `--` where needed; this adapter cannot repair an unsafe downstream CLI invocation. See the execution contract in the README.
 
 ### 5. Medium: line-delimited history cannot represent every allowed Unix path
 
@@ -74,7 +74,7 @@ The original integration explicitly documents that the selected local OpenCode C
 
 **Recommendation:** make execution an explicit opt-in, disclose the inherited policy, and enforce permissions/sandboxing in the execution engine or OS rather than in presentation code.
 
-**Current adapter:** disabled by default, trusted launcher path selected at server startup, confirmation before every UI run, and no shell interpolation by the backend. `SPEC_BUILD_AUTO=1` selects the existing launcher’s foreground build branch, which explicitly adds `--auto`. UI and startup warnings disclose automatic approval. The rewrite is not a sandbox.
+**Current adapter:** disabled until the local server has a trusted SSH target and remote directory. It sources trusted remote aliases, requests foreground mode and automatic approval, and confirms every UI run. No spec content is interpolated into shell code. The installed alias determines engine policy; the fixed `spec build` interface does not constrain the tools the build agent can run. The rewrite is not a sandbox.
 
 ## Positive observations
 
@@ -105,16 +105,16 @@ Executed on the development machine:
 | --- | --- |
 | Original editor: `cargo test save_` | 2 passed; other tests filtered |
 | Original OpenCode: selected run-spec/session/workflow tests | 49 passed, 1 skipped, 0 failed |
-| New Rust backend: `cargo test --locked` | 11 passed |
+| New Rust backend: `cargo test --locked` | 16 passed |
 | New Rust: `cargo clippy --all-targets -- -D warnings` | Passed |
 | New Rust: `cargo fmt --check`, build | Passed |
 | Frontend: `bun typecheck` | Passed |
 | Frontend: `bun run test` | 5 passed |
 | Frontend: `bun run build` | Passed |
-| Browser: `bun run test:e2e` | 7 passed against isolated real Rust servers |
+| Browser: `bun run test:e2e` | 8 passed against isolated real Rust servers |
 
-Backend coverage includes authentication on every API route, encoded traversal, symlinks/FIFOs, filename/content limits, durable file reload/listing, stale-write rejection, default execution denial, bounded logs, and deterministic child-process tests for streaming/cancellation, build-size boundaries, launcher arguments, immutable snapshots, private permissions, cleanup, and exit status. The process fixtures make no provider calls.
+Backend coverage includes authentication on every API route, encoded traversal, symlinks/FIFOs, filename/content limits, durable file reload/listing, stale-write rejection, default execution denial, bounded logs, and deterministic child-process tests for streaming/cancellation, build-size boundaries, launcher arguments, immutable snapshots, private permissions, cleanup, and exit status. SSH stand-ins run the actual remote scripts with isolated aliases/functions, testing SSH options, shell quoting, complete/truncated uploads, missing commands, remote snapshot cleanup, independent watchdog/connection-loss cleanup, and cancellation of descendants. They make no network or provider calls.
 
 Browser coverage includes saved-file discovery, independent buffers, preserving edits when reopening an already-open file, close confirmation, desktop two-pane geometry, reload persistence, mobile overflow, default disabled execution, and conflicts between two browser pages.
 
-No live model execution, full original-editor regression suite, cloud deployment, Windows behavior, power-loss simulation, exhaustive security audit, or external CLI/provider compatibility matrix was tested.
+No live SSH host or model execution, full original-editor regression suite, cloud deployment, Windows behavior, power-loss simulation, exhaustive security audit, or external CLI/provider compatibility matrix was tested.

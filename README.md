@@ -2,7 +2,7 @@
 
 A local-first **Rust backend + Vite / React / TypeScript frontend** for writing specifications and viewing build output side by side.
 
-This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates to the existing external `spec` shell launcher. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
+This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates over SSH to the remote `spec build` alias/function. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
 
 ![The Vite workspace with saved files, two editor tabs, and the output pane](docs/workspace.png)
 
@@ -48,71 +48,54 @@ SPEC_WORKSPACE="$HOME/specs" ./run.sh
 
 The original shell function mirrors specs into `$HOME/specs`, so this can display those previously written files directly. **This edits the selected files in place.** Back them up first if needed. This version does not automatically read `~/.local/state/spec/saved-files` or traverse unrelated paths from that history. Nested folders, hidden files, symlinks, and non-UTF-8 files are not editable.
 
-### Optional execution through `spec build`
+### Remote execution through `spec build` (local web server)
 
-Execution is **off by default**. To enable it, configure your existing `spec` shell launcher and its OpenCode provider/model, then start Rust with the launcher’s absolute executable path (not the Rust web-server binary or an interactive shell function):
+The **browser, Rust web backend, and editable workspace run on your local computer**. Only **`spec build <snapshot-file>` runs on the remote machine over SSH**. No remote web backend, HTTP port forwarding, or remote frontend build is needed.
+
+Execution is off until an SSH target and remote build directory are configured. On your **local computer**, start the app like this:
 
 ```sh
-# Use your installed spec shell launcher, not backend/target/release/spec.
-SPEC_COMMAND="$HOME/.local/bin/spec" \
+# One-time SSH setup: connect interactively and verify the host fingerprint
+# through a trusted channel before accepting it. Load an encrypted key into
+# ssh-agent if necessary; builds cannot prompt for passwords/passphrases.
+ssh -i "$HOME/.ssh/opencode-dev-aue_ed25519" opencode@4.197.157.17
+# Exit the remote shell, then run these commands LOCALLY:
+unset SPEC_COMMAND
+SPEC_SSH_TARGET="opencode@4.197.157.17" \
+SPEC_SSH_KEY="$HOME/.ssh/opencode-dev-aue_ed25519" \
+SPEC_SSH_WORKSPACE="/home/opencode/spec" \
 SPEC_WORKSPACE="$HOME/specs" \
 ./run.sh
 ```
 
-The adapter invokes `SPEC_BUILD_AUTO=1 /absolute/path/to/spec build <snapshot-file>` from the workspace. This selects the existing launcher's foreground branch, which forwards to `opencode run --auto --dir "$PWD" --agent build -- <prompt>`. **Automatic tool approval is enabled.** Only run trusted specs: the agent can modify files, execute tools, access the network, and incur provider costs. The UI asks for confirmation before each run, but is not a sandbox or a per-tool approval client.
+Adjust the host, local key path, and remote project directory for your environment. `SPEC_SSH_TARGET` also accepts a trusted host alias from your local SSH configuration (including its port/ProxyJump settings). Omit `SPEC_SSH_KEY` to use your SSH agent/default identities. Keep private keys **on the local computer**; never paste key contents into a spec or commit them. Builds use batch SSH with strict host-key checking, no TTY, no agent/X11 forwarding, and no port forwarding. Unknown hosts, inaccessible keys, and connection/authentication errors fail the run and appear in its output; they do not fall back to local execution.
 
-The saved revision is copied to a private temporary file (`0600`, in a `0700` directory), kept until the run ends and then removed. Later editor saves do not change the running input. The backend passes only the snapshot path as a literal argument—no shell command string or document interpolation—and captures stdout/stderr. Cancellation and the 15-minute timeout kill the process group. The launcher must remain in the foreground and propagate its exit status; a detached shell function is not supported.
+Open the full localhost URL printed by the **local** Rust server, including its token. **Save & run** first saves locally, then sends just that immutable spec snapshot over SSH. Other local project files are **not synced**. The remote build works in `SPEC_SSH_WORKSPACE`; its file changes remain remote. Prepare that remote checkout separately. `SPEC_WORKSPACE` is the local editor directory and is independent of the remote build directory.
 
-Build snapshots are limited to **120 KiB** because the existing launcher forwards the prompt as a single Linux process argument. Editing and saving still support 2 MiB. The launcher’s Bash command substitution strips trailing newlines from the prompt. `SPEC_OPENCODE` no longer enables web execution; migrate to `SPEC_COMMAND` and change the selected executable from OpenCode to the `spec` launcher. There is no implicit PATH lookup or shell-startup sourcing by the backend.
+#### Remote shell requirements
 
-The process adapter is tested with a deterministic local process fixture. No live provider calls were made during validation, so compatibility with a particular provider/CLI release must be checked separately.
+The remote machine needs Linux, Bash, `setsid`, standard coreutils, and a configured `spec` build alias/function (or shell launcher on PATH) with its engine/provider credentials. It does **not** need this Rust web server or Bun/Vite for the web UI.
 
-### Run on a remote shell over SSH
-
-In this setup, both the web backend and `spec build` run **on the remote machine**. SSH forwards the remote loopback web port to your computer; the backend itself does not launch SSH. `SPEC_SSH_KEY` is a client-side environment variable containing a **private-key file path**, not the key contents. It is not a backend configuration setting.
-
-On your local computer:
+The adapter explicitly sources the trusted remote **`~/.bash_aliases`** in noninteractive Bash with alias expansion enabled, then invokes only:
 
 ```sh
-export SPEC_SSH_KEY="$HOME/.ssh/opencode-dev-aue_ed25519"
-test -f "$SPEC_SSH_KEY" && test -r "$SPEC_SSH_KEY" || {
-  printf 'Set SPEC_SSH_KEY to an existing readable private-key file.\n' >&2
-  exit 1
-}
-ssh -i "$SPEC_SSH_KEY" -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:4780:127.0.0.1:4780 opencode@4.197.157.17
+export SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1
+spec build "$snapshot"
 ```
 
-On first connection, verify the displayed host-key fingerprint through a trusted channel before accepting it. Do not disable host-key verification. An encrypted key may require its passphrase or an SSH agent. Keep the private key on your local computer; do not copy it into this repository or paste it into a spec.
+If your alias/function is defined elsewhere, arrange for `~/.bash_aliases` to source its trusted definition and set the required engine PATH. Interactive `.bashrc` and login profiles are not loaded by the adapter; definitions guarded by an interactive-shell check will not work. The `spec` command must remain in the foreground, propagate its exit status, and accept an explicit snapshot filename. Do not resolve `spec` to the Rust web-server binary. The archived scripts are provenance, not installed configuration, and are not modified or automatically sourced.
 
-In the resulting **remote shell**, inspect and update the existing checkout (assumed to be `~/spec`):
+**Automatic tool approval is requested via `SPEC_BUILD_AUTO=1`.** The installed remote alias determines the actual engine and permission behavior; verify it supports the foreground contract. Assume builds can modify remote files, execute tools, access the network, and incur provider costs using remote credentials. The UI confirmation is not a sandbox or per-tool approval boundary.
 
-```sh
-cd "$HOME/spec"
-git status --short
-git remote -v
-git fetch origin
-git switch dev && git merge --ff-only origin/dev
-git log -3 --oneline
-git rev-list --left-right --count HEAD...origin/dev
-git ls-files -- backend_.md
-```
+#### Snapshot and cancellation contract
 
-Review local changes before updating. If Git reports a conflict, divergence, or a failed update, stop and resolve it without discarding local work. The revision-count command should print `0 0` when the checkout matches `origin/dev`; `git ls-files -- backend_.md` should print nothing. Do not stage `backend_.md` or its output files. Updating and running an already-pushed checkout requires no new commit.
+Snapshot text is sent as data over SSH stdin, never interpolated into shell code or included in the SSH command line. The fixed remote supervisor writes a `0600` snapshot in a `0700` temporary directory. It removes the snapshot after build completion or orderly cancellation. Later local saves do not change the running input.
 
-Then validate and start the app on the remote machine:
+**Stop run**, local timeout, and normal server shutdown close the SSH input lease. The remote supervisor then kills the build's process group and removes its snapshot. There is also an independent remote 15-minute watchdog for a stalled/lost connection. Network failures may prevent immediate cleanup confirmation; detached processes that create separate groups and remote machine failures remain outside this guarantee. Output/status are in-memory only. Exit success means the CLI completed, not that its generated changes were verified.
 
-```sh
-(cd backend && cargo fmt --check && cargo test --locked) && \
-SPEC_COMMAND="$HOME/.local/bin/spec" \
-SPEC_WORKSPACE="$HOME/specs" \
-SPEC_PORT=4780 \
-./run.sh
-```
+Builds are capped at **120 KiB** because some existing launchers forward the prompt as one Linux process argument. Editing/saving support 2 MiB. Remote launchers using Bash command substitution may strip trailing newlines and must use an end-of-options separator when passing prompts to their engine.
 
-The remote machine needs the quick-start dependencies, an executable `spec` shell launcher at the selected path, and its configured OpenCode engine/provider. Adjust `SPEC_COMMAND` if installed elsewhere; do not point it at the Rust web-server binary. The remote shell's `PATH` must include the launcher's `opencode` executable. Builds enable **automatic tool approval** and use remote credentials, files, and network access.
-
-Keep SSH open and open the server's printed `http://127.0.0.1:4780/#token=…` URL in your **local browser**. Click **Save & run** to execute the saved spec remotely. Ctrl+C stops the server; exiting SSH closes the tunnel. Local port 4780 must be free, and SSH forwarding must be allowed by the remote server. This is a foreground session, not a persistent deployment.
+`SPEC_COMMAND` and local build execution have been removed: unset the old variable and use the SSH settings above. No model credentials are needed locally for editing or SSH builds. Validation uses an isolated SSH stand-in running the actual remote supervisor and alias scripts; no live SSH host or provider call is required by tests.
 
 ### Frontend development
 
@@ -132,7 +115,10 @@ Open the Vite URL and paste the Rust server's token into the connection form. Vi
 | `SPEC_WORKSPACE` | `../workspace` | File directory, relative to the backend process working directory |
 | `SPEC_PORT` | `4780` | Loopback HTTP port; `0` chooses an available port |
 | `SPEC_UI_DIR` | `../frontend/dist` | Built Vite assets, relative to process working directory |
-| `SPEC_COMMAND` | unset | Absolute trusted `spec` shell launcher; unset disables execution; runs with `SPEC_BUILD_AUTO=1` |
+| `SPEC_SSH_TARGET` | unset | Trusted `user@host` or SSH host alias; enables remote builds together with `SPEC_SSH_WORKSPACE` |
+| `SPEC_SSH_WORKSPACE` | unset | Existing absolute remote build directory; not the local editor workspace; no `~` expansion |
+| `SPEC_SSH_KEY` | unset | Optional absolute **local** private-key file path; otherwise use SSH agent/default identities |
+| `SPEC_SSH_BINARY` | `/usr/bin/ssh` | Absolute trusted local SSH client executable (also used for test stand-ins) |
 
 There are no credentials bundled in this repository and no automatic service installation. The existing `spec` shell alias is not modified. Run the new binary explicitly from `backend/target/release/spec` if the old shell function shadows its name.
 
@@ -156,7 +142,7 @@ bunx playwright install chromium
 bun run test:e2e
 ```
 
-Browser tests start isolated real Rust servers and temporary workspaces. They cover authentication, saved files, tabs, conflicts/downloads, in-flight saves, desktop/mobile layouts, and execution streaming/completion/cancellation/failure using a local process fixture. They never use your specs or invoke a model. Screenshots are written under `frontend/test-results/`, not over the documentation image. See [validation results](docs/REVIEW.md#validation).
+Browser tests start isolated real Rust servers and temporary workspaces. They cover authentication, saved files, tabs, conflicts/downloads, in-flight saves, desktop/mobile layouts, and remote-build streaming/completion/cancellation/failure using a local SSH stand-in and the actual fixed remote scripts. They never use your specs or invoke a model. Screenshots are written under `frontend/test-results/`, not over the documentation image. See [validation results](docs/REVIEW.md#validation).
 
 ## Repository layout and scope
 

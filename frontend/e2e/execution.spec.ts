@@ -14,10 +14,13 @@ test.beforeAll(async () => {
   directory = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "spec-execution-e2e-"))
   workspace = path.join(directory, "workspace")
   await mkdir(workspace, { mode: 0o700 })
+  const remoteWorkspace = path.join(directory, "remote-project")
+  await mkdir(remoteWorkspace, { mode: 0o700 })
   const executable = path.join(directory, "runner.cjs")
   await writeFile(executable, `#!${process.execPath}
 const fs = require("node:fs")
-if (process.argv.length !== 4 || process.argv[2] !== "build" || process.env.SPEC_BUILD_AUTO !== "1") process.exit(90)
+if (process.cwd() !== ${JSON.stringify(remoteWorkspace)}) process.exit(91)
+if (process.argv.length !== 4 || process.argv[2] !== "build" || process.env.SPEC_BUILD_AUTO !== "1" || process.env.SPEC_BUILD_FOREGROUND !== "1") process.exit(90)
 const content = fs.readFileSync(process.argv[3], "utf8")
 {
   process.stdout.write("fixture stdout: " + content + "\\n")
@@ -32,6 +35,14 @@ const content = fs.readFileSync(process.argv[3], "utf8")
 }
 `)
   await chmod(executable, 0o700)
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'"
+  const ssh = path.join(directory, "ssh-fixture")
+  await writeFile(ssh, `#!/bin/bash
+export HOME=${quote(directory)}
+exec /bin/bash -c "\${!#}"
+`)
+  await chmod(ssh, 0o700)
+  await writeFile(path.join(directory, ".bash_aliases"), `alias spec=${quote(quote(executable))}\n`)
   server = spawn(path.resolve("../backend/target/debug/spec"), [], {
     cwd: path.resolve("../backend"),
     env: {
@@ -39,7 +50,11 @@ const content = fs.readFileSync(process.argv[3], "utf8")
       SPEC_WORKSPACE: workspace,
       SPEC_PORT: "0",
       SPEC_UI_DIR: path.resolve("dist"),
-      SPEC_COMMAND: executable,
+      SPEC_COMMAND: undefined,
+      SPEC_SSH_TARGET: "fixture@host",
+      SPEC_SSH_WORKSPACE: remoteWorkspace,
+      SPEC_SSH_BINARY: ssh,
+      SPEC_SSH_KEY: undefined,
     },
     stdio: ["ignore", "pipe", "ignore"],
   })
@@ -94,7 +109,7 @@ test("enabled execution: confirmation, saved snapshot, per-file polling, complet
   await run.click()
   expect((await confirmation).type()).toBe("confirm")
   expect((await confirmation).message()).toContain("incur provider costs")
-  expect((await confirmation).message()).toContain("Automatic tool approval is enabled")
+  expect((await confirmation).message()).toContain("Automatic tool approval is requested")
   await expect(pane.getByText("Idle", { exact: true })).toBeVisible()
   await expect(editor).toHaveValue(snapshot)
   await expect(run).toBeEnabled()

@@ -23,12 +23,14 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::Command,
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     sync::watch,
 };
 use tower_http::services::ServeDir;
 use uuid::Uuid;
+
+mod remote;
+use remote::Remote;
 
 const MAX_FILE: usize = 2 * 1024 * 1024;
 // The existing spec launcher forwards the prompt as one Linux exec argument.
@@ -39,7 +41,7 @@ const MAX_OUTPUT: usize = 256 * 1024;
 struct App {
     root: PathBuf,
     token: String,
-    executable: Option<PathBuf>,
+    remote: Option<Remote>,
     files: Arc<Mutex<()>>,
     jobs: Arc<Mutex<Vec<Job>>>,
 }
@@ -274,7 +276,7 @@ async fn drain(app: App, id: String, mut stream: impl AsyncRead + Unpin) {
 }
 
 async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<serde_json::Value>> {
-    let executable = app.executable.as_ref().ok_or_else(|| invalid("Execution is disabled. Set SPEC_COMMAND to an absolute trusted spec launcher and restart the server."))?;
+    let remote = app.remote.as_ref().ok_or_else(|| invalid("Remote execution is disabled. Set SPEC_SSH_TARGET and SPEC_SSH_WORKSPACE on the local Rust server, then restart it."))?;
     let document = read(&app.root, &input.name)?;
     if document.revision != input.revision {
         return Err(Error(
@@ -290,19 +292,6 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
             "spec build supports snapshots up to 120 KiB; larger files can still be edited and saved",
         ));
     }
-    // Keep a private snapshot outside the editable workspace for the entire run.
-    let snapshot_dir = tempfile::Builder::new()
-        .prefix("spec-build-")
-        .permissions(fs::Permissions::from_mode(0o700))
-        .tempdir()?;
-    let snapshot = snapshot_dir.path().join("snapshot.md");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&snapshot)?;
-    file.write_all(document.content.as_bytes())?;
-    drop(file);
     let id = Uuid::new_v4().to_string();
     let (stop, mut stopped) = watch::channel(false);
     {
@@ -330,17 +319,12 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
             stop,
         });
     }
-    // Execute the trusted shell launcher directly (no shell interpolation).
-    // Its AUTO mode stays in the foreground and forwards to the build agent with --auto.
-    let child = Command::new(executable)
-        .arg("build")
-        .arg(&snapshot)
-        .env("SPEC_BUILD_AUTO", "1")
+    // Only the fixed remote spec-build adapter is exposed by this API.
+    let child = remote
+        .command(document.content.len())
         .current_dir(&app.root)
         .process_group(0)
-        .env_remove("SPEC_SESSION_DIR")
-        .env_remove("KIBI_SPEC_SESSION")
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -352,6 +336,7 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
             return Err(error.into());
         }
     };
+    let mut stdin = child.stdin.take().unwrap();
     let pid = child.id().unwrap();
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -360,8 +345,14 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
         append(
             &app,
             &id,
-            b"[started] spec build: running the saved snapshot with automatic tool approval. Output and logs only.\n",
+            b"[started] remote spec build over SSH: running the saved snapshot with automatic tool approval requested. Output and logs only.\n",
         );
+        // Keep stdin open after upload as a lease. Closing it asks the remote
+        // supervisor to kill the build group and remove its private snapshot.
+        let upload = tokio::spawn(async move {
+            stdin.write_all(document.content.as_bytes()).await?;
+            std::future::pending::<std::io::Result<()>>().await
+        });
         let out = tokio::spawn(drain(app.clone(), id.clone(), stdout));
         let err = tokio::spawn(drain(app.clone(), id.clone(), stderr));
         let status = tokio::select! {
@@ -373,10 +364,18 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
             _ = stopped.changed() => "cancelled".into(),
             _ = tokio::time::sleep(Duration::from_secs(15 * 60)) => "timed out".into(),
         };
-        // Reap the process group, including tools which inherited stdout/stderr.
+        upload.abort();
+        let _ = upload.await;
+        // Allow EOF to reach the remote supervisor before terminating SSH.
+        if tokio::time::timeout(Duration::from_secs(3), child.wait())
+            .await
+            .is_err()
+        {
+            append(&app, &id, b"\n[warning] SSH did not confirm cleanup; the remote 15-minute watchdog remains the fallback.\n");
+        }
+        // Reap the local SSH process group as well.
         let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
         let _ = child.wait().await;
-        drop(snapshot_dir);
         for mut task in [out, err] {
             if tokio::time::timeout(Duration::from_secs(2), &mut task)
                 .await
@@ -426,7 +425,7 @@ fn router(app: App) -> Router {
         .route(
             "/api/config",
             get(|State(app): State<App>| async move {
-                Json(serde_json::json!({"execution": app.executable.is_some()}))
+                Json(serde_json::json!({"execution": app.remote.is_some()}))
             }),
         )
         .route("/api/files", get(list))
@@ -461,18 +460,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     let _lock = nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusiveNonblock)
         .map_err(|(_, error)| format!("Workspace is already served: {error}"))?;
-    let executable = std::env::var_os("SPEC_COMMAND").map(PathBuf::from);
-    if let Some(path) = &executable
-        && (!path.is_absolute()
-            || !path.is_file()
-            || fs::metadata(path)?.permissions().mode() & 0o111 == 0)
-    {
-        return Err("SPEC_COMMAND must be an absolute executable spec launcher path".into());
-    }
+    let remote = Remote::from_env()?;
     let app = App {
         root,
         token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
-        executable,
+        remote,
         files: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(Vec::new())),
     };
@@ -486,9 +478,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         app.token
     );
     println!("Workspace: {}", app.root.display());
-    if app.executable.is_some() {
+    if app.remote.is_some() {
         eprintln!(
-            "WARNING: spec build runs with SPEC_BUILD_AUTO=1 (automatic tool approval) and your user privileges. Only run trusted specs."
+            "WARNING: SSH spec build requests automatic tool approval (SPEC_BUILD_AUTO=1) with remote user privileges. Only run trusted specs."
         );
     }
     let ui = std::env::var("SPEC_UI_DIR").unwrap_or_else(|_| "../frontend/dist".into());
@@ -510,7 +502,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             for job in app.jobs.lock().unwrap().iter() {
                 let _ = job.stop.send(true);
             }
-            for _ in 0..60 {
+            for _ in 0..100 {
                 if !app
                     .jobs
                     .lock()
@@ -529,3 +521,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod remote_tests;

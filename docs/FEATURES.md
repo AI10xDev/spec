@@ -59,15 +59,15 @@ Limits: 2 MiB per UTF-8 file; no NUL bytes; filenames up to 180 UTF-8 bytes; no 
 
 ## 6. Save & run
 
-With `SPEC_COMMAND` set to the trusted `spec` shell launcher, **Save & run** becomes available:
+With `SPEC_SSH_TARGET` and `SPEC_SSH_WORKSPACE` set on the **local** Rust server, **Save & run** becomes available. The web backend stays local; only builds run remotely:
 
 1. A confirmation warns about tools, filesystem changes, provider costs, and inherited permissions.
 2. The current buffer is saved.
-3. The server checks the saved revision and writes a private temporary snapshot, then invokes `SPEC_BUILD_AUTO=1 spec build <snapshot-file>` from the workspace. This foreground launcher enables automatic tool approval; the confirmation dialog discloses it. Build snapshots are limited to 120 KiB (saving still supports 2 MiB).
+3. The local server checks the saved revision and uploads an immutable snapshot over SSH. A fixed remote supervisor writes a private temporary snapshot, sources the remote `~/.bash_aliases`, and invokes `spec build <snapshot-file>` in the remote build directory with `SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1`. Automatic approval is requested; actual policy depends on the installed alias. Builds are limited to 120 KiB (local saving still supports 2 MiB). Other local files are not synced, and build changes remain remote.
 4. The right pane follows output. Disable **Follow output** to keep your scroll position.
-5. **Stop run** requests cancellation of the owned Unix process group.
+5. **Stop run** closes the SSH input lease to request remote process-group cancellation and snapshot cleanup.
 
-A failure to launch is reported without claiming a run started. Process exit status is shown as completed or failed; completion means **CLI exit success**, not independent verification that generated software is correct. Snapshot creation must succeed before launch; the snapshot is removed after process cleanup. The existing launcher strips trailing newlines when reading the prompt.
+A failure to launch the local SSH client is reported immediately. SSH connection/authentication failures and remote startup errors appear in the run output as failures. Process exit status is shown as completed or failed; completion means **CLI exit success**, not independent verification that generated software is correct. Snapshot creation must succeed before launch; the snapshot is removed after process cleanup. Some remote launchers strip trailing newlines when reading the prompt.
 
 ### Run limits and lifecycle
 
@@ -75,7 +75,7 @@ A failure to launch is reported without claiming a run started. Process exit sta
 - Latest 256 KiB of output per retained run. Truncation is explicitly indicated.
 - At most 32 runs retained server-side; oldest finished runs are evicted.
 - Polling approximately every 650 ms for the visible active run; slower retry on fetch errors.
-- Fifteen-minute timeout, then process-group termination.
+- Fifteen-minute local timeout and an independent remote watchdog. Network loss may delay cleanup confirmation.
 - Ctrl+C/SIGTERM requests cancellation before normal server shutdown.
 - Closing a browser page does not stop execution.
 - Runs/output are **in-memory**. Browser reload loses run associations; server restart loses run records/output. No durable transcript, replay, session steering, or crash recovery is implemented.
@@ -89,7 +89,7 @@ A failure to launch is reported without claiming a run started. Process exit sta
 | One visible spec at a time | Multiple independent editor tabs |
 | Newline-delimited save history | Workspace file listing with filtering and timestamps |
 | Spec/output split | Desktop two-pane view; stacked mobile view |
-| Background shell build | Opt-in Rust-owned process with bounded output and cancellation |
+| Background shell build | Opt-in remote foreground build over SSH; local web server, bounded output, cancellation |
 | Basename mirror saves | No mirroring; saves only the named workspace file |
 | Persistent V2 session inbox | Not ported; one-shot runs only |
 | Azure inline completion/filename ranking | Not ported |
