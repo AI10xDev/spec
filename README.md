@@ -22,17 +22,17 @@ Read the [complete feature guide](docs/FEATURES.md), [code review](docs/REVIEW.m
 
 ## Quick start
 
-Requirements: Linux, Rust/Cargo (tested with 1.98), and Bun (tested with 1.3.14). Bun is used for frontend dependency management/building only. The backend uses Unix file locking and process groups; Windows is not supported by this version.
+Requirements: Linux, Rust/Cargo (tested with 1.98), and Bun (tested with 1.3.14) or Node.js 22.12+ with npm. Bun is recommended for reproducible frontend installs using `bun.lock`; the launcher's npm fallback does not use that lockfile. These tools are used for frontend dependency management/building only. The backend uses Unix file locking and process groups; Windows is not supported by this version.
 
 ```sh
 git clone https://github.com/ai10xdev/spec.git
-cd spec/frontend
-bun install --frozen-lockfile
-bun run build
-
-cd ../backend
-cargo run --release --locked
+cd spec
+./run.sh
 ```
+
+`run.sh` installs frontend dependencies, typechecks/builds the UI, and starts the release Rust server. It can be invoked from any working directory and honors the configuration variables below; relative workspace/UI paths are resolved from `backend/`. Stop it with Ctrl+C.
+
+New workspace directories are private. If an existing workspace is writable by group/others, startup stops without changing its permissions. Choose another trusted directory or explicitly run `chmod go-w -- /path/to/workspace` before retrying.
 
 Open the **full URL printed by the server**, including `#token=…`. Production frontend assets are served by Rust from `frontend/dist`; there is no separate frontend server to start. The default address is `http://127.0.0.1:4780` and the default file workspace is `workspace/` at the repository root. Keep the printed token private.
 
@@ -40,10 +40,10 @@ Create `idea.md` in the left sidebar, enter text, and click **Save**. It now app
 
 ### Use existing specs
 
-From `backend/`, select an existing **trusted, flat directory**:
+From the repository root, select an existing **trusted, flat directory**:
 
 ```sh
-SPEC_WORKSPACE="$HOME/specs" cargo run --release --locked
+SPEC_WORKSPACE="$HOME/specs" ./run.sh
 ```
 
 The original shell function mirrors specs into `$HOME/specs`, so this can display those previously written files directly. **This edits the selected files in place.** Back them up first if needed. This version does not automatically read `~/.local/state/spec/saved-files` or traverse unrelated paths from that history. Nested folders, hidden files, symlinks, and non-UTF-8 files are not editable.
@@ -56,7 +56,7 @@ Execution is **off by default**. To enable it, first configure a trusted OpenCod
 # Replace the executable with the trusted CLI you intend to use.
 SPEC_OPENCODE=/absolute/path/to/opencode \
 SPEC_WORKSPACE="$HOME/specs" \
-cargo run --release --locked
+./run.sh
 ```
 
 The adapter runs `opencode run --dir <workspace> --agent build` and supplies the saved spec on stdin. It does not use a shell, enable `--auto`, request `--thinking`, or launch a command on page load. **The chosen CLI may independently auto-approve actions.** Only run trusted specs. A run can change workspace files, execute tools, access the network, and incur provider costs under that CLI's policy. Configure those controls outside this editor; this UI is not a sandbox or permission-approval client.
@@ -105,13 +105,14 @@ bunx playwright install chromium
 bun run test:e2e
 ```
 
-Browser tests start an isolated real Rust server and temporary workspace. They never use your specs or invoke a model. See [validation results](docs/REVIEW.md#validation).
+Browser tests start isolated real Rust servers and temporary workspaces. They cover authentication, saved files, tabs, conflicts/downloads, in-flight saves, desktop/mobile layouts, and execution streaming/completion/cancellation/failure using a local process fixture. They never use your specs or invoke a model. Screenshots are written under `frontend/test-results/`, not over the documentation image. See [validation results](docs/REVIEW.md#validation).
 
 ## Repository layout and scope
 
 ```text
 backend/       New Rust HTTP API, filesystem layer, process runner, tests
 frontend/      New Vite + React TypeScript UI, unit and browser tests
+run.sh         Build the frontend and launch the Rust server
 docs/          Feature guide, review, security notes, screenshot
 archive/       Original source collection and license notices (not executed or bundled)
 workspace/     Local user files (created at runtime; gitignored)
