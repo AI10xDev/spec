@@ -67,6 +67,53 @@ Build snapshots are limited to **120 KiB** because the existing launcher forward
 
 The process adapter is tested with a deterministic local process fixture. No live provider calls were made during validation, so compatibility with a particular provider/CLI release must be checked separately.
 
+### Run on a remote shell over SSH
+
+In this setup, both the web backend and `spec build` run **on the remote machine**. SSH forwards the remote loopback web port to your computer; the backend itself does not launch SSH. `SPEC_SSH_KEY` is a client-side environment variable containing a **private-key file path**, not the key contents. It is not a backend configuration setting.
+
+On your local computer:
+
+```sh
+export SPEC_SSH_KEY="$HOME/.ssh/opencode-dev-aue_ed25519"
+test -f "$SPEC_SSH_KEY" && test -r "$SPEC_SSH_KEY" || {
+  printf 'Set SPEC_SSH_KEY to an existing readable private-key file.\n' >&2
+  exit 1
+}
+ssh -i "$SPEC_SSH_KEY" -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:4780:127.0.0.1:4780 opencode@4.197.157.17
+```
+
+On first connection, verify the displayed host-key fingerprint through a trusted channel before accepting it. Do not disable host-key verification. An encrypted key may require its passphrase or an SSH agent. Keep the private key on your local computer; do not copy it into this repository or paste it into a spec.
+
+In the resulting **remote shell**, inspect and update the existing checkout (assumed to be `~/spec`):
+
+```sh
+cd "$HOME/spec"
+git status --short
+git remote -v
+git fetch origin
+git switch dev && git merge --ff-only origin/dev
+git log -3 --oneline
+git rev-list --left-right --count HEAD...origin/dev
+git ls-files -- backend_.md
+```
+
+Review local changes before updating. If Git reports a conflict, divergence, or a failed update, stop and resolve it without discarding local work. The revision-count command should print `0 0` when the checkout matches `origin/dev`; `git ls-files -- backend_.md` should print nothing. Do not stage `backend_.md` or its output files. Updating and running an already-pushed checkout requires no new commit.
+
+Then validate and start the app on the remote machine:
+
+```sh
+(cd backend && cargo fmt --check && cargo test --locked) && \
+SPEC_COMMAND="$HOME/.local/bin/spec" \
+SPEC_WORKSPACE="$HOME/specs" \
+SPEC_PORT=4780 \
+./run.sh
+```
+
+The remote machine needs the quick-start dependencies, an executable `spec` shell launcher at the selected path, and its configured OpenCode engine/provider. Adjust `SPEC_COMMAND` if installed elsewhere; do not point it at the Rust web-server binary. The remote shell's `PATH` must include the launcher's `opencode` executable. Builds enable **automatic tool approval** and use remote credentials, files, and network access.
+
+Keep SSH open and open the server's printed `http://127.0.0.1:4780/#token=…` URL in your **local browser**. Click **Save & run** to execute the saved spec remotely. Ctrl+C stops the server; exiting SSH closes the tunnel. Local port 4780 must be free, and SSH forwarding must be allowed by the remote server. This is a foreground session, not a persistent deployment.
+
 ### Frontend development
 
 Keep the Rust server on its default port, then in a second terminal:
