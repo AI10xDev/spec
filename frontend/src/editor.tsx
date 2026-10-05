@@ -77,6 +77,7 @@ export function Editor({ name, value: content, token, available, enabled, onEnab
     if (!document.execCommand("insertText", false, suffix)) node.setRangeText(suffix, selection.start, selection.end, "end")
     onChange(node.value)
     select()
+    setDismissed(true)
     setSuggestion({ value: "", start: 0, suffix: "" })
   }
 
@@ -86,7 +87,8 @@ export function Editor({ name, value: content, token, available, enabled, onEnab
         <input type="checkbox" checked={available && enabled} disabled={!available} onChange={(event) => onEnabled(event.target.checked)} /> Trailing completions
       </label>
       <span id="completion-help" aria-live="polite">{!available ? "Azure not configured" : suffix ? "Tab to accept part / Esc to dismiss" : message || "One sentence part at a time"}</span>
-      {suffix && <button onPointerDown={(event) => event.preventDefault()} onClick={accept} title={suffix}>Accept part</button>}
+      {/* Reserve space so showing acceptance does not shrink a scrolled editor. */}
+      <button style={{ visibility: suffix ? "visible" : "hidden" }} disabled={!suffix} onPointerDown={(event) => event.preventDefault()} onClick={accept} title={suffix}>Accept part</button>
     </div>
     <div className="editor-input">
       <div ref={mirror} className="code completion-mirror" aria-hidden="true">

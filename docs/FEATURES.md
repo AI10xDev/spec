@@ -39,7 +39,7 @@ On desktop, **Spec** occupies the left pane and **Output & logs** the right. Bot
 
 The spec editor is a plain UTF-8 textarea with spellcheck disabled. It supports native text selection, clipboard operations, and browser textarea undo. It is not Monaco, an IDE, a terminal emulator, or a syntax-aware language server.
 
-With [Azure completion configured](../README.md#trailing-sentence-part-completions), **Trailing completions** offers muted ghost text after 500 ms idle at a line's end. It completes the current word or sentence part, stopping at the first clause/sentence boundary, up to 160 characters. Press **Tab** or click **Accept part** to insert it; press **Escape** to dismiss until the next edit. Continue typing after a boundary for the next part. The toggle disables provider requests across editor tabs; editing works without any provider configuration.
+With [Azure completion configured](../README.md#trailing-sentence-part-completions), **Trailing completions** offers muted ghost text after 500 ms idle at a line's end. It completes the current word or sentence part, stopping at the first clause/sentence boundary, up to 160 characters. Press **Tab** or click **Accept part** to insert it; press **Escape** to dismiss until the next edit. Acceptance also waits for the next edit before suggesting another part, even without final punctuation. The toggle disables provider requests across editor tabs; editing works without any provider configuration.
 
 Suggestions never modify saved/downloaded text until accepted. Selection, composition, blur, and tab switches clear them; stale requests cannot replace a newer suggestion. Existing text after the caret on the same line suppresses completion. The ghost stays on one visual line, clipped to the pane; its full suffix is in the Accept part tooltip. Native undo includes accepted text in supported browsers; browsers without `insertText` support use a direct insertion fallback. Provider errors appear beside the toggle, without blocking saves or launching a build.
 
@@ -69,20 +69,20 @@ With `SPEC_SSH_TARGET` and `SPEC_SSH_WORKSPACE` set on the **local** Rust server
 2. The current buffer is saved.
 3. The local server checks the saved revision and uploads an immutable snapshot over SSH. A fixed remote supervisor writes a private temporary snapshot, sources the remote `~/.bash_aliases`, and invokes `spec build <snapshot-file>` in the remote build directory with `SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1`. It also exports `OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1 OPENCODE_QUESTION_AUTO_RECOMMEND=1` and clears persistent-session variables. Automatic approval and recommended question answers are requested to minimize runtime prompting; actual behavior depends on the installed alias/engine. Unsupported questions are not blindly answered. Builds are limited to 120 KiB (local saving still supports 2 MiB). Other local files are not synced, and build changes remain remote.
 4. The right pane follows output. Disable **Follow output** to keep your scroll position.
-5. **Stop run** closes the SSH input lease to request remote process-group cancellation and snapshot cleanup.
+5. **Stop run** sends an explicit control byte to request remote process-group cancellation and snapshot cleanup. EOF or SSH disconnect only detaches the log viewer.
 
 A failure to launch the local SSH client is reported immediately. SSH connection/authentication failures and remote startup errors appear in the run output as failures. Process exit status is shown as completed or failed; completion means **CLI exit success**, not independent verification that generated software is correct. Snapshot creation must succeed before launch; the snapshot is removed after process cleanup. Some remote launchers strip trailing newlines when reading the prompt.
 
 ### Run limits and lifecycle
 
-- At most one active run per filename and four active runs in total.
+- At most one attached active run per filename and four attached active runs in total; detached remote builds do not count toward these local limits.
 - Latest 256 KiB of output per retained run. Truncation is explicitly indicated.
 - At most 32 runs retained server-side; oldest finished runs are evicted.
 - Polling approximately every 650 ms for the visible active run; slower retry on fetch errors.
-- Fifteen-minute local timeout and an independent remote watchdog. Network loss may delay cleanup confirmation.
-- Ctrl+C/SIGTERM requests cancellation before normal server shutdown.
+- An independent fifteen-minute remote watchdog survives disconnect. The local attachment times out fifteen seconds later. Network loss may prevent Stop confirmation.
+- Ctrl+C/SIGTERM detaches on normal server shutdown; uploaded builds continue remotely.
 - Closing a browser page does not stop execution.
-- Runs/output are **in-memory**. Browser reload loses run associations; server restart loses run records/output. No durable transcript, replay, session steering, or crash recovery is implemented.
+- Web run records are **in-memory**. Browser reload loses run associations; server restart loses local run records/output. Remote sessions retain private `output.log` (first 8 MiB) and atomic exit `status` under the remote workspace's `.spec-runs/`. Completed sessions older than seven days are pruned on subsequent launches. See [manual recovery and cancellation](../README.md#sessions-and-cancellation); automatic reattachment, replay, and session steering are not implemented.
 - Tools that detach into separate process groups may escape group cancellation. Use OS-level sandboxing for stronger containment.
 
 ## 7. What changed from the original

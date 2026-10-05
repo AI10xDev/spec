@@ -69,20 +69,15 @@ async fn truncated_upload_never_starts_build_and_removes_snapshot() {
     let root = tempfile::tempdir().unwrap();
     let runner = root.path().join("unused");
     let remote = tests::remote_fixture(root.path(), &runner);
-    // Observe the directory created by the actual remote supervisor without
-    // inspecting unrelated /tmp snapshots from other processes.
-    let script = include_str!("remote-build.bash").replace(
-        "pid=\n",
-        "printf '%s' \"$directory\" > snapshot-directory\npid=\n",
-    );
     let mut child = tokio::process::Command::new("bash")
         .args([
             "-c",
-            &script,
+            include_str!("remote-build.bash"),
             "--",
             &remote.directory,
             "100",
             include_str!("remote-alias.bash"),
+            include_str!("remote-supervisor.bash"),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -98,8 +93,12 @@ async fn truncated_upload_never_starts_build_and_removes_snapshot() {
         .unwrap();
     assert_eq!(result.status.code(), Some(125));
     assert!(String::from_utf8_lossy(&result.stderr).contains("incomplete snapshot"));
-    let directory = fs::read_to_string(root.path().join("snapshot-directory")).unwrap();
-    assert!(!FsPath::new(&directory).exists());
+    assert_eq!(
+        fs::read_dir(root.path().join(".spec-runs"))
+            .unwrap()
+            .count(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -132,7 +131,7 @@ async fn remote_function_is_supported_and_missing_spec_is_reported() {
         } else {
             assert_eq!(output.status.code(), Some(127));
             assert!(
-                String::from_utf8_lossy(&output.stderr)
+                String::from_utf8_lossy(&output.stdout)
                     .contains("spec alias/function/launcher not found")
             );
         }
@@ -215,19 +214,22 @@ exit {status}
         drop(stdin);
         assert_eq!(output.status.code(), Some(status), "{install}");
         if install == "missing" {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = String::from_utf8_lossy(&output.stdout);
             assert!(stderr.contains("opencode-source: command not found"));
             assert!(stderr.contains("export its directory in PATH in ~/.bash_aliases"));
         } else {
             assert_eq!(output.stdout, b"hello", "{install}");
-            assert!(output.stderr.is_empty(), "{install}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("[remote] session:"),
+                "{install}"
+            );
         }
     }
 }
 
 #[tokio::test]
-async fn remote_watchdog_and_lost_connection_clean_up_without_local_signals() {
-    for disconnect in [false, true] {
+async fn detached_builds_survive_eof_hup_and_attachment_kill_then_watchdog_cleans_descendants() {
+    for disconnect in ["connected", "eof", "unknown", "hup", "kill"] {
         let root = tempfile::tempdir().unwrap();
         fs::write(
             root.path().join(".bash_aliases"),
@@ -242,16 +244,22 @@ spec() {
         )
         .unwrap();
         // Shorten only the test watchdog; production remains 15 minutes.
-        let script = include_str!("remote-build.bash").replace("SECONDS >= 900", "SECONDS >= 1");
+        let supervisor =
+            include_str!("remote-supervisor.bash").replace("SECONDS >= 900", "SECONDS >= 3");
+        let attachment = include_str!("remote-build.bash").replace(
+            "reader=$!",
+            "reader=$!\nprintf '%s' \"$reader\" > control-reader-pid",
+        );
         let mut child = tokio::process::Command::new("bash")
             .env("HOME", root.path())
             .args([
                 "-c",
-                &script,
+                &attachment,
                 "--",
                 root.path().to_str().unwrap(),
                 "5",
                 include_str!("remote-alias.bash"),
+                &supervisor,
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -261,32 +269,331 @@ spec() {
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(b"hello").await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !root.path().join("descendant-pid").exists() {
+            while !root.path().join("descendant-pid").exists()
+                || !fs::read_to_string(root.path().join("control-reader-pid"))
+                    .is_ok_and(|pid| !pid.is_empty())
+            {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
         .unwrap();
-        let lease = if disconnect {
+        let reader = fs::read_to_string(root.path().join("control-reader-pid")).unwrap();
+        let snapshot =
+            PathBuf::from(fs::read_to_string(root.path().join("snapshot-path")).unwrap());
+        let directory = snapshot.parent().unwrap();
+        if disconnect == "unknown" {
+            stdin.write_all(b"?").await.unwrap();
+        }
+        let lease = if disconnect == "eof" {
             drop(stdin);
             None
         } else {
             Some(stdin)
         };
+        if disconnect == "hup" {
+            nix::sys::signal::kill(Pid::from_raw(child.id().unwrap() as i32), Signal::SIGHUP)
+                .unwrap();
+        } else if disconnect == "kill" {
+            child.start_kill().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(snapshot.exists(), "{disconnect}");
+        assert!(!directory.join("status").exists(), "{disconnect}");
         let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
             .await
             .unwrap()
             .unwrap();
+        // Keep stdin open while checking cleanup, including attachment SIGKILL.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Ok(stat) = fs::read_to_string(format!("/proc/{reader}/stat")) {
+                if stat.split(") ").nth(1).unwrap().starts_with('Z') {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         drop(lease);
+        if disconnect == "connected" {
+            assert_eq!(output.status.code(), Some(124));
+        } else if disconnect != "kill" {
+            assert_eq!(output.status.code(), Some(125));
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !directory.join("status").exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(
-            output.status.code(),
-            Some(if disconnect { 125 } else { 124 })
+            fs::read_to_string(directory.join("status")).unwrap(),
+            "124\n"
         );
-        let snapshot = fs::read_to_string(root.path().join("snapshot-path")).unwrap();
-        assert!(!FsPath::new(&snapshot).parent().unwrap().exists());
+        assert!(!snapshot.exists());
         let pid = fs::read_to_string(root.path().join("descendant-pid")).unwrap();
         if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
             assert_eq!(stat.split(") ").nth(1).unwrap().chars().next(), Some('Z'));
         }
+    }
+}
+
+#[tokio::test]
+async fn disconnected_completion_retains_private_bounded_log_and_reaps_leftover_children() {
+    let root = tempfile::tempdir().unwrap();
+    let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
+    fs::write(
+        root.path().join(".bash_aliases"),
+        r#"
+spec() {
+    printf '%s' "$2" > snapshot-path
+    while [[ ! -f finish ]]; do sleep 0.02; done
+    printf 'output after disconnect\n'
+    head -c 9000000 /dev/zero
+    printf 'finished writing\n' > wrote-all
+    sleep 60 &
+    printf '%s' "$!" > descendant-pid
+    return 7
+}
+"#,
+    )
+    .unwrap();
+    let mut child = remote
+        .command(5)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"hello").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !root.path().join("snapshot-path").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(125));
+    let snapshot = PathBuf::from(fs::read_to_string(root.path().join("snapshot-path")).unwrap());
+    let directory = snapshot.parent().unwrap();
+    assert!(String::from_utf8_lossy(&output.stderr).contains(directory.to_str().unwrap()));
+    fs::write(root.path().join("finish"), "").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !directory.join("status").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fs::read_to_string(directory.join("status")).unwrap(), "7\n");
+    assert!(root.path().join("wrote-all").exists());
+    assert!(!snapshot.exists());
+    assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
+    let log = fs::read(directory.join("output.log")).unwrap();
+    assert_eq!(log.len(), 8 * 1024 * 1024);
+    assert!(log.starts_with(b"output after disconnect\n"));
+    for (path, mode) in [
+        (directory.to_owned(), 0o700),
+        (directory.join("status"), 0o600),
+        (directory.join("output.log"), 0o600),
+    ] {
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            mode
+        );
+    }
+    let pid = fs::read_to_string(root.path().join("descendant-pid")).unwrap();
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        assert_eq!(stat.split(") ").nth(1).unwrap().chars().next(), Some('Z'));
+    }
+}
+
+#[tokio::test]
+async fn cancellation_survives_blocked_attachment_output() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join(".bash_aliases"),
+        r#"
+spec() {
+    printf '%s' "$2" > snapshot-path
+    sleep 60 &
+    printf '%s' "$!" > descendant-pid
+    head -c 8388608 /dev/zero
+    : > wrote-all
+    wait
+}
+"#,
+    )
+    .unwrap();
+    // Bound remote cleanup even if the test fails before it can send cancellation.
+    let supervisor =
+        include_str!("remote-supervisor.bash").replace("SECONDS >= 900", "SECONDS >= 10");
+    let mut child = tokio::process::Command::new("bash")
+        .env("HOME", root.path())
+        .args([
+            "-c",
+            include_str!("remote-build.bash"),
+            "--",
+            root.path().to_str().unwrap(),
+            "5",
+            include_str!("remote-alias.bash"),
+            &supervisor,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let attachment = child.id().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
+        stdin.write_all(b"hello").await?;
+        loop {
+            // Do not merely sleep and hope stdout is blocked: observe the actual
+            // forwarding dd waiting for pipe space before delivering C.
+            let children =
+                fs::read_to_string(format!("/proc/{attachment}/task/{attachment}/children"))?;
+            if root.path().join("wrote-all").exists()
+                && children.split_whitespace().any(|pid| {
+                    fs::read_to_string(format!("/proc/{pid}/comm"))
+                        .is_ok_and(|name| name.trim() == "dd")
+                        && fs::read_to_string(format!("/proc/{pid}/wchan"))
+                            .is_ok_and(|state| state.trim().ends_with("pipe_write"))
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        stdin.write_all(b"C").await?;
+        let snapshot = PathBuf::from(fs::read_to_string(root.path().join("snapshot-path"))?);
+        let directory = snapshot.parent().unwrap();
+        while !directory.join("status").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let status = fs::read_to_string(directory.join("status"))?;
+        let descendant = fs::read_to_string(root.path().join("descendant-pid"))?;
+        let descendant_stopped = fs::read_to_string(format!("/proc/{descendant}/stat"))
+            .map(|stat| stat.split(") ").nth(1).unwrap().starts_with('Z'))
+            .unwrap_or(true);
+        Ok::<_, std::io::Error>((status, snapshot.exists(), descendant_stopped))
+    })
+    .await;
+    // Release backpressure and reap the attachment before any assertion can panic.
+    // Keep stdin open through exit so EOF cannot hide a leaked control reader.
+    drop(child.stdout.take());
+    let exit = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+    drop(stdin);
+    exit.unwrap().unwrap();
+    let (status, snapshot_exists, descendant_stopped) = result.unwrap().unwrap();
+    assert_eq!(status, "130\n");
+    assert!(!snapshot_exists);
+    assert!(descendant_stopped);
+}
+
+#[tokio::test]
+async fn early_explicit_cancel_is_not_eof_or_snapshot_data() {
+    let root = tempfile::tempdir().unwrap();
+    let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
+    fs::write(root.path().join(".bash_aliases"), "spec() { sleep 60; }\n").unwrap();
+    let mut child = remote
+        .command(5)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"helloC").await.unwrap();
+    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    drop(stdin);
+    assert_eq!(output.status.code(), Some(130));
+    let directory = fs::read_dir(root.path().join(".spec-runs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(
+        fs::read_to_string(directory.join("status")).unwrap(),
+        "130\n"
+    );
+    assert!(!directory.join("snapshot.md").exists());
+}
+
+#[tokio::test]
+async fn retention_prunes_only_old_finished_sessions_and_rejects_unsafe_parent() {
+    let root = tempfile::tempdir().unwrap();
+    let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
+    fs::write(root.path().join(".bash_aliases"), "spec() { return 0; }\n").unwrap();
+    let sessions = root.path().join(".spec-runs");
+    fs::create_dir(&sessions).unwrap();
+    fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+    for name in ["old", "recent", "unfinished"] {
+        fs::create_dir(sessions.join(name)).unwrap();
+    }
+    fs::write(sessions.join("old/status"), "0\n").unwrap();
+    fs::write(sessions.join("recent/status"), "0\n").unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
+    File::options()
+        .write(true)
+        .open(sessions.join("old/status"))
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(old))
+        .unwrap();
+    let mut child = remote
+        .command(5)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"hello").await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    drop(stdin);
+    assert!(!sessions.join("old").exists());
+    assert!(sessions.join("recent/status").exists());
+    assert!(sessions.join("unfinished").exists());
+
+    // Refuse unsafe existing storage without changing its permissions or contents.
+    for symlink in [false, true] {
+        if symlink {
+            fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::rename(&sessions, root.path().join("elsewhere")).unwrap();
+            std::os::unix::fs::symlink(root.path().join("elsewhere"), &sessions).unwrap();
+        } else {
+            fs::set_permissions(&sessions, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let result = remote
+            .command(5)
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(result.status.code(), Some(125));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("owned, private"));
+        assert_eq!(
+            fs::metadata(&sessions).unwrap().permissions().mode() & 0o777,
+            if symlink { 0o700 } else { 0o755 }
+        );
     }
 }

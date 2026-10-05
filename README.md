@@ -79,7 +79,7 @@ Open the full localhost URL printed by the **local** Rust server, including its 
 
 #### Remote shell requirements
 
-The remote machine needs Linux, Bash, `setsid`, standard coreutils, and a configured `spec` build alias/function (or shell launcher on PATH) with its engine/provider credentials. It does **not** need this Rust web server or Bun/Vite for the web UI.
+The remote machine needs Linux, Bash, `setsid`, GNU coreutils (including `stdbuf`), findutils, and a configured `spec` build alias/function (or shell launcher on PATH) with its engine/provider credentials. It does **not** need this Rust web server or Bun/Vite for the web UI.
 
 The adapter explicitly sources the trusted remote **`~/.bash_aliases`** in noninteractive Bash with alias expansion enabled, then invokes only:
 
@@ -101,11 +101,28 @@ Use the actual directory containing the engine. An interactive shell alias for `
 
 **Automatic tool approval and recommended question answers are requested.** The adapter sets `SPEC_BUILD_AUTO=1`, `OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1`, and `OPENCODE_QUESTION_AUTO_RECOMMEND=1` after sourcing aliases, and clears persistent-session settings. A compatible OpenCode harness can then run unattended after the one **Save & run** confirmation. The installed remote alias/engine determines actual approval and answer behavior; verify it supports these flags and the foreground contract. There is no browser runtime-answer channel or blind `yes` fallback for unsupported engines or questions without a recommendation. Assume builds can modify remote files, execute tools, access the network, and incur provider costs using remote credentials. The UI confirmation is not a sandbox or per-tool approval boundary.
 
-#### Snapshot and cancellation contract
+#### Sessions and cancellation
 
-Snapshot text is sent as data over SSH stdin, never interpolated into shell code or included in the SSH command line. The fixed remote supervisor writes a `0600` snapshot in a `0700` temporary directory. It removes the snapshot after build completion or orderly cancellation. Later local saves do not change the running input.
+Snapshot text is sent as data over SSH stdin, never interpolated into shell code or included in the SSH command line. After a complete upload, a detached supervisor owns the build and its `0600` snapshot in a `0700` run directory under `SPEC_SSH_WORKSPACE/.spec-runs/`. That parent directory must be owned by the remote user, private (`0700`), and not a symlink. The snapshot is removed after completion, cancellation, or watchdog expiry. Later local saves do not change the running input.
 
-**Stop run**, local timeout, and normal server shutdown close the SSH input lease. The remote supervisor then kills the build's process group and removes its snapshot. There is also an independent remote 15-minute watchdog for a stalled/lost connection. Network failures may prevent immediate cleanup confirmation; detached processes that create separate groups and remote machine failures remain outside this guarantee. Output/status are in-memory only. Exit success means the CLI completed, not that its generated changes were verified.
+**Closing SSH, stdin EOF, closing the browser, and normal server shutdown do not cancel an uploaded build.** The supervisor ignores SIGHUP, runs in its own session, and writes output to a private file rather than the SSH socket. SSH only tails that log. **Stop run** sends an explicit cancellation control byte after the snapshot; the supervisor kills the build's process group, including ordinary descendants. An independent **15-minute remote watchdog** remains active after disconnect. The local attachment gives up after 15 minutes plus 15 seconds, without cancelling remote work. Stop cannot be guaranteed through a broken connection; an unconfirmed cancellation is reported as detached rather than cancelled.
+
+The output pane prints `[remote] session: /absolute/path/.../run-...`. On the remote host, recover using that exact directory (or list `.spec-runs/` if the connection ended before the notice arrived):
+
+```sh
+cd /home/user/project/.spec-runs/run-REPLACE_WITH_ACTUAL_ID
+tail -f output.log            # Ctrl+C stops viewing, not the build
+cat status                    # Absent while running; published atomically after cleanup
+touch cancel                  # Explicitly stop a still-running detached build
+```
+
+`status` contains the CLI exit code: `0` success, `124` watchdog timeout, `130` cancellation, or `125` supervisor error (these reserved codes can also be returned by a launcher). Completion means CLI exit success, not verification of generated changes. `output.log` merges stdout/stderr and retains the **first 8 MiB**; excess output is drained/discarded so a noisy build cannot fill disk indefinitely or fail from a broken log pipe. Files are `0600`; they can contain sensitive spec/tool output. The browser keeps only the latest 256 KiB it received, independently of this remote cap.
+
+Completed run directories older than seven days are pruned on the next launch in that remote workspace. There is no background retention service or strict total disk quota; manually remove finished directories sooner if needed. Do not delete a live run directory. Host reboot, SIGKILL of the supervisor, disk failure, or children that deliberately create separate process groups remain outside the guarantee and may leave stale snapshots or missing status. Missing status is not proof of a live build after such a failure.
+
+Keep `.spec-runs/` out of remote version control and artifact uploads, for example by adding it to that checkout's `.git/info/exclude`. Private filesystem permissions do not prevent a same-user tool from reading or committing session files.
+
+Web run records/associations remain in-memory: browser reload/server restart does not reattach to sessions. Recovery and cancellation after disconnect are manual, not automatic replay or restart. Local concurrency limits count attached runs only; inspect remote sessions before retrying a disconnected run to avoid duplicate work and costs.
 
 Builds are capped at **120 KiB** because some existing launchers forward the prompt as one Linux process argument. Editing/saving support 2 MiB. Remote launchers using Bash command substitution may strip trailing newlines and must use an end-of-options separator when passing prompts to their engine.
 
@@ -126,7 +143,7 @@ Use your configured deployment name (default `gpt-5.5`). A legacy resource-root 
 
 When configured, **Trailing completions** starts enabled and can be switched off in the editor. After 500 ms idle at a line's end, the browser sends up to 4,000 recent UTF-16 units (at most 16 KiB UTF-8) before the caret to Azure through the authenticated Rust API. This includes **unsaved text** and may incur provider costs. A muted suffix suggests one sentence part, capped at 160 characters and the first clause/sentence punctuation. **Tab** or **Accept part** inserts it; **Escape** dismisses until typing resumes. Selections, IME composition, and text after the caret on the same line suppress suggestions. Long ghost text is clipped at the pane edge; the Accept part button's tooltip shows the suffix. Suggestions are not saved or downloaded until accepted.
 
-Requests have a 10-second timeout and four-request concurrency cap. Errors leave editing available and retry on subsequent edits, not in a loop. Tests use provider mocks; no live Azure call is needed. This restores inline completion only, not filename ranking.
+Accepting a part waits for your next edit before requesting another suggestion, including when the accepted suffix has no final punctuation. Requests have a 10-second timeout and four-request concurrency cap. Errors leave editing available and retry on subsequent edits, not in a loop. Tests use provider mocks; no live Azure call is needed. This restores inline completion only, not filename ranking.
 
 ### Frontend development
 

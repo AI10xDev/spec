@@ -94,7 +94,7 @@ Design tradeoffs:
 - Atomic saves and stale-edit detection; no transactional protection against a malicious same-user process changing paths concurrently.
 - One-shot process execution; no claim to reproduce persistent V2 session admission, steering, replay, or crash recovery.
 - Browser output is plain text; no hidden chain-of-thought request or HTML execution.
-- Logs and run associations are not durable; saved files are durable.
+- Web output buffers and run associations are in-memory; remote supervisors retain bounded logs and final status after disconnect. Saved files are durable.
 - New files are mode `0600`; replacing an existing file also changes its permissions to `0600` and replaces its inode. Do not use this editor to maintain executables or files whose ACLs/hard-link identity must be retained.
 
 ## Validation
@@ -105,16 +105,16 @@ Executed on the development machine:
 | --- | --- |
 | Original editor: `cargo test save_` | 2 passed; other tests filtered |
 | Original OpenCode: selected run-spec/session/workflow tests | 49 passed, 1 skipped, 0 failed |
-| New Rust backend: `cargo test --locked` | 16 passed |
-| New Rust: `cargo clippy --all-targets -- -D warnings` | Passed |
+| New Rust backend: `cargo test --locked` | 30 passed |
+| New Rust: `cargo clippy --all-targets --locked -- -D warnings` | Passed |
 | New Rust: `cargo fmt --check`, build | Passed |
 | Frontend: `bun typecheck` | Passed |
-| Frontend: `bun run test` | 5 passed |
+| Frontend: `bun run test` | 8 passed |
 | Frontend: `bun run build` | Passed |
-| Browser: `bun run test:e2e` | 8 passed against isolated real Rust servers |
+| Browser: `bun run test:e2e` | 20 passed against isolated localhost Rust servers |
 
-Backend coverage includes authentication on every API route, encoded traversal, symlinks/FIFOs, filename/content limits, durable file reload/listing, stale-write rejection, default execution denial, bounded logs, and deterministic child-process tests for streaming/cancellation, build-size boundaries, launcher arguments, immutable snapshots, private permissions, cleanup, and exit status. SSH stand-ins run the actual remote scripts with isolated aliases/functions, testing SSH options, shell quoting, complete/truncated uploads, missing commands, remote snapshot cleanup, independent watchdog/connection-loss cleanup, and cancellation of descendants. They make no network or provider calls.
+Backend coverage includes authentication on every API route, encoded traversal, symlinks/FIFOs, filename/content limits, durable file reload/listing, stale-write rejection, default execution denial, bounded logs, and deterministic child-process tests for streaming/cancellation, build-size boundaries, launcher arguments, immutable snapshots, private permissions, cleanup, and exit status. SSH stand-ins run the actual remote scripts with isolated aliases/functions, testing SSH options, shell quoting, complete/truncated uploads, missing commands, remote snapshot cleanup, survival of EOF/HUP/attachment termination, independent watchdog cleanup, private bounded log/status recovery, and cancellation of descendants. They make no network or provider calls.
 
-Browser coverage includes saved-file discovery, independent buffers, preserving edits when reopening an already-open file, close confirmation, desktop two-pane geometry, reload persistence, mobile overflow, default disabled execution, and conflicts between two browser pages.
+Browser coverage includes saved-file discovery, independent buffers, preserving edits when reopening an already-open file, close confirmation, desktop two-pane geometry, reload persistence, mobile overflow, default disabled execution, and conflicts between two browser pages. Completion fixtures cover debounce, one-part acceptance with and without punctuation, native undo, dismissal, stale responses, IME, CRLF, Unicode bounds, and desktop/mobile ghost alignment and visibility inside the editor. Execution fixtures verify automatic-policy flags, cancellation, completion after browser closure, and remote log/status recovery after server shutdown. A backend regression verifies cancellation while SSH log forwarding is blocked. The unpunctuated-acceptance, mobile ghost visibility, and blocked-output cancellation regressions failed before their respective fixes.
 
 No live SSH host or model execution, full original-editor regression suite, cloud deployment, Windows behavior, power-loss simulation, exhaustive security audit, or external CLI/provider compatibility matrix was tested.

@@ -104,11 +104,12 @@ impl Remote {
         // SSH joins remote arguments as shell code. Quote each operator-controlled
         // value; document content travels only over stdin, never in this command.
         command.arg("--").arg(&self.target).arg(format!(
-            "bash -c {} -- {} {} {}",
+            "bash -c {} -- {} {} {} {}",
             quote(include_str!("remote-build.bash")),
             quote(&self.directory),
             bytes,
             quote(include_str!("remote-alias.bash")),
+            quote(include_str!("remote-supervisor.bash")),
         ));
         command
     }

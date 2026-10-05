@@ -55,7 +55,14 @@ struct Job {
     status: String,
     output: VecDeque<u8>,
     truncated: bool,
-    stop: watch::Sender<bool>,
+    stop: watch::Sender<RunControl>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum RunControl {
+    Running,
+    Cancel,
+    Detach,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -296,7 +303,7 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
         ));
     }
     let id = Uuid::new_v4().to_string();
-    let (stop, mut stopped) = watch::channel(false);
+    let (stop, mut stopped) = watch::channel(RunControl::Running);
     {
         let mut jobs = app.jobs.lock().unwrap();
         if jobs.iter().filter(|job| job.status == "running").count() >= 4
@@ -350,31 +357,48 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
             &id,
             b"[started] remote spec build over SSH: running the saved snapshot with automatic tool approval requested. Output and logs only.\n",
         );
-        // Keep stdin open after upload as a lease. Closing it asks the remote
-        // supervisor to kill the build group and remove its private snapshot.
-        let upload = tokio::spawn(async move {
+        // EOF only detaches. Stop sends a distinct control byte after the entire
+        // snapshot, so an early Stop cannot be mistaken for snapshot contents.
+        let mut control = stopped.clone();
+        let mut upload = tokio::spawn(async move {
             stdin.write_all(document.content.as_bytes()).await?;
-            std::future::pending::<std::io::Result<()>>().await
+            let _ = control.changed().await;
+            if *control.borrow() == RunControl::Cancel {
+                stdin.write_all(b"C").await?;
+                stdin.flush().await?;
+                // Keep the attachment alive for its final output/status.
+                std::future::pending::<()>().await;
+            }
+            Ok::<_, std::io::Error>(())
         });
         let out = tokio::spawn(drain(app.clone(), id.clone(), stdout));
         let err = tokio::spawn(drain(app.clone(), id.clone(), stderr));
-        let status = tokio::select! {
+        let mut status = tokio::select! {
             result = child.wait() => match result {
                 Ok(exit) if exit.success() => "completed".to_owned(),
+                Ok(exit) if exit.code() == Some(124) => "timed out".to_owned(),
+                Ok(exit) if exit.code() == Some(130) => "cancelled".to_owned(),
                 Ok(exit) => format!("failed ({exit})"),
                 Err(error) => format!("failed ({error})"),
             },
-            _ = stopped.changed() => "cancelled".into(),
-            _ = tokio::time::sleep(Duration::from_secs(15 * 60)) => "timed out".into(),
+            _ = stopped.changed() => if *stopped.borrow() == RunControl::Cancel { "cancelled" } else { "detached" }.into(),
+            _ = tokio::time::sleep(Duration::from_secs(15 * 60 + 15)) => "detached (local timeout)".into(),
+            _ = &mut upload => "detached (input closed)".into(),
         };
+        // Give explicit cancellation time to reach the supervisor and confirm it.
+        if status == "cancelled" {
+            match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
+                Ok(Ok(exit)) if exit.code() == Some(130) => {}
+                Ok(Ok(exit)) if exit.success() => status = "completed".into(),
+                _ => {
+                    status = "detached (cancellation unconfirmed)".into();
+                    append(&app, &id, b"\n[warning] Cancellation was not confirmed; the build may still be running. Recover via the remote session directory; the 15-minute watchdog remains active.\n");
+                }
+            }
+        }
         upload.abort();
-        let _ = upload.await;
-        // Allow EOF to reach the remote supervisor before terminating SSH.
-        if tokio::time::timeout(Duration::from_secs(3), child.wait())
-            .await
-            .is_err()
-        {
-            append(&app, &id, b"\n[warning] SSH did not confirm cleanup; the remote 15-minute watchdog remains the fallback.\n");
+        if status != "completed" && status != "cancelled" && status != "timed out" {
+            append(&app, &id, b"\n[remote] SSH attachment ended; this does not cancel remote work. Check the session output.log/status before retrying.\n");
         }
         // Reap the local SSH process group as well.
         let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
@@ -419,7 +443,7 @@ async fn cancel(State(app): State<App>, Path(id): Path<String>) -> Result<Json<s
         .iter()
         .find(|job| job.id == id)
         .ok_or_else(|| Error(StatusCode::NOT_FOUND, "Run not found".into()))?;
-    let _ = job.stop.send(true);
+    let _ = job.stop.send(RunControl::Cancel);
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -513,7 +537,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
             tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
             for job in app.jobs.lock().unwrap().iter() {
-                let _ = job.stop.send(true);
+                // Server shutdown is not a user request to cancel remote work.
+                let _ = job.stop.send_if_modified(|control| {
+                    if *control == RunControl::Cancel {
+                        false
+                    } else {
+                        *control = RunControl::Detach;
+                        true
+                    }
+                });
             }
             for _ in 0..100 {
                 if !app

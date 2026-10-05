@@ -281,6 +281,8 @@ test.describe("trailing completions", () => {
     await page.clock.install()
     await page.clock.pauseAt(new Date(Date.now() + 1000))
     await page.goto(url)
+    // A previous completion test may have saved this shared fixture filename.
+    await rm(path.join(directory, "completion.md"), { force: true })
     await page.getByRole("textbox", { name: "New filename" }).fill("completion.md")
     await page.getByRole("button", { name: "Create file" }).click()
   })
@@ -337,6 +339,33 @@ test.describe("trailing completions", () => {
     await page.clock.runFor(500)
     await expect(ghost).toHaveText(" files.")
     expect(prefixes).toEqual(["Build a dash", "Build a dashboard, then sync", "Build a dashboard, then sync more"])
+  })
+
+  test("accepts unpunctuated parts once and resumes only after another edit", async ({ page }) => {
+    const prefixes: string[] = []
+    await page.route("**/api/completions", async (route) => {
+      prefixes.push(route.request().postDataJSON().prefix)
+      await route.fulfill({ json: { suffix: prefixes.length === 1 ? " a dashboard" : " files" } })
+    })
+    const editor = page.getByRole("textbox", { name: "Edit completion.md" })
+    const ghost = page.locator(".completion-ghost")
+    await expect(editor).toHaveValue("")
+    await editor.fill("Build")
+    await page.clock.runFor(500)
+    await expect(ghost).toHaveText(" a dashboard")
+    await editor.press("Tab")
+    await expect(editor).toHaveValue("Build a dashboard")
+    await page.clock.runFor(1500)
+    await expect(ghost).toHaveText("")
+    expect(prefixes).toEqual(["Build"])
+    await editor.pressSequentially(", then sync")
+    await page.clock.runFor(500)
+    await expect(ghost).toHaveText(" files")
+    await page.getByRole("button", { name: "Accept part", exact: true }).click()
+    await expect(editor).toHaveValue("Build a dashboard, then sync files")
+    await page.clock.runFor(1500)
+    await expect(ghost).toHaveText("")
+    expect(prefixes).toEqual(["Build", "Build a dashboard, then sync"])
   })
 
   test("completes opened CRLF files without changing saved content before acceptance", async ({ page }) => {
@@ -568,9 +597,13 @@ test.describe("trailing completions", () => {
     await editor.press("Control+End")
     await page.clock.runFor(500)
     await expect(page.locator(".completion-ghost")).toHaveText("board,")
-    for (const width of [1440, 390]) {
+    for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: 900 })
+      // End at an unchanged caret does not scroll it back into view after resize.
+      await editor.press("Control+Home")
       await editor.press("Control+End")
+      await page.clock.runFor(500)
+      await expect(page.locator(".completion-ghost")).toHaveText("board,")
       const alignment = await page.locator(".completion-mirror").evaluate((node) => {
         const prefix = node.firstChild!
         const ghost = node.querySelector(".completion-ghost")!.firstChild!
@@ -581,12 +614,15 @@ test.describe("trailing completions", () => {
         after.selectNodeContents(ghost)
         const typed = before.getBoundingClientRect()
         const suggested = after.getBoundingClientRect()
-        return { dy: suggested.y - typed.y, dx: suggested.x - typed.right, scroll: node.scrollTop }
+        const viewport = node.getBoundingClientRect()
+        return { dy: suggested.y - typed.y, dx: suggested.x - typed.right, scroll: node.scrollTop, top: suggested.top, bottom: suggested.bottom, viewportTop: viewport.top, viewportBottom: viewport.bottom }
       })
       expect(Math.abs(alignment.dy)).toBeLessThanOrEqual(1)
       expect(Math.abs(alignment.dx)).toBeLessThanOrEqual(1)
       expect(alignment.scroll).toBeGreaterThan(0)
       expect(alignment.scroll).toBe(await editor.evaluate((node: HTMLTextAreaElement) => node.scrollTop))
+      expect(alignment.top, `ghost top at ${width}px`).toBeGreaterThanOrEqual(alignment.viewportTop)
+      expect(alignment.bottom, `ghost bottom at ${width}px`).toBeLessThanOrEqual(alignment.viewportBottom)
       await page.screenshot({ path: testInfo.outputPath(`completion-${width}.png`), fullPage: true })
     }
     await editor.press("Control+s")

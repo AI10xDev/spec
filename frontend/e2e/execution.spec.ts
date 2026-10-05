@@ -27,7 +27,16 @@ const content = fs.readFileSync(process.argv[3], "utf8")
 {
   process.stdout.write("fixture stdout: " + content + "\\n")
   process.stderr.write("fixture stderr: " + content + "\\n")
-  if (content.startsWith("WAIT\\n")) {
+  if (content.startsWith("DETACH\\n") || content.startsWith("BROWSER\\n")) {
+    const browser = content.startsWith("BROWSER\\n")
+    const finish = browser ? ${JSON.stringify(path.join(directory, "finish-browser"))} : ${JSON.stringify(path.join(directory, "finish-detached"))}
+    setInterval(() => {
+      if (!fs.existsSync(finish)) return
+      process.stdout.write(browser ? "finished after browser close\\n" : "finished after server shutdown\\n")
+      process.exit(0)
+    }, 50)
+    setTimeout(() => process.exit(2), 15_000)
+  } else if (content.startsWith("WAIT\\n")) {
     let tick = 0
     setInterval(() => process.stdout.write("fixture progress " + ++tick + ": " + content + "\\n"), 100)
     setTimeout(() => process.exit(2), 60_000)
@@ -214,4 +223,47 @@ test("enabled execution: empty specs are rejected and nonzero exits show failure
   await expect(page.getByRole("button", { name: "Stop run" })).toBeHidden()
   await expect(run).toBeEnabled()
   expect(pageErrors).toEqual([])
+})
+
+test("closing the browser does not cancel an admitted build", async ({ page, request }) => {
+  await page.goto(url)
+  await page.getByRole("textbox", { name: "New filename" }).fill("browser-close.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  await page.getByRole("textbox", { name: "Edit browser-close.md" }).fill("BROWSER\nKeep working without the editor.")
+  const started = page.waitForResponse((response) => response.url().endsWith("/api/runs") && response.request().method() === "POST")
+  page.once("dialog", (dialog) => dialog.accept())
+  await page.getByRole("button", { name: "Save & run" }).click()
+  const { id } = await (await started).json() as { id: string }
+  await expect(page.getByLabel("Run output")).toContainText("fixture stdout: BROWSER")
+  await page.close()
+  const endpoint = new URL(`/api/runs/${id}`, url).href
+  const headers = { Authorization: `Bearer ${new URLSearchParams(new URL(url).hash.slice(1)).get("token")}` }
+  expect((await (await request.get(endpoint, { headers })).json()).status).toBe("running")
+  await writeFile(path.join(directory, "finish-browser"), "")
+  await expect.poll(async () => (await (await request.get(endpoint, { headers })).json()).status).toBe("completed")
+  expect((await (await request.get(endpoint, { headers })).json()).output).toContain("finished after browser close")
+})
+
+// Last: shuts down this suite's server while its remote supervisor is still busy.
+test("server shutdown detaches and remote output/status remain recoverable", async ({ page }) => {
+  await page.goto(url)
+  await page.getByRole("textbox", { name: "New filename" }).fill("detached.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  await page.getByRole("textbox", { name: "Edit detached.md" }).fill("DETACH\nKeep working after shutdown.")
+  page.once("dialog", (dialog) => dialog.accept())
+  await page.getByRole("button", { name: "Save & run" }).click()
+  const output = page.getByLabel("Run output")
+  await expect(output).toContainText("fixture stdout: DETACH")
+  const session = (await output.textContent())!.match(/\[remote\] session: (.+) \(output\.log,/)
+  expect(session).not.toBeNull()
+  const remoteDirectory = session![1]
+  await expect(readFile(path.join(remoteDirectory, "status"), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+  await new Promise<void>((resolve) => {
+    server.once("exit", () => resolve())
+    server.kill("SIGTERM")
+  })
+  await writeFile(path.join(directory, "finish-detached"), "")
+  await expect.poll(async () => readFile(path.join(remoteDirectory, "status"), "utf8").catch(() => "running")).toBe("0\n")
+  expect(await readFile(path.join(remoteDirectory, "output.log"), "utf8")).toContain("finished after server shutdown")
+  await expect(readFile(path.join(remoteDirectory, "snapshot.md"), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
 })

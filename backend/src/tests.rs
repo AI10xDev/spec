@@ -290,7 +290,7 @@ async fn execution_is_disabled_by_default() {
 fn output_buffers_are_bounded() {
     let root = tempfile::tempdir().unwrap();
     let state = app(root.path());
-    let (stop, _) = watch::channel(false);
+    let (stop, _) = watch::channel(RunControl::Running);
     state.jobs.lock().unwrap().push(Job {
         id: "id".into(),
         name: "a".into(),
@@ -403,7 +403,13 @@ async fn build_exit_status_and_snapshot_cleanup() {
         .unwrap();
         let snapshot =
             PathBuf::from(fs::read_to_string(root.path().join("snapshot-path")).unwrap());
-        assert!(!snapshot.parent().unwrap().exists());
+        assert!(!snapshot.exists());
+        assert_eq!(
+            fs::read_to_string(snapshot.parent().unwrap().join("status"))
+                .unwrap()
+                .trim(),
+            exit_code.to_string()
+        );
         let jobs = state.jobs.lock().unwrap();
         assert_eq!(
             jobs[0].status,
@@ -535,5 +541,8 @@ wait
         assert_eq!(stat.split(") ").nth(1).unwrap().chars().next(), Some('Z'));
     }
     assert!(!snapshot.exists());
-    assert!(!snapshot.parent().unwrap().exists());
+    assert_eq!(
+        fs::read_to_string(snapshot.parent().unwrap().join("status")).unwrap(),
+        "130\n"
+    );
 }
