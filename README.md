@@ -58,12 +58,12 @@ Execution is off until an SSH target and remote build directory are configured. 
 # One-time SSH setup: connect interactively and verify the host fingerprint
 # through a trusted channel before accepting it. Load an encrypted key into
 # ssh-agent if necessary; builds cannot prompt for passwords/passphrases.
-ssh -i "$HOME/.ssh/opencode-dev-aue_ed25519" opencode@4.197.157.17
+ssh -i "$HOME/.ssh/spec_ed25519" user@build-host
 # Exit the remote shell, then run these commands LOCALLY:
 unset SPEC_COMMAND
-SPEC_SSH_TARGET="opencode@4.197.157.17" \
-SPEC_SSH_KEY="$HOME/.ssh/opencode-dev-aue_ed25519" \
-SPEC_SSH_WORKSPACE="/home/opencode/spec" \
+SPEC_SSH_TARGET="user@build-host" \
+SPEC_SSH_KEY="$HOME/.ssh/spec_ed25519" \
+SPEC_SSH_WORKSPACE="/home/user/project" \
 SPEC_WORKSPACE="$HOME/specs" \
 ./run.sh
 ```
@@ -83,7 +83,15 @@ export SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1
 spec build "$snapshot"
 ```
 
-If your alias/function is defined elsewhere, arrange for `~/.bash_aliases` to source its trusted definition and set the required engine PATH. Interactive `.bashrc` and login profiles are not loaded by the adapter; definitions guarded by an interactive-shell check will not work. The `spec` command must remain in the foreground, propagate its exit status, and accept an explicit snapshot filename. Do not resolve `spec` to the Rust web-server binary. The archived scripts are provenance, not installed configuration, and are not modified or automatically sourced.
+Before sourcing that file, the adapter prepends the remote user's `~/.local/bin` and `~/.bun/bin` to `PATH` so user-installed engines are available to child launchers. If your alias/function is defined elsewhere, arrange for `~/.bash_aliases` to source its trusted definition and set the required engine PATH. Interactive `.bashrc` and login profiles are not loaded by the adapter; definitions guarded by an interactive-shell check will not work. The `spec` command must remain in the foreground, propagate its exit status, and accept an explicit snapshot filename. Do not resolve `spec` to the Rust web-server binary. The archived scripts are provenance, not installed configuration, and are not modified or automatically sourced.
+
+If a build reports `run-spec.sh: ... opencode-source: command not found`, the remote launcher was found but its engine was not. Verify that `opencode-source` is installed and executable **on the remote host**. For a custom installation, add an exported PATH to the remote `~/.bash_aliases`, outside any interactive-shell guard:
+
+```sh
+export PATH="$HOME/path/to/engine/bin:$PATH"
+```
+
+Use the actual directory containing the engine. An interactive shell alias for `opencode-source` is not sufficient: `run-spec.sh` starts a child shell that needs an executable on its exported PATH. No local engine installation or SSH forwarding change is needed.
 
 **Automatic tool approval is requested via `SPEC_BUILD_AUTO=1`.** The installed remote alias determines the actual engine and permission behavior; verify it supports the foreground contract. Assume builds can modify remote files, execute tools, access the network, and incur provider costs using remote credentials. The UI confirmation is not a sandbox or per-tool approval boundary.
 

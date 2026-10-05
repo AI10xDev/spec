@@ -140,6 +140,76 @@ async fn remote_function_is_supported_and_missing_spec_is_reported() {
 }
 
 #[tokio::test]
+async fn remote_engine_path_reaches_child_launchers_without_login_profiles() {
+    for (install, status) in [
+        (".local/bin", 0),
+        (".bun/bin", 0),
+        ("custom engine/bin", 42),
+        ("missing", 127),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let runner = root.path().join("run-spec.sh");
+        let remote = tests::remote_fixture(root.path(), &runner);
+        // Model the reported failure: the alias calls a script, which needs an
+        // executable (not a shell alias) in its inherited PATH.
+        fs::write(
+            &runner,
+            "#!/bin/bash\n[[ $1 == build && $SPEC_BUILD_FOREGROUND == 1 && $SPEC_BUILD_AUTO == 1 ]] || exit 90\nopencode-source \"$2\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+        for profile in [".bashrc", ".bash_profile", ".profile"] {
+            fs::write(root.path().join(profile), "exit 91\n").unwrap();
+        }
+        if install != "missing" {
+            let bin = root.path().join(install);
+            fs::create_dir_all(&bin).unwrap();
+            let engine = bin.join("opencode-source");
+            fs::write(
+                &engine,
+                format!("#!/bin/bash\ncat -- \"$1\"\nexit {status}\n"),
+            )
+            .unwrap();
+            fs::set_permissions(engine, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let aliases = root.path().join(".bash_aliases");
+        let mut definition = fs::read_to_string(&aliases).unwrap();
+        if install == "custom engine/bin" {
+            definition.push_str("export PATH=\"$HOME/custom engine/bin:$PATH\"\n");
+        } else if install == "missing" {
+            // Isolate from any engines installed on the test host, and verify
+            // that trusted alias-file PATH overrides are not overwritten.
+            definition.push_str("export PATH=/nonexistent\n");
+        }
+        fs::write(aliases, definition).unwrap();
+        let mut child = remote
+            .command(5)
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"hello").await.unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(stdin);
+        assert_eq!(output.status.code(), Some(status), "{install}");
+        if install == "missing" {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("opencode-source: command not found"));
+            assert!(stderr.contains("export its directory in PATH in ~/.bash_aliases"));
+        } else {
+            assert_eq!(output.stdout, b"hello", "{install}");
+            assert!(output.stderr.is_empty(), "{install}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn remote_watchdog_and_lost_connection_clean_up_without_local_signals() {
     for disconnect in [false, true] {
         let root = tempfile::tempdir().unwrap();
