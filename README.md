@@ -17,8 +17,10 @@ This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/A
 - **Two panes:** the active spec on the left; that file's output and logs on the right. Smaller screens stack them vertically.
 - **Reliable saves:** atomic replacement, private file permissions, and revision checks that reject stale saves instead of silently overwriting them.
 - **Local file workflow:** create, edit, save, reopen, and download UTF-8 files; Ctrl/Cmd+S saves the active editor.
+- **Completed spec lines:** press `/` to toggle the current line's `# ` completion marker; Alt+/ inserts a literal slash. The build agent is instructed to retain completed lines as context and implement only pending requirements.
 - **Trailing completions:** optional Azure-powered ghost text for the current sentence part; Tab or **Accept part** inserts it, Escape dismisses it.
 - **Optional Save & run:** explicit confirmation, immutable saved-spec input, live output polling, follow toggle, cancellation, concurrency limits, and a 15-minute timeout.
+- **Recoverable output:** reopening a saved spec restores its latest build output after browser or server restart, without rerunning the build.
 - **Local API protection:** loopback binding, a random access token, no permissive CORS, constrained filenames, and symlink rejection.
 
 The output pane displays available stdout/stderr and explanations. It does **not** request or expose hidden model chain-of-thought.
@@ -103,6 +105,8 @@ Use the actual directory containing the engine. An interactive shell alias for `
 
 #### Sessions and cancellation
 
+The build adapter supplies supplemental OpenCode instructions without rewriting the saved snapshot. A single leading `# ` after optional indentation marks only that line completed; removing it reopens the requirement. `##` headings, inline hashes, and hashes in code blocks are not completion markers. The `/` editor shortcut preserves indentation and native undo; inside fenced code it types a normal slash. Use Alt+/ for literal slashes elsewhere. The remote adapter needs Bun or Node to merge these instructions into OpenCode configuration; the remote launcher must honor that configuration.
+
 Snapshot text is sent as data over SSH stdin, never interpolated into shell code or included in the SSH command line. After a complete upload, a detached supervisor owns the build and its `0600` snapshot in a `0700` run directory under `SPEC_SSH_WORKSPACE/.spec-runs/`. That parent directory must be owned by the remote user, private (`0700`), and not a symlink. The snapshot is removed after completion, cancellation, or watchdog expiry. Later local saves do not change the running input.
 
 **Closing SSH, stdin EOF, closing the browser, and normal server shutdown do not cancel an uploaded build.** The supervisor ignores SIGHUP, runs in its own session, and writes output to a private file rather than the SSH socket. SSH only tails that log. **Stop run** sends an explicit cancellation control byte after the snapshot; the supervisor kills the build's process group, including ordinary descendants. An independent **15-minute remote watchdog** remains active after disconnect. The local attachment gives up after 15 minutes plus 15 seconds, without cancelling remote work. Stop cannot be guaranteed through a broken connection; an unconfirmed cancellation is reported as detached rather than cancelled.
@@ -122,7 +126,7 @@ Completed run directories older than seven days are pruned on the next launch in
 
 Keep `.spec-runs/` out of remote version control and artifact uploads, for example by adding it to that checkout's `.git/info/exclude`. Private filesystem permissions do not prevent a same-user tool from reading or committing session files.
 
-Web run records/associations remain in-memory: browser reload/server restart does not reattach to sessions. Recovery and cancellation after disconnect are manual, not automatic replay or restart. Local concurrency limits count attached runs only; inspect remote sessions before retrying a disconnected run to avoid duplicate work and costs.
+Run records and latest-run associations persist privately in the local workspace's `.spec-output/` directory. After restarting the server, connect using its newly printed token and open the spec from **Saved files** to restore its latest output and status. Live or unresolved sessions resume polling; **Recover output** retries a failed lookup without launching a build or replacing the editor buffer. Recovery requires the same remote configuration for unfinished sessions; cached finished output remains available without SSH. **Stop run** explicitly cancels a recovered session. Unresolved sessions count toward concurrency limits and block another run for the same file. This recovers logs/status, not interactive session steering or replay. Local records have no automatic disk pruning; protect them like specs because they can contain sensitive runtime output.
 
 Builds are capped at **120 KiB** because some existing launchers forward the prompt as one Linux process argument. Editing/saving support 2 MiB. Remote launchers using Bash command substitution may strip trailing newlines and must use an end-of-options separator when passing prompts to their engine.
 

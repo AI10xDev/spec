@@ -1,6 +1,6 @@
 export type Document = { name: string; content: string; revision: string }
 export type Tab = { name: string; content: string; saved: string; revision: string | null }
-export type Output = { id: string; name: string; status: string; output: string; truncated: boolean }
+export type Output = { id: string; name: string; status: string; output: string; truncated: boolean; recoverable: boolean }
 
 export function openTab(tabs: Tab[], document: Document): Tab[] {
   // Selecting an already-open file must never replace its unsaved buffer.

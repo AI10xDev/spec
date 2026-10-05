@@ -665,6 +665,7 @@ exit 7
             .await;
             assert_eq!(recovered["id"], id);
             assert_eq!(recovered["status"], "running");
+            assert_eq!(recovered["recoverable"], true);
             assert!(
                 recovered["output"]
                     .as_str()
@@ -708,6 +709,7 @@ exit 7
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let recovered = json(response).await;
+        assert_eq!(recovered["recoverable"], false);
         assert_eq!(
             recovered["status"],
             if cancel_run {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { completionPrefix } from "./completions"
+import { completionMarker } from "./completion-marker"
 
 type Props = {
   name: string
@@ -94,13 +95,33 @@ export function Editor({ name, value: content, token, available, enabled, onEnab
       <div ref={mirror} className="code completion-mirror" aria-hidden="true">
         {value.slice(0, selection.start)}<span className="completion-anchor"><span className="completion-ghost">{suffix}</span></span>{value.slice(selection.start)}{"\n"}
       </div>
-      <textarea ref={input} className="code" aria-label={`Edit ${name}`} aria-describedby="completion-help" spellCheck={false} value={value} placeholder="# What should we build?"
+      <textarea ref={input} className="code" aria-label={`Edit ${name}`} aria-describedby="completion-help editor-shortcuts" title="/ toggles completed outside fenced code; Alt+/ types a literal slash" spellCheck={false} value={value} placeholder="What should we build?"
         onChange={(event) => { onChange(event.target.value); select(); setDismissed(false) }}
         onSelect={select} onScroll={scroll}
         onFocus={() => { setFocused(true); select() }} onBlur={() => setFocused(false)}
         onCompositionStart={() => setComposing(true)} onCompositionEnd={() => { setComposing(false); select() }}
         onKeyDown={(event) => {
-          if (event.nativeEvent.isComposing) return
+          if (composing || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return
+          const literalSlash = event.altKey && (event.key === "/" || event.code === "Slash")
+          if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.getModifierState("AltGraph") && (literalSlash || (!event.altKey && event.key === "/"))) {
+            const node = event.currentTarget
+            const { selectionStart: start, selectionEnd: end, selectionDirection: direction, scrollTop, scrollLeft } = node
+            const edit = literalSlash ? { start, end, text: "/" } : completionMarker(node.value, direction === "backward" ? start : end)
+            if (!edit) return
+            event.preventDefault()
+            node.setSelectionRange(edit.start, edit.end)
+            // Like accepting a completion, this is a native, undoable textarea edit.
+            if (!document.execCommand(edit.text ? "insertText" : "delete", false, edit.text)) node.setRangeText(edit.text, edit.start, edit.end, "end")
+            const adjust = (position: number) => position < edit.start ? position : Math.max(edit.start, position + edit.text.length - (edit.end - edit.start))
+            if (!literalSlash) node.setSelectionRange(adjust(start), adjust(end), direction)
+            node.scrollTop = scrollTop
+            node.scrollLeft = scrollLeft
+            onChange(node.value)
+            select()
+            setDismissed(true)
+            setSuggestion({ value: "", start: 0, suffix: "" })
+            return
+          }
           if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); onSave() }
           if (event.key === "Escape") { setDismissed(true); setSuggestion({ value: "", start: 0, suffix: "" }) }
           if (event.key === "Tab" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && suffix) { event.preventDefault(); accept() }

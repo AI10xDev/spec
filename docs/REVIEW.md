@@ -94,7 +94,7 @@ Design tradeoffs:
 - Atomic saves and stale-edit detection; no transactional protection against a malicious same-user process changing paths concurrently.
 - One-shot process execution; no claim to reproduce persistent V2 session admission, steering, replay, or crash recovery.
 - Browser output is plain text; no hidden chain-of-thought request or HTML execution.
-- Web output buffers and run associations are in-memory; remote supervisors retain bounded logs and final status after disconnect. Saved files are durable.
+- Web output buffers and latest-run associations persist privately in `.spec-output/`; reopening a saved spec recovers output without relaunch. Remote supervisors retain bounded logs and final status after disconnect. Saved files are durable.
 - New files are mode `0600`; replacing an existing file also changes its permissions to `0600` and replaces its inode. Do not use this editor to maintain executables or files whose ACLs/hard-link identity must be retained.
 
 ## Validation

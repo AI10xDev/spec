@@ -83,15 +83,15 @@ function App() {
   }, [tabs])
 
   useEffect(() => {
-    if (!output || output.status !== "running") return
+    if (!output?.recoverable) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
     async function poll() {
       try {
         const next = await api<Output>(`/runs/${output!.id}`)
         if (cancelled) return
-        setOutputs((items) => ({ ...items, [next.name]: next }))
-        if (next.status === "running") timer = setTimeout(poll, 650)
+        setOutputs((items) => items[next.name]?.id === next.id ? { ...items, [next.name]: next } : items)
+        if (next.recoverable) timer = setTimeout(poll, next.status === "running" ? 650 : 2500)
       } catch (error) {
         if (cancelled) return
         fail(error)
@@ -100,18 +100,31 @@ function App() {
     }
     void poll()
     return () => { cancelled = true; clearTimeout(timer) }
-  }, [output?.id, output?.status, token])
+  }, [output?.id, output?.recoverable, token])
 
   useEffect(() => {
     if (follow && log.current) log.current.scrollTop = log.current.scrollHeight
   }, [output?.output, follow])
 
+  async function recoverOutput(name: string) {
+    const previous = outputs[name]
+    try {
+      const latest = await api<Output | null>(`/files/${encodeURIComponent(name)}/run`)
+      // A slow recovery must not overwrite a newly started run or a fresher poll.
+      if (latest) setOutputs((items) => items[name] === previous ? { ...items, [name]: latest } : items)
+    } catch (error) {
+      fail(`Could not recover output for ${name}: ${error instanceof Error ? error.message : String(error)}. Use Recover output to retry.`)
+    }
+  }
+
   async function open(name: string) {
     setError("")
-    if (tabs.some((item) => item.name === name)) { setActive(name); return }
-    const document = await api<Document>(`/files/${encodeURIComponent(name)}`)
-    setTabs((items) => openTab(items, document))
+    if (!tabs.some((item) => item.name === name)) {
+      const document = await api<Document>(`/files/${encodeURIComponent(name)}`)
+      setTabs((items) => openTab(items, document))
+    }
     setActive(name)
+    void recoverOutput(name)
   }
 
   function create(event: React.FormEvent) {
@@ -146,7 +159,7 @@ function App() {
       await refresh()
       if (!run) return
       const job = await api<{ id: string }>("/runs", { name: document.name, revision: document.revision })
-      setOutputs((items) => ({ ...items, [document.name]: { ...job, name: document.name, output: "Starting…", status: "running", truncated: false } }))
+      setOutputs((items) => ({ ...items, [document.name]: { ...job, name: document.name, output: "Starting…", status: "running", truncated: false, recoverable: true } }))
     } catch (error) { fail(error) } finally { setBusy(false) }
   }
 
@@ -208,19 +221,19 @@ function App() {
             {tab ? <Editor key={tab.name} name={tab.name} value={tab.content} token={token} available={completion} enabled={complete} onEnabled={setComplete} onSave={() => void save()} onChange={(content) => {
               setTabs((items) => items.map((item) => item.name === active ? { ...item, content } : item))
             }} /> : <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
-            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || output?.status === "running"} onClick={() => {
+            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || output?.recoverable} onClick={() => {
               if (window.confirm("Send this saved spec over SSH and run remote spec build? Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.")) void save(true)
             }}>Save & run ↗</button></div></footer>
           </section>
           <section className="output-pane" aria-label="Output and logs pane">
             <div className="pane-heading"><div><span className="eyebrow">02 / OUTPUT</span><h2>Output & logs</h2></div><span className="badge">{output?.status ?? "Idle"}</span></div>
-            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{output?.status === "running" && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}</div>
+            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{tab?.revision && <button onClick={() => { setError(""); void recoverOutput(tab.name) }}>Recover output</button>}{output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}</div>
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
             <pre ref={log} className="output" aria-label="Run output">{output?.output ?? (execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
             <footer className="output-footer">Available output only. No hidden model reasoning is requested.</footer>
           </section>
         </div>
-        <div className="statusbar"><span role="status">{notice || "Ready"}</span><span>⌘ / Ctrl + S to save · 2 MiB file limit</span></div>
+        <div className="statusbar"><span role="status">{notice || "Ready"}</span><span id="editor-shortcuts">/ toggle completed (outside fenced code); Alt+/ type /</span><span>⌘ / Ctrl + S to save · 2 MiB file limit</span></div>
       </main>
     </div>
   </div>

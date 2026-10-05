@@ -115,6 +115,7 @@ struct Output {
     status: String,
     output: String,
     truncated: bool,
+    recoverable: bool,
 }
 
 struct Error(StatusCode, String);
@@ -502,6 +503,7 @@ async fn output(State(app): State<App>, Path(id): Path<String>) -> Result<Json<O
         output: String::from_utf8_lossy(&job.output.iter().copied().collect::<Vec<_>>())
             .into_owned(),
         truncated: job.truncated,
+        recoverable: job.recover,
     }))
 }
 

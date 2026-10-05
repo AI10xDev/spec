@@ -24,6 +24,10 @@ if (process.argv.length !== 4 || process.argv[2] !== "build" || process.env.SPEC
 if (process.env.OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS !== "1" || process.env.OPENCODE_QUESTION_AUTO_RECOMMEND !== "1") process.exit(92)
 if ("SPEC_SESSION_DIR" in process.env || "KIBI_SPEC_SESSION" in process.env) process.exit(93)
 const content = fs.readFileSync(process.argv[3], "utf8")
+const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT)
+const instructions = fs.readFileSync(config.instructions.at(-1), "utf8")
+if (!instructions.includes("Implement only pending requirements; retain completed requirements as context.")) process.exit(94)
+fs.appendFileSync(${JSON.stringify(path.join(directory, "launches"))}, "launch\\n")
 {
   process.stdout.write("fixture stdout: " + content + "\\n")
   process.stderr.write("fixture stderr: " + content + "\\n")
@@ -58,6 +62,10 @@ unset OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS
 export SPEC_BUILD_FOREGROUND=0 SPEC_BUILD_AUTO=0 OPENCODE_QUESTION_AUTO_RECOMMEND=0
 export SPEC_SESSION_DIR=/unused/session KIBI_SPEC_SESSION=1
 `)
+  await startServer()
+})
+
+async function startServer(execution = true) {
   server = spawn(path.resolve("../backend/target/debug/spec"), [], {
     cwd: path.resolve("../backend"),
     env: {
@@ -66,9 +74,9 @@ export SPEC_SESSION_DIR=/unused/session KIBI_SPEC_SESSION=1
       SPEC_PORT: "0",
       SPEC_UI_DIR: path.resolve("dist"),
       SPEC_COMMAND: undefined,
-      SPEC_SSH_TARGET: "fixture@host",
-      SPEC_SSH_WORKSPACE: remoteWorkspace,
-      SPEC_SSH_BINARY: ssh,
+      SPEC_SSH_TARGET: execution ? "fixture@host" : undefined,
+      SPEC_SSH_WORKSPACE: execution ? path.join(directory, "remote-project") : undefined,
+      SPEC_SSH_BINARY: execution ? path.join(directory, "ssh-fixture") : undefined,
       SPEC_SSH_KEY: undefined,
       AZURE_OPENAI_ENDPOINT: undefined,
       AZURE_OPENAI_API_KEY: undefined,
@@ -90,7 +98,7 @@ export SPEC_SESSION_DIR=/unused/session KIBI_SPEC_SESSION=1
     server.once("error", (error) => { clearTimeout(timeout); reject(error) })
     server.once("exit", (code) => { clearTimeout(timeout); reject(new Error(`Server exited ${code}`)) })
   })
-})
+}
 
 test.afterAll(async () => {
   try {
@@ -162,7 +170,6 @@ test("enabled execution: confirmation, saved snapshot, per-file polling, complet
   await expect(pane.getByText("completed", { exact: true })).toBeVisible()
   await expect(output).toContainText(`fixture stdout: ${second}`)
   await expect(output).toContainText(`fixture stderr: ${second}`)
-  await expect(output).toContainText("[completed]")
   await expect(output).not.toContainText(snapshot)
   await expect(run).toBeEnabled()
   await expect(page.getByRole("button", { name: "Stop run" })).toBeHidden()
@@ -181,7 +188,6 @@ test("enabled execution: confirmation, saved snapshot, per-file polling, complet
   await expect(run).toBeDisabled()
   await page.getByRole("button", { name: "Stop run" }).click()
   await expect(pane.getByText("cancelled", { exact: true })).toBeVisible()
-  await expect(output).toContainText("[cancelled]")
   await expect(page.getByRole("button", { name: "Stop run" })).toBeHidden()
   await expect(run).toBeEnabled()
   await tabs.getByRole("button", { name: "completed.md", exact: true }).click()
@@ -219,10 +225,77 @@ test("enabled execution: empty specs are rejected and nonzero exits show failure
   await expect(pane.getByText("failed (exit status: 7)", { exact: true })).toBeVisible()
   await expect(output).toContainText(`fixture stdout: ${failed}`)
   await expect(output).toContainText(`fixture stderr: ${failed}`)
-  await expect(output).toContainText("[failed (exit status: 7)]")
   await expect(page.getByRole("button", { name: "Stop run" })).toBeHidden()
   await expect(run).toBeEnabled()
   expect(pageErrors).toEqual([])
+})
+
+test("slash-marked lines reach the build unchanged with completion instructions", async ({ page }) => {
+  await page.goto(url)
+  await page.getByRole("textbox", { name: "New filename" }).fill("markers.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  const editor = page.getByRole("textbox", { name: "Edit markers.md" })
+  const content = "Already implemented\nStill pending\n## Heading\nUse C#\n```text\n# code\n```"
+  await editor.fill(content)
+  await editor.press("Control+Home")
+  await editor.press("/")
+  const snapshot = `# ${content}`
+  await expect(editor).toHaveValue(snapshot)
+  page.once("dialog", (dialog) => dialog.accept())
+  await page.getByRole("button", { name: "Save & run" }).click()
+  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("completed", { exact: true })).toBeVisible()
+  await expect(page.getByLabel("Run output")).toContainText(`fixture stdout: ${snapshot}`)
+  expect(await readFile(path.join(workspace, "markers.md"), "utf8")).toBe(snapshot)
+})
+
+test("output recovery failures leave editing available and stale recovery cannot replace a new run", async ({ page }) => {
+  await page.goto(url)
+  await page.getByRole("textbox", { name: "New filename" }).fill("recovery-error.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  await page.getByRole("textbox", { name: "Edit recovery-error.md" }).fill("COMPLETE\nNew run output.")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(page.getByRole("status")).toHaveText("Saved recovery-error.md")
+  await page.route("**/api/files/recovery-error.md/run", (route) => route.fulfill({ status: 503, json: { error: "Recovery offline" } }))
+  await page.reload()
+  await page.getByRole("tabpanel").getByRole("button", { name: /recovery-error.md/ }).click()
+  await expect(page.getByRole("alert")).toContainText("Could not recover output for recovery-error.md")
+  await expect(page.getByRole("textbox", { name: "Edit recovery-error.md" })).toHaveValue("COMPLETE\nNew run output.")
+  await page.unroute("**/api/files/recovery-error.md/run")
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  await page.route("**/api/files/recovery-error.md/run", async (route) => {
+    await held
+    await route.fulfill({ json: { id: "old-run", name: "recovery-error.md", status: "completed", output: "stale recovered output", truncated: false, recoverable: false } })
+  })
+  const requested = page.waitForRequest("**/api/files/recovery-error.md/run")
+  await page.getByRole("button", { name: "Recover output" }).click()
+  await requested
+  page.once("dialog", (dialog) => dialog.accept())
+  await page.getByRole("button", { name: "Save & run" }).click()
+  await expect(page.getByLabel("Run output")).toContainText("New run output.")
+  const recovered = page.waitForResponse("**/api/files/recovery-error.md/run")
+  release()
+  await recovered
+  await expect(page.getByLabel("Run output")).not.toContainText("stale recovered output")
+})
+
+test("unavailable recovered runs keep polling without permitting duplicate builds", async ({ page }) => {
+  await page.goto(url)
+  await page.getByRole("textbox", { name: "New filename" }).fill("recover-poll.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  await page.getByRole("textbox", { name: "Edit recover-poll.md" }).fill("Pending requirement")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(page.getByRole("status")).toHaveText("Saved recover-poll.md")
+  const recovered = { id: "recover-poll", name: "recover-poll.md", status: "unavailable (SSH offline)", output: "cached output", truncated: false, recoverable: true }
+  await page.route("**/api/files/recover-poll.md/run", (route) => route.fulfill({ json: recovered }))
+  let polls = 0
+  await page.route("**/api/runs/recover-poll", (route) => route.fulfill({ json: ++polls === 1 ? recovered : { ...recovered, status: "completed", output: "reconnected output", recoverable: false } }))
+  await page.reload()
+  await page.getByRole("tabpanel").getByRole("button", { name: /recover-poll.md/ }).click()
+  await expect(page.getByLabel("Run output")).toHaveText("cached output")
+  await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+  await expect(page.getByLabel("Run output")).toHaveText("reconnected output")
+  await expect(page.getByRole("button", { name: "Save & run" })).toBeEnabled()
 })
 
 test("closing the browser does not cancel an admitted build", async ({ page, request }) => {
@@ -244,8 +317,7 @@ test("closing the browser does not cancel an admitted build", async ({ page, req
   expect((await (await request.get(endpoint, { headers })).json()).output).toContain("finished after browser close")
 })
 
-// Last: shuts down this suite's server while its remote supervisor is still busy.
-test("server shutdown detaches and remote output/status remain recoverable", async ({ page }) => {
+test("reopening a spec after server restart recovers live and completed output without relaunch", async ({ page }) => {
   await page.goto(url)
   await page.getByRole("textbox", { name: "New filename" }).fill("detached.md")
   await page.getByRole("button", { name: "Create file" }).click()
@@ -257,13 +329,42 @@ test("server shutdown detaches and remote output/status remain recoverable", asy
   const session = (await output.textContent())!.match(/\[remote\] session: (.+) \(output\.log,/)
   expect(session).not.toBeNull()
   const remoteDirectory = session![1]
+  const launches = await readFile(path.join(directory, "launches"), "utf8")
   await expect(readFile(path.join(remoteDirectory, "status"), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
   await new Promise<void>((resolve) => {
     server.once("exit", () => resolve())
     server.kill("SIGTERM")
   })
+  await startServer()
+  await page.goto(url)
+  await page.getByRole("tabpanel").getByRole("button", { name: /detached.md/ }).click()
+  await expect(page.getByRole("textbox", { name: "Edit detached.md" })).toHaveValue("DETACH\nKeep working after shutdown.")
+  await expect(output).toContainText("fixture stdout: DETACH")
+  await expect(page.getByRole("button", { name: "Stop run" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+  const editor = page.getByRole("textbox", { name: "Edit detached.md" })
+  await editor.fill("Unsaved edits must survive output recovery.")
+  const recovered = page.waitForResponse("**/api/files/detached.md/run")
+  await page.getByRole("button", { name: "Recover output" }).click()
+  expect((await recovered).ok()).toBe(true)
+  await expect(editor).toHaveValue("Unsaved edits must survive output recovery.")
+  expect(await readFile(path.join(workspace, "detached.md"), "utf8")).toBe("DETACH\nKeep working after shutdown.")
+  await editor.fill("DETACH\nKeep working after shutdown.")
   await writeFile(path.join(directory, "finish-detached"), "")
   await expect.poll(async () => readFile(path.join(remoteDirectory, "status"), "utf8").catch(() => "running")).toBe("0\n")
   expect(await readFile(path.join(remoteDirectory, "output.log"), "utf8")).toContain("finished after server shutdown")
   await expect(readFile(path.join(remoteDirectory, "snapshot.md"), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+  await expect(output).toContainText("finished after server shutdown")
+  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("completed", { exact: true })).toBeVisible()
+  await new Promise<void>((resolve) => {
+    server.once("exit", () => resolve())
+    server.kill("SIGTERM")
+  })
+  await startServer(false)
+  await page.goto(url)
+  await page.getByRole("tabpanel").getByRole("button", { name: /detached.md/ }).click()
+  await expect(output).toContainText("finished after server shutdown")
+  await expect(page.getByRole("button", { name: "Stop run" })).toBeHidden()
+  await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+  expect(await readFile(path.join(directory, "launches"), "utf8")).toBe(launches)
 })

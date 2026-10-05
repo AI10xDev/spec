@@ -91,7 +91,7 @@ h2 { margin: 8px 0 0; font-size: 17px; font-weight: 500; overflow-wrap: anywhere
 .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--border); padding: 12px; font-size: 10px; color: var(--muted); }
 .toolbar div { display: flex; flex-wrap: wrap; gap: 6px; }
 .toolbar button { font-size: 11px; padding: 7px 9px; }
-.output-controls { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; color: var(--muted); font-size: 11px; }
+.output-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 12px 24px; color: var(--muted); font-size: 11px; }
 .output-controls label { display: flex; align-items: center; gap: 6px; }
 input[type=checkbox] { accent-color: var(--primary); }
 .output { flex: 1; min-height: 100px; margin: 0; padding: 18px 24px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.85 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--output-text); }

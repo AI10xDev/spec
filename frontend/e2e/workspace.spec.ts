@@ -273,6 +273,107 @@ test("edits during a real in-flight save retain the later buffer and save again 
   expect(await readFile(path.join(directory, "inflight.md"), "utf8")).toBe(edited)
 })
 
+test.describe("spec line completion shortcut", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto(url)
+    await page.getByRole("textbox", { name: "New filename" }).fill("markers.md")
+    await page.getByRole("button", { name: "Create file" }).click()
+  })
+
+  test("bare slash marks and reopens only the current line, preserving indentation, caret and native undo", async ({ page }) => {
+    const editor = page.getByRole("textbox", { name: "Edit markers.md" })
+    await expect(editor).toHaveAttribute("placeholder", "What should we build?")
+    await expect(page.locator("#editor-shortcuts")).toContainText("Alt+/ type /")
+    const original = "First\n \t  Build a task\n# Already completed"
+    const marked = "First\n \t  # Build a task\n# Already completed"
+    const caret = original.indexOf("task") + 2
+    await editor.fill(original)
+    await editor.evaluate((node: HTMLTextAreaElement, caret) => node.setSelectionRange(caret, caret), caret)
+    await editor.press("/")
+    await expect(editor).toHaveValue(marked)
+    expect(await editor.evaluate((node: HTMLTextAreaElement) => [node.selectionStart, node.selectionEnd])).toEqual([caret + 2, caret + 2])
+    await editor.press("Control+z")
+    await expect(editor).toHaveValue(original)
+    await editor.press("Control+Shift+z")
+    await expect(editor).toHaveValue(marked)
+    await editor.evaluate((node: HTMLTextAreaElement, caret) => node.setSelectionRange(caret, caret), caret + 2)
+    await editor.press("/")
+    await expect(editor).toHaveValue(original)
+    expect(await editor.evaluate((node: HTMLTextAreaElement) => [node.selectionStart, node.selectionEnd])).toEqual([caret, caret])
+    await editor.press("Control+z")
+    await expect(editor).toHaveValue(marked)
+    await editor.press("Control+Shift+z")
+    await expect(editor).toHaveValue(original)
+
+    // A caret within indentation stays there; selected text is not replaced.
+    await editor.evaluate((node: HTMLTextAreaElement) => node.setSelectionRange(7, 7))
+    await editor.press("/")
+    expect(await editor.evaluate((node: HTMLTextAreaElement) => node.selectionStart)).toBe(7)
+    await expect(editor).toHaveValue(marked)
+    await editor.evaluate((node: HTMLTextAreaElement, caret) => node.setSelectionRange(caret, caret + 2, "backward"), caret + 2)
+    await editor.press("/")
+    await expect(editor).toHaveValue(original)
+    expect(await editor.evaluate((node: HTMLTextAreaElement) => [node.selectionStart, node.selectionEnd, node.selectionDirection])).toEqual([caret, caret + 2, "backward"])
+
+    for (const line of ["## Heading", "#tag", "/# Pending", ""]) {
+      await editor.fill(line)
+      await editor.press("/")
+      await expect(editor).toHaveValue(`# ${line}`)
+      await editor.press("/")
+      await expect(editor).toHaveValue(line)
+    }
+  })
+
+  test("Alt+slash inserts a literal slash with native undo while other modified keys and IME stay native", async ({ page }) => {
+    const editor = page.getByRole("textbox", { name: "Edit markers.md" })
+    await editor.fill("path")
+    await editor.press("Alt+/")
+    await expect(editor).toHaveValue("path/")
+    await editor.press("Control+z")
+    await expect(editor).toHaveValue("path")
+    await editor.press("Control+Shift+z")
+    await expect(editor).toHaveValue("path/")
+    await editor.press("?")
+    await expect(editor).toHaveValue("path/?")
+    for (const init of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { isComposing: true }, { keyCode: 229 }]) {
+      expect(await editor.evaluate((node, init) => node.dispatchEvent(new KeyboardEvent("keydown", { key: "/", code: "Slash", bubbles: true, cancelable: true, ...init })), init)).toBe(true)
+      await expect(editor).toHaveValue("path/?")
+    }
+    await editor.dispatchEvent("compositionstart", { data: "" })
+    await editor.press("/")
+    await expect(editor).toHaveValue("path/?/")
+    await editor.dispatchEvent("compositionend", { data: "/" })
+    await editor.press("/")
+    await expect(editor).toHaveValue("# path/?/")
+  })
+
+  test("slash types normally in fenced code, including delimiters, and toggles again after a matching closer", async ({ page }) => {
+    const editor = page.getByRole("textbox", { name: "Edit markers.md" })
+    for (const [opening, closing] of [["```js", "```"], ["  ~~~~", "  ~~~~~"]]) {
+      const text = `${opening}\n# code\n${closing}\nPending`
+      for (const caret of [0, text.indexOf("# code") + 2, text.indexOf(closing, opening.length)]) {
+        await editor.fill(text)
+        await editor.evaluate((node: HTMLTextAreaElement, caret) => node.setSelectionRange(caret, caret), caret)
+        await editor.press("/")
+        await expect(editor).toHaveValue(`${text.slice(0, caret)}/${text.slice(caret)}`)
+        await editor.press("Control+z")
+        await expect(editor).toHaveValue(text)
+      }
+      await editor.press("Control+End")
+      await editor.press("/")
+      await expect(editor).toHaveValue(`${opening}\n# code\n${closing}\n# Pending`)
+    }
+    for (const text of ["```\n# code", "````\n```\n# code", "~~~\n```\n# code", "```\n``` trailing\n# code"]) {
+      await editor.fill(text)
+      await editor.press("/")
+      await expect(editor).toHaveValue(`${text}/`)
+    }
+    await editor.fill("Use `inline code`\nPending")
+    await editor.press("/")
+    await expect(editor).toHaveValue("Use `inline code`\n# Pending")
+  })
+})
+
 test.describe("trailing completions", () => {
   test.beforeEach(async ({ page }) => {
     await page.route("**/api/config", (route) => route.fulfill({ json: { execution: false, completion: true } }))
