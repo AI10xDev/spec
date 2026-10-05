@@ -6,9 +6,9 @@ This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/A
 
 ## Workspace showcase
 
-![Animated screenshot tour highlighting saved files, multiple editor tabs, and side-by-side specification editing and output](docs/workspace.gif)
+![Animated tour of the spec workspace showing saved files, multiple editor tabs, and completed remote SSH build output beside the specification](docs/workspace.gif)
 
-[View the still screenshot](docs/workspace.png). This tour highlights an existing UI screenshot, not a live execution recording. The screenshot's execution-settings text is from an earlier version; use the current setup instructions below.
+[View the original screenshot](Screenshot%20From%202026-10-05%2019-07-10.png). This looping tour uses the October 5, 2026 screenshot to highlight saved files, multiple editor tabs, and side-by-side specification editing and completed remote SSH build output. It is an animated screenshot showcase, not a live execution recording.
 
 ## Features
 
