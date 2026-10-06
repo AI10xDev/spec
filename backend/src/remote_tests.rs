@@ -39,7 +39,7 @@ fn ssh_is_noninteractive_with_host_verification_and_no_forwarding() {
         directory: "/remote/project".into(),
         key: Some("/local/key with spaces".into()),
     };
-    let command = remote.command(42, &Uuid::new_v4().to_string());
+    let command = remote.command(42, &Uuid::new_v4().to_string(), "a.md");
     let args: Vec<_> = command
         .as_std()
         .get_args()
@@ -79,6 +79,7 @@ async fn truncated_upload_never_starts_build_and_removes_snapshot() {
             include_str!("remote-alias.bash"),
             include_str!("remote-supervisor.bash"),
             &Uuid::new_v4().to_string(),
+            "a.md",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -113,7 +114,7 @@ async fn remote_function_is_supported_and_missing_spec_is_reported() {
             "PATH=/nonexistent\n"
         }).unwrap();
         let mut child = remote
-            .command(5, &Uuid::new_v4().to_string())
+            .command(5, &Uuid::new_v4().to_string(), "a.md")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -217,7 +218,7 @@ exit {status}
         }
         fs::write(aliases, definition).unwrap();
         let mut child = remote
-            .command(5, &Uuid::new_v4().to_string())
+            .command(5, &Uuid::new_v4().to_string(), "a.md")
             .env("PATH", format!("{}:/usr/bin:/bin", runtime_bin.display()))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -280,6 +281,7 @@ spec() {
                 include_str!("remote-alias.bash"),
                 &supervisor,
                 &Uuid::new_v4().to_string(),
+                "a.md",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -381,7 +383,7 @@ spec() {
     )
     .unwrap();
     let mut child = remote
-        .command(5, &Uuid::new_v4().to_string())
+        .command(5, &Uuid::new_v4().to_string(), "a.md")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -417,13 +419,13 @@ spec() {
     assert!(root.path().join("wrote-all").exists());
     assert!(!snapshot.exists());
     assert_eq!(fs::read_dir(directory).unwrap().count(), 3);
-    let log = fs::read(directory.join("output.log")).unwrap();
+    let log = fs::read(directory.join("a.md.out")).unwrap();
     assert_eq!(log.len(), 8 * 1024 * 1024);
     assert!(log.starts_with(b"output after disconnect\n"));
     for (path, mode) in [
         (directory.to_owned(), 0o700),
         (directory.join("status"), 0o600),
-        (directory.join("output.log"), 0o600),
+        (directory.join("a.md.out"), 0o600),
     ] {
         assert_eq!(
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
@@ -467,6 +469,7 @@ spec() {
             include_str!("remote-alias.bash"),
             &supervisor,
             &Uuid::new_v4().to_string(),
+            "a.md",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -527,7 +530,7 @@ async fn early_explicit_cancel_is_not_eof_or_snapshot_data() {
     let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
     fs::write(root.path().join(".bash_aliases"), "spec() { sleep 60; }\n").unwrap();
     let mut child = remote
-        .command(5, &Uuid::new_v4().to_string())
+        .command(5, &Uuid::new_v4().to_string(), "a.md")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -575,7 +578,7 @@ async fn retention_prunes_only_old_finished_sessions_and_rejects_unsafe_parent()
         .set_times(fs::FileTimes::new().set_modified(old))
         .unwrap();
     let mut child = remote
-        .command(5, &Uuid::new_v4().to_string())
+        .command(5, &Uuid::new_v4().to_string(), "a.md")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -605,7 +608,7 @@ async fn retention_prunes_only_old_finished_sessions_and_rejects_unsafe_parent()
             fs::set_permissions(&sessions, fs::Permissions::from_mode(0o755)).unwrap();
         }
         let result = remote
-            .command(5, &Uuid::new_v4().to_string())
+            .command(5, &Uuid::new_v4().to_string(), "a.md")
             .stdin(Stdio::null())
             .output()
             .await
@@ -639,12 +642,12 @@ async fn recovery_is_nonlaunching_bounded_and_requires_known_status() {
     fs::write(&log, &content).unwrap();
     fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
     // A missing status/lease is not evidence of success or a living supervisor.
-    let (state, bytes, truncated) = remote.snapshot(&id, false).await.unwrap();
+    let (state, bytes, truncated) = remote.snapshot(&id, false, "a.md").await.unwrap();
     assert!(state.starts_with("unknown"));
     assert_eq!(bytes.len(), MAX_OUTPUT);
     assert!(bytes.ends_with(b"final output"));
     assert!(truncated);
-    assert!(remote.snapshot(&id, true).await.is_err());
+    assert!(remote.snapshot(&id, true, "a.md").await.is_err());
     assert!(!directory.join("cancel").exists());
     let lease = OpenOptions::new()
         .write(true)
@@ -652,20 +655,26 @@ async fn recovery_is_nonlaunching_bounded_and_requires_known_status() {
         .mode(0o600)
         .open(directory.join("lease"))
         .unwrap();
-    let (state, _, _) = remote.snapshot(&id, false).await.unwrap();
+    let (state, _, _) = remote.snapshot(&id, false, "a.md").await.unwrap();
     assert!(state.starts_with("unknown"));
     let lock = nix::fcntl::Flock::lock(lease, nix::fcntl::FlockArg::LockExclusiveNonblock).unwrap();
-    assert_eq!(remote.snapshot(&id, false).await.unwrap().0, "running");
+    assert_eq!(
+        remote.snapshot(&id, false, "a.md").await.unwrap().0,
+        "running"
+    );
     let outside = tempfile::NamedTempFile::new().unwrap();
     fs::write(outside.path(), "do not truncate").unwrap();
     std::os::unix::fs::symlink(outside.path(), directory.join("cancel")).unwrap();
-    assert!(remote.snapshot(&id, true).await.is_err());
+    assert!(remote.snapshot(&id, true, "a.md").await.is_err());
     assert_eq!(
         fs::read_to_string(outside.path()).unwrap(),
         "do not truncate"
     );
     fs::remove_file(directory.join("cancel")).unwrap();
-    assert_eq!(remote.snapshot(&id, true).await.unwrap().0, "running");
+    assert_eq!(
+        remote.snapshot(&id, true, "a.md").await.unwrap().0,
+        "running"
+    );
     assert!(directory.join("cancel").is_file());
     drop(lock);
     for code in [
@@ -673,7 +682,7 @@ async fn recovery_is_nonlaunching_bounded_and_requires_known_status() {
     ] {
         fs::write(&status, code).unwrap();
         fs::set_permissions(&status, fs::Permissions::from_mode(0o600)).unwrap();
-        let result = remote.snapshot(&id, false).await;
+        let result = remote.snapshot(&id, false, "a.md").await;
         if let Some(expected) = match code {
             "0\n" => Some("completed"),
             "7\n" => Some("failed (exit status: 7)"),
@@ -688,7 +697,7 @@ async fn recovery_is_nonlaunching_bounded_and_requires_known_status() {
     }
     assert!(!root.path().join("sourced-aliases").exists());
     for bad_id in ["../outside", "x; touch injected", "", "/tmp/run", "a"] {
-        assert!(remote.snapshot(bad_id, false).await.is_err());
+        assert!(remote.snapshot(bad_id, false, "a.md").await.is_err());
     }
     assert!(!root.path().join("injected").exists());
 }
@@ -704,6 +713,13 @@ async fn recovery_rejects_remote_symlinks_nonregular_files_and_public_storage() 
         "fifo",
         "public",
         "large",
+        "named-log",
+        "named-dangling",
+        "named-fifo",
+        "named-directory",
+        "named-public",
+        "named-hardlink",
+        "named-large",
     ] {
         let root = tempfile::tempdir().unwrap();
         let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
@@ -723,6 +739,12 @@ async fn recovery_rejects_remote_symlinks_nonregular_files_and_public_storage() 
         .unwrap();
         let outside = tempfile::NamedTempFile::new().unwrap();
         fs::write(outside.path(), "0\n").unwrap();
+        if kind.starts_with("named-") {
+            // A safe legacy log must not hide an unsafe expected named log.
+            fs::write(directory.join("status"), "0\n").unwrap();
+            fs::set_permissions(directory.join("status"), fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
         match kind {
             "parent" | "directory" => {
                 let path = if kind == "parent" {
@@ -740,26 +762,214 @@ async fn recovery_rejects_remote_symlinks_nonregular_files_and_public_storage() 
                 .unwrap()
                 .set_len(8388609)
                 .unwrap(),
+            "named-directory" => fs::create_dir(directory.join("a.md.out")).unwrap(),
+            "named-hardlink" => fs::hard_link(outside.path(), directory.join("a.md.out")).unwrap(),
+            "named-public" | "named-large" => {
+                let file = directory.join("a.md.out");
+                fs::write(&file, "named output").unwrap();
+                fs::set_permissions(
+                    &file,
+                    fs::Permissions::from_mode(if kind == "named-public" { 0o644 } else { 0o600 }),
+                )
+                .unwrap();
+                if kind == "named-large" {
+                    File::options()
+                        .write(true)
+                        .open(file)
+                        .unwrap()
+                        .set_len(8388609)
+                        .unwrap();
+                }
+            }
             _ => {
                 let file = directory.join(match kind {
                     "status" => "status",
                     "lease" => "lease",
+                    "named-log" | "named-dangling" | "named-fifo" => "a.md.out",
                     _ => "output.log",
                 });
                 if file.exists() {
                     fs::remove_file(&file).unwrap();
                 }
-                if kind == "fifo" {
+                if kind == "fifo" || kind == "named-fifo" {
                     nix::unistd::mkfifo(&file, nix::sys::stat::Mode::S_IRUSR).unwrap();
+                } else if kind == "named-dangling" {
+                    std::os::unix::fs::symlink(root.path().join("missing"), &file).unwrap();
                 } else {
                     std::os::unix::fs::symlink(outside.path(), &file).unwrap();
                 }
             }
         }
-        assert!(remote.snapshot(&id, false).await.is_err(), "{kind}");
-        assert!(remote.snapshot(&id, true).await.is_err(), "{kind}");
+        assert!(remote.snapshot(&id, false, "a.md").await.is_err(), "{kind}");
+        assert!(remote.snapshot(&id, true, "a.md").await.is_err(), "{kind}");
         assert_eq!(fs::read_to_string(outside.path()).unwrap(), "0\n");
     }
+}
+
+#[tokio::test]
+async fn named_logs_preserve_and_quote_original_filenames_and_recover_without_metadata() {
+    for name in [
+        "a.md",
+        "-a ' \" $(touch injected) `touch injected` ; & $name [*].md",
+        "extensionless",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
+        fs::write(
+            root.path().join(".bash_aliases"),
+            "spec() { cat -- \"$2\"; }\n",
+        )
+        .unwrap();
+        let id = Uuid::new_v4().to_string();
+        let mut child = remote
+            .command(5, &id, name)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"hello").await.unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(stdin);
+        assert!(output.status.success(), "{name:?}: {output:?}");
+        assert_eq!(output.stdout, b"hello");
+        let directory = root.path().join(format!(".spec-runs/run-{id}"));
+        let log = directory.join(format!("{name}.out"));
+        assert_eq!(fs::read(&log).unwrap(), b"hello");
+        assert_eq!(
+            fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let mut files: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        files.sort();
+        let mut expected = vec![format!("{name}.out"), "lease".into(), "status".into()];
+        expected.sort();
+        assert_eq!(files, expected);
+        assert_eq!(
+            remote.snapshot(&id, false, name).await.unwrap(),
+            ("completed".into(), b"hello".to_vec(), false)
+        );
+        fs::write(directory.join("output.log"), "legacy output").unwrap();
+        fs::set_permissions(
+            directory.join("output.log"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(remote.snapshot(&id, false, name).await.unwrap().1, b"hello");
+        fs::remove_file(&log).unwrap();
+        assert_eq!(
+            remote.snapshot(&id, false, name).await.unwrap().1,
+            b"legacy output"
+        );
+        assert!(!root.path().join("injected").exists());
+    }
+}
+
+#[tokio::test]
+async fn invalid_spec_names_cannot_launch_or_recover_even_through_direct_scripts() {
+    let root = tempfile::tempdir().unwrap();
+    let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
+    fs::write(
+        root.path().join(".bash_aliases"),
+        "spec() { touch launched; }\n",
+    )
+    .unwrap();
+    let parent = root.path().join(".spec-runs");
+    let id = Uuid::new_v4().to_string();
+    let directory = parent.join(format!("run-{id}"));
+    fs::create_dir(&parent).unwrap();
+    fs::create_dir(&directory).unwrap();
+    for dir in [&parent, &directory] {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    for (file, content) in [("output.log", "legacy output"), ("status", "0\n")] {
+        fs::write(directory.join(file), content).unwrap();
+        fs::set_permissions(directory.join(file), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    for name in [
+        "",
+        ".",
+        "..",
+        "../escape",
+        "/tmp/escape",
+        "nested/file.md",
+        "nested\\file.md",
+        "bad\nname.md",
+    ] {
+        for direct in [false, true] {
+            let launch_id = Uuid::new_v4().to_string();
+            let mut command = if direct {
+                let mut command = tokio::process::Command::new("bash");
+                command.env("HOME", root.path()).args([
+                    "-c",
+                    include_str!("remote-build.bash"),
+                    "--",
+                    &remote.directory,
+                    "0",
+                    include_str!("remote-alias.bash"),
+                    include_str!("remote-supervisor.bash"),
+                    &launch_id,
+                    name,
+                ]);
+                command
+            } else {
+                remote.command(0, &launch_id, name)
+            };
+            let mut child = command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            // Keep the attachment alive so EOF cannot masquerade as rejection.
+            let stdin = child.stdin.take().unwrap();
+            let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(stdin);
+            assert_eq!(
+                output.status.code(),
+                Some(125),
+                "{name:?}, direct={direct}: {output:?}"
+            );
+            assert!(!parent.join(format!("run-{launch_id}")).exists());
+            assert!(!root.path().join("launched").exists());
+        }
+        for cancel in [false, true] {
+            assert!(
+                remote.snapshot(&id, cancel, name).await.is_err(),
+                "{name:?}"
+            );
+            let output = tokio::process::Command::new("bash")
+                .args([
+                    "-c",
+                    include_str!("remote-recover.bash"),
+                    "--",
+                    &remote.directory,
+                    &id,
+                    if cancel { "cancel" } else { "snapshot" },
+                    name,
+                ])
+                .output()
+                .await
+                .unwrap();
+            assert_eq!(output.status.code(), Some(125), "{name:?}: {output:?}");
+            assert!(output.stdout.is_empty(), "{name:?}");
+        }
+    }
+    assert!(!directory.join("cancel").exists());
+    assert_eq!(
+        fs::read_to_string(directory.join("output.log")).unwrap(),
+        "legacy output"
+    );
 }
 
 #[tokio::test]
@@ -774,7 +984,7 @@ async fn stable_remote_id_refuses_duplicate_launch_even_after_completion() {
     let id = Uuid::new_v4().to_string();
     for duplicate in [false, true] {
         let mut child = remote
-            .command(5, &id)
+            .command(5, &id, "a.md")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -793,7 +1003,7 @@ async fn stable_remote_id_refuses_duplicate_launch_even_after_completion() {
         fs::read_to_string(root.path().join("launches")).unwrap(),
         "launch\n"
     );
-    let (status, output, _) = remote.snapshot(&id, false).await.unwrap();
+    let (status, output, _) = remote.snapshot(&id, false, "a.md").await.unwrap();
     assert_eq!(status, "completed");
     assert_eq!(output, b"original output");
 }
@@ -814,7 +1024,7 @@ async fn recovery_rejects_missing_malformed_and_oversized_ssh_responses() {
         fs::write(&remote.binary, format!("#!/bin/bash\n{script}\n")).unwrap();
         let result = tokio::time::timeout(
             Duration::from_secs(3),
-            remote.snapshot(&Uuid::new_v4().to_string(), false),
+            remote.snapshot(&Uuid::new_v4().to_string(), false, "a.md"),
         )
         .await
         .unwrap();

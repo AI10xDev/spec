@@ -232,7 +232,7 @@ pub(super) async fn refresh(app: &App, id: &str, cancel: bool) -> Result<()> {
     if retry {
         checkpoint(app, id);
     }
-    let identity = {
+    let (identity, name) = {
         let jobs = app.jobs.lock().unwrap();
         let job = jobs.iter().find(|job| job.id == id).unwrap();
         if let Some(error) = &job.persistence_error {
@@ -244,10 +244,10 @@ pub(super) async fn refresh(app: &App, id: &str, cancel: bool) -> Result<()> {
         if job.attached || !job.recover {
             return Ok(());
         }
-        job.remote_identity.clone()
+        (job.remote_identity.clone(), job.name.clone())
     };
     let snapshot = match &app.remote {
-        Some(remote) if remote.identity() == identity => remote.snapshot(id, cancel).await,
+        Some(remote) if remote.identity() == identity => remote.snapshot(id, cancel, &name).await,
         _ => Err("remote configuration does not match the saved run".into()),
     };
     if cancel && let Err(error) = &snapshot {

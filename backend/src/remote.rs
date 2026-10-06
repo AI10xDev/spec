@@ -119,15 +119,16 @@ impl Remote {
         command
     }
 
-    pub fn command(&self, bytes: usize, id: &str) -> Command {
+    pub fn command(&self, bytes: usize, id: &str, name: &str) -> Command {
         self.ssh(format!(
-            "bash -c {} -- {} {} {} {} {}",
+            "bash -c {} -- {} {} {} {} {} {}",
             quote(include_str!("remote-build.bash")),
             quote(&self.directory),
             bytes,
             quote(include_str!("remote-alias.bash")),
             quote(include_str!("remote-supervisor.bash")),
             quote(id),
+            quote(name),
         ))
     }
 
@@ -135,14 +136,16 @@ impl Remote {
         &self,
         id: &str,
         cancel: bool,
+        name: &str,
     ) -> Result<(String, Vec<u8>, bool), String> {
         let mut child = self
             .ssh(format!(
-                "bash -c {} -- {} {} {}",
+                "bash -c {} -- {} {} {} {}",
                 quote(include_str!("remote-recover.bash")),
                 quote(&self.directory),
                 quote(id),
                 if cancel { "cancel" } else { "snapshot" },
+                quote(name),
             ))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

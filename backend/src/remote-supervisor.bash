@@ -32,7 +32,7 @@ trap '' HUP
 trap 'exit 125' INT TERM
 mkfifo "$directory/pipe"
 # Keep the first 8 MiB, then drain without retaining more or breaking the build pipe.
-setsid bash --noprofile --norc -c 'stdbuf -o0 head -c 8388608; cat >/dev/null' < "$directory/pipe" > "$directory/output.log" &
+setsid bash --noprofile --norc -c 'stdbuf -o0 head -c 8388608; cat >/dev/null' < "$directory/pipe" > "$directory/$3" &
 logger=$!
 setsid bash --noprofile --norc -c "$2" -- "$directory/snapshot.md" "$directory/ready" </dev/null > "$directory/pipe" 2>&1 &
 pid=$!

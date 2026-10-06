@@ -582,6 +582,9 @@ printf 'launch\n' >> launches
 cat "$2" > received
 : > began
 printf 'before disconnect\n'
+while [[ ! -f resume ]]; do sleep 0.02; done
+printf 'while detached\n' >&2
+: > resumed
 while [[ ! -f finish ]]; do sleep 0.02; done
 printf 'after disconnect\n'
 exit 7
@@ -614,6 +617,8 @@ exit 7
         wait_for_file(&root.path().join("began")).await;
         let directory = root.path().join(format!(".spec-runs/run-{id}"));
         let stored = root.path().join(format!(".spec-output/{id}.json"));
+        assert!(directory.join("a.md.out").is_file());
+        assert!(!directory.join("output.log").exists());
         for (path, mode) in [
             (root.path().join(".spec-output"), 0o700),
             (stored.clone(), 0o600),
@@ -650,6 +655,9 @@ exit 7
             let _guard = state.recovery_gate.lock().await;
         }
         drop(state);
+        // Produce fresh output with no backend attached, not just a cached checkpoint.
+        fs::write(root.path().join("resume"), "").unwrap();
+        wait_for_file(&root.path().join("resumed")).await;
         let mut fresh = app(root.path());
         fresh.remote = Some(remote.clone());
         if cancel_run {
@@ -671,6 +679,12 @@ exit 7
                     .as_str()
                     .unwrap()
                     .contains("before disconnect")
+            );
+            assert!(
+                recovered["output"]
+                    .as_str()
+                    .unwrap()
+                    .contains("while detached")
             );
             let revision = read(root.path(), "a.md").ok().unwrap().revision;
             assert_eq!(

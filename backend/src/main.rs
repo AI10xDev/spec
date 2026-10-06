@@ -352,7 +352,7 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
         }
         let mut job = Job {
             id: id.clone(),
-            name: input.name,
+            name: input.name.clone(),
             status: "running".into(),
             output: VecDeque::new(),
             truncated: false,
@@ -376,7 +376,7 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
     }
     // Only the fixed remote spec-build adapter is exposed by this API.
     let child = remote
-        .command(document.content.len(), &id)
+        .command(document.content.len(), &id, &input.name)
         .current_dir(&app.root)
         .process_group(0)
         .stdin(Stdio::piped())
@@ -457,7 +457,7 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
         }
         upload.abort();
         if status != "completed" && status != "cancelled" && status != "timed out" {
-            append(&app, &id, b"\n[remote] SSH attachment ended; this does not cancel remote work. Check the session output.log/status before retrying.\n");
+            append(&app, &id, b"\n[remote] SSH attachment ended; this does not cancel remote work. Use Recover output to restore the spec's session log/status before retrying.\n");
         }
         // Reap the local SSH process group as well.
         let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);

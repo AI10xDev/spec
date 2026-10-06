@@ -1,10 +1,14 @@
-# SSH attachment. Arguments: workspace, snapshot bytes, alias script, supervisor, run UUID.
+# SSH attachment. Arguments: workspace, snapshot bytes, alias script, supervisor, run UUID, spec name.
 # Only an explicit C byte after the snapshot cancels; EOF/signals detach.
 set -eu
 umask 077
 cd -- "$1"
 command -v setsid stdbuf flock >/dev/null
 [[ $5 =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 125
+# The original spec name is a basename, never a path or shell expression.
+name=$6
+[[ -n $name && $name != .* && $name != *[/\\:]* && ! $name =~ [[:cntrl:]] && ${#name} -le 180 ]] || exit 125
+log="$name.out"
 mkdir -p .spec-runs
 [[ ! -L .spec-runs && -O .spec-runs && $(stat -c %a .spec-runs) == 700 ]] || {
     echo '[remote] .spec-runs must be an owned, private (0700) directory' >&2
@@ -32,12 +36,12 @@ trap cleanup EXIT
 trap 'exit 125' HUP INT TERM
 head -c "$2" > "$directory/snapshot.md"
 [[ $(wc -c < "$directory/snapshot.md") -eq "$2" ]] || { echo '[remote] incomplete snapshot' >&2; exit 125; }
-: > "$directory/output.log"
+: > "$directory/$log"
 # Ignore HUP before fork, and redirect every SSH descriptor before detaching.
 # Ownership transfers before launch so an attachment signal cannot delete live input.
 trap '' HUP
 launched=1
-setsid flock --exclusive --nonblock --close "$directory/lease" bash --noprofile --norc -c "$4" -- "$directory" "$3" </dev/null >/dev/null 2>&1 &
+setsid flock --exclusive --nonblock --close "$directory/lease" bash --noprofile --norc -c "$4" -- "$directory" "$3" "$log" </dev/null >/dev/null 2>&1 &
 trap 'exit 125' HUP
 # Control must not wait for log writes (or the session notice) to reach SSH.
 attachment=$$
@@ -56,14 +60,14 @@ attachment=$$
     [[ -f "$directory/status" ]] || kill -TERM "$attachment" 2>/dev/null || true
 ) <&0 >/dev/null 2>&1 &
 reader=$!
-printf '[remote] session: %s (output.log, status; EOF detaches)\n' "$directory" >&2
+printf '[remote] session: %s (%s, status; no hangup, EOF detaches)\n' "$directory" "$log" >&2
 offset=0
 while :; do
     finished=
     [[ ! -f "$directory/status" ]] || finished=1
-    size=$(stat -c %s "$directory/output.log")
+    size=$(stat -c %s "$directory/$log")
     if (( size > offset )); then
-        dd if="$directory/output.log" iflag=skip_bytes,count_bytes skip="$offset" count="$((size-offset))" status=none
+        dd if="$directory/$log" iflag=skip_bytes,count_bytes skip="$offset" count="$((size-offset))" status=none
         offset=$size
     fi
     if [[ -n "$finished" ]]; then
