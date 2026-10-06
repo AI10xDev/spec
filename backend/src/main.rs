@@ -457,7 +457,7 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
         }
         upload.abort();
         if status != "completed" && status != "cancelled" && status != "timed out" {
-            append(&app, &id, b"\n[remote] SSH attachment ended; this does not cancel remote work. Use Recover output to restore the spec's session log/status before retrying.\n");
+            append(&app, &id, b"\n[remote] SSH attachment ended; this does not cancel remote work. Use Load nohup output to restore the spec's session log/status before retrying.\n");
         }
         // Reap the local SSH process group as well.
         let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
