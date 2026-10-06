@@ -332,6 +332,30 @@ test("load nohup output reads the spec-named file and reports missing output wit
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
+test("slow nohup loading is not discarded by live output polling", async ({ page }) => {
+  await page.goto(url)
+  await page.getByRole("textbox", { name: "New filename" }).fill("slow-log.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  await page.getByRole("textbox", { name: "Edit slow-log.md" }).fill("Pending requirement")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(page.getByRole("status")).toHaveText("Saved slow-log.md")
+  const running = { id: "slow-log", name: "slow-log.md", status: "running", output: "cached live output", truncated: false, recoverable: true }
+  await page.route("**/api/files/slow-log.md/run", (route) => route.fulfill({ json: running }))
+  await page.route("**/api/runs/slow-log", (route) => route.fulfill({ json: running }))
+  await page.route("**/api/files/slow-log.md/run/log", async (route) => {
+    // Keep the disk read open longer than the live polling interval.
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    await route.fulfill({ json: { ...running, status: "completed", output: "finished output from disk", recoverable: false } })
+  })
+  await page.reload()
+  await expect(page.getByLabel("Run output")).toHaveText("cached live output")
+  await page.getByRole("button", { name: "Load nohup output" }).click()
+  await expect(page.getByRole("button", { name: "Loading output...", exact: true })).toBeDisabled()
+  await expect(page.getByRole("status")).toHaveText("Loaded slow-log.md.out")
+  await expect(page.getByLabel("Run output")).toHaveText("finished output from disk")
+  await expect(page.getByRole("button", { name: "Stop run" })).toBeHidden()
+})
+
 test("closing the browser does not cancel an admitted build", async ({ page, request }) => {
   await page.goto(url)
   await page.getByRole("textbox", { name: "New filename" }).fill("browser-close.md")

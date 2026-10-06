@@ -30,7 +30,7 @@ function App() {
   const [notice, setNotice] = useState("")
   const [busy, setBusy] = useState(false)
   const [outputs, setOutputs] = useState<Record<string, Output>>({})
-  const [loadingOutput, setLoadingOutput] = useState(false)
+  const [loadingOutput, setLoadingOutput] = useState<{ id?: string } | null>(null)
   const [follow, setFollow] = useState(true)
   const log = useRef<HTMLPreElement>(null)
   const tab = tabs.find((item) => item.name === active)
@@ -99,7 +99,8 @@ function App() {
   }, [tabs])
 
   useEffect(() => {
-    if (!output?.recoverable) return
+    // Let an explicit disk read finish without a poll invalidating its result.
+    if (!output?.recoverable || loadingOutput?.id === output.id) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
     async function poll() {
@@ -116,7 +117,7 @@ function App() {
     }
     void poll()
     return () => { cancelled = true; clearTimeout(timer) }
-  }, [output?.id, output?.recoverable, token])
+  }, [output?.id, output?.recoverable, loadingOutput, token])
 
   useEffect(() => {
     if (follow && log.current) log.current.scrollTop = log.current.scrollHeight
@@ -124,7 +125,7 @@ function App() {
 
   async function recoverOutput(name: string, fromLog = false) {
     const previous = outputs[name]
-    if (fromLog) { setLoadingOutput(true); setError(""); setNotice("") }
+    if (fromLog) { setLoadingOutput({ id: previous?.id }); setError(""); setNotice("") }
     try {
       const latest = await api<Output | null>(`/files/${encodeURIComponent(name)}/run${fromLog ? "/log" : ""}`)
       // A slow recovery must not overwrite a newly started run or a fresher poll.
@@ -133,7 +134,7 @@ function App() {
     } catch (error) {
       fail(`Could not recover output for ${name}: ${error instanceof Error ? error.message : String(error)}. Use Load nohup output to retry.`)
     } finally {
-      if (fromLog) setLoadingOutput(false)
+      if (fromLog) setLoadingOutput(null)
     }
   }
 
@@ -247,7 +248,7 @@ function App() {
           </section>
           <section className="output-pane" aria-label="Output and logs pane">
             <div className="pane-heading"><div><span className="eyebrow">02 / OUTPUT</span><h2>Output & logs</h2></div><span className="badge">{output?.status ?? "Idle"}</span></div>
-            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{tab?.revision && <button disabled={loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button>}{output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}</div>
+            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{tab?.revision && <button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button>}{output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}</div>
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
             <pre ref={log} className="output" aria-label="Run output">{output?.output ?? (execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
             <footer className="output-footer">Available output only. No hidden model reasoning is requested.</footer>
