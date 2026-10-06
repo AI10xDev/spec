@@ -519,6 +519,39 @@ async fn latest_output(
     Ok(Json(Some(output)))
 }
 
+async fn output_log(
+    State(app): State<App>,
+    Path(name): Path<String>,
+) -> Result<Json<Option<Output>>> {
+    let Some(id) = recovery::latest(&app, &name)? else {
+        return Ok(Json(None));
+    };
+    let job = recovery::load(&app, &id)?;
+    let remote = app
+        .remote
+        .as_ref()
+        .filter(|remote| remote.identity() == job.remote_identity)
+        .ok_or_else(|| {
+            Error(
+                StatusCode::BAD_GATEWAY,
+                "Remote configuration does not match the saved run".into(),
+            )
+        })?;
+    let (status, bytes, truncated) = remote
+        .snapshot(&id, false, &name)
+        .await
+        .map_err(|error| Error(StatusCode::BAD_GATEWAY, error))?;
+    // A disk snapshot must not replace the buffer an attached SSH stream is appending to.
+    Ok(Json(Some(Output {
+        id,
+        name,
+        recoverable: status == "running" || status.starts_with("unknown"),
+        status,
+        output: String::from_utf8_lossy(&bytes).into_owned(),
+        truncated,
+    })))
+}
+
 async fn cancel(State(app): State<App>, Path(id): Path<String>) -> Result<Json<serde_json::Value>> {
     let _guard = app.recovery_gate.lock().await;
     recovery::initialize(&app)?;
@@ -563,6 +596,7 @@ fn router(app: App) -> Router {
         )
         .route("/api/files/{name}", get(load).put(write))
         .route("/api/files/{name}/run", get(latest_output))
+        .route("/api/files/{name}/run/log", get(output_log))
         .route("/api/runs", post(start))
         .route("/api/runs/{id}", get(output))
         .route("/api/runs/{id}/cancel", post(cancel))

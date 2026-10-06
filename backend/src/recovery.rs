@@ -127,7 +127,7 @@ pub(super) fn latest(app: &App, name: &str) -> Result<Option<String>> {
     Ok(Some(id))
 }
 
-fn load(app: &App, id: &str) -> Result<Job> {
+pub(super) fn load(app: &App, id: &str) -> Result<Job> {
     valid_id(id)?;
     let data = bytes(&directory(app, false)?, &format!("{id}.json"), MAX_RECORD)?;
     let mut job: Job =

@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test"
 import { spawn } from "node:child_process"
 import type { ChildProcess } from "node:child_process"
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -262,17 +262,18 @@ test("output recovery failures leave editing available and stale recovery cannot
   await page.unroute("**/api/files/recovery-error.md/run")
   let release!: () => void
   const held = new Promise<void>((resolve) => { release = resolve })
-  await page.route("**/api/files/recovery-error.md/run", async (route) => {
+  await page.route("**/api/files/recovery-error.md/run/log", async (route) => {
     await held
     await route.fulfill({ json: { id: "old-run", name: "recovery-error.md", status: "completed", output: "stale recovered output", truncated: false, recoverable: false } })
   })
-  const requested = page.waitForRequest("**/api/files/recovery-error.md/run")
-  await page.getByRole("button", { name: "Recover output" }).click()
+  const requested = page.waitForRequest("**/api/files/recovery-error.md/run/log")
+  await page.getByRole("button", { name: "Load nohup output" }).click()
   await requested
+  await expect(page.getByRole("button", { name: "Loading output...", exact: true })).toBeDisabled()
   page.once("dialog", (dialog) => dialog.accept())
   await page.getByRole("button", { name: "Save & run" }).click()
   await expect(page.getByLabel("Run output")).toContainText("New run output.")
-  const recovered = page.waitForResponse("**/api/files/recovery-error.md/run")
+  const recovered = page.waitForResponse("**/api/files/recovery-error.md/run/log")
   release()
   await recovered
   await expect(page.getByLabel("Run output")).not.toContainText("stale recovered output")
@@ -294,6 +295,41 @@ test("unavailable recovered runs keep polling without permitting duplicate build
   await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
   await expect(page.getByLabel("Run output")).toHaveText("reconnected output")
   await expect(page.getByRole("button", { name: "Save & run" })).toBeEnabled()
+})
+
+test("load nohup output reads the spec-named file and reports missing output without launching", async ({ page }) => {
+  await page.goto(url)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole("textbox", { name: "New filename" }).fill("log-file.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  const editor = page.getByRole("textbox", { name: "Edit log-file.md" })
+  await editor.fill("COMPLETE\nRead the background log.")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  const load = page.getByRole("button", { name: "Load nohup output" })
+  await load.click()
+  await expect(page.getByRole("status")).toHaveText("No saved run output for log-file.md. Save & run to create one.")
+  const started = page.waitForResponse((response) => response.url().endsWith("/api/runs") && response.request().method() === "POST")
+  page.once("dialog", (dialog) => dialog.accept())
+  await page.getByRole("button", { name: "Save & run" }).click()
+  const { id } = await (await started).json() as { id: string }
+  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("completed", { exact: true })).toBeVisible()
+  const launches = await readFile(path.join(directory, "launches"), "utf8")
+  const log = path.join(directory, "remote-project", ".spec-runs", `run-${id}`, "log-file.md.out")
+  await appendFile(log, "\nFresh from disk, not cached output. <script>alert(1)</script>\n")
+  const output = page.getByLabel("Run output")
+  await expect(output).not.toContainText("Fresh from disk")
+  await editor.fill("Unsaved editor buffer")
+  await load.click()
+  await expect(output).toContainText("Fresh from disk, not cached output. <script>alert(1)</script>")
+  await expect(page.getByRole("status")).toHaveText("Loaded log-file.md.out")
+  await expect(editor).toHaveValue("Unsaved editor buffer")
+  await rm(log)
+  await load.click()
+  await expect(page.getByRole("alert")).toContainText("Could not recover output for log-file.md")
+  await expect(output).toContainText("Fresh from disk")
+  await expect(editor).toHaveValue("Unsaved editor buffer")
+  expect(await readFile(path.join(directory, "launches"), "utf8")).toBe(launches)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
 test("closing the browser does not cancel an admitted build", async ({ page, request }) => {
@@ -352,8 +388,8 @@ test("startup restores live and completed output after server restart without re
   }
   const editor = page.getByRole("textbox", { name: "Edit detached.md" })
   await editor.fill("Unsaved edits must survive output recovery.")
-  const recovered = page.waitForResponse("**/api/files/detached.md/run")
-  await page.getByRole("button", { name: "Recover output" }).click()
+  const recovered = page.waitForResponse("**/api/files/detached.md/run/log")
+  await page.getByRole("button", { name: "Load nohup output" }).click()
   expect((await recovered).ok()).toBe(true)
   await expect(editor).toHaveValue("Unsaved edits must survive output recovery.")
   expect(await readFile(path.join(workspace, "detached.md"), "utf8")).toBe("DETACH\nKeep working after shutdown.")
@@ -374,6 +410,7 @@ test("startup restores live and completed output after server restart without re
   await expect(output).toContainText("finished after server shutdown")
   await expect(page.getByRole("button", { name: "Stop run" })).toBeHidden()
   await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Load nohup output" })).toBeDisabled()
   expect(await readFile(path.join(directory, "launches"), "utf8")).toBe(launches)
   expect(buildRequests).toEqual([])
 })

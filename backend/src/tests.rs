@@ -75,6 +75,7 @@ async fn all_api_routes_require_authentication() {
         ("GET", "/api/files"),
         ("GET", "/api/files/a.md"),
         ("GET", "/api/files/a.md/run"),
+        ("GET", "/api/files/a.md/run/log"),
         ("PUT", "/api/files/a.md"),
         ("GET", "/api/config"),
         ("POST", "/api/completions"),
@@ -857,6 +858,66 @@ async fn latest_is_null_without_a_run_and_tracks_newest_while_old_ids_remain_rea
 }
 
 #[tokio::test]
+async fn output_log_reads_disk_without_replacing_cached_or_attached_output() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = app(root.path());
+    state.remote = Some(remote_fixture(
+        root.path(),
+        &root.path().join("must-not-launch"),
+    ));
+    let endpoint = "/api/files/a.md/run/log";
+    assert_eq!(
+        json(request(state.clone(), "GET", endpoint, serde_json::Value::Null).await).await,
+        serde_json::Value::Null
+    );
+    let id = Uuid::new_v4().to_string();
+    let job = persisted_job(&id, state.remote.as_ref().unwrap().identity(), false);
+    recovery::persist(&state, &job).ok().unwrap();
+    recovery::set_latest(&state, &job).ok().unwrap();
+    let directory = root.path().join(format!(".spec-runs/run-{id}"));
+    fs::create_dir_all(&directory).unwrap();
+    for path in [directory.parent().unwrap(), directory.as_path()] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let log = directory.join("a.md.out");
+    for (path, contents) in [
+        (&log, "fresh disk output"),
+        (&directory.join("status"), "0\n"),
+    ] {
+        fs::write(path, contents).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    for attached in [false, true] {
+        let mut live_job = persisted_job(&id, job.remote_identity.clone(), attached);
+        live_job.attached = attached;
+        state.jobs.lock().unwrap().clear();
+        state.jobs.lock().unwrap().push(live_job);
+        let response = request(state.clone(), "GET", endpoint, serde_json::Value::Null).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let output = json(response).await;
+        assert_eq!(output["id"], id);
+        assert_eq!(output["output"], "fresh disk output");
+        assert_eq!(output["status"], "completed");
+        assert_eq!(output["recoverable"], false);
+        assert_eq!(state.jobs.lock().unwrap()[0].output, job.output);
+        assert_eq!(recovery::load(&state, &id).ok().unwrap().output, job.output);
+    }
+    fs::write(&log, vec![b'x'; MAX_OUTPUT + 1]).unwrap();
+    let output = json(request(state.clone(), "GET", endpoint, serde_json::Value::Null).await).await;
+    assert_eq!(output["truncated"], true);
+    assert_eq!(output["output"].as_str().unwrap().len(), MAX_OUTPUT);
+    fs::remove_file(&log).unwrap();
+    for linked in [false, true] {
+        if linked {
+            symlink(directory.join("status"), &log).unwrap();
+        }
+        let response = request(state.clone(), "GET", endpoint, serde_json::Value::Null).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(state.jobs.lock().unwrap()[0].output, job.output);
+    }
+}
+
+#[tokio::test]
 async fn changed_remote_identity_never_contacts_ssh_or_loses_cached_output() {
     let root = tempfile::tempdir().unwrap();
     let mut state = app(root.path());
@@ -905,6 +966,17 @@ async fn changed_remote_identity_never_contacts_ssh_or_loses_cached_output() {
                 .contains("configuration does not match")
         );
         assert_eq!(out["output"], "saved output");
+        assert_eq!(
+            request(
+                state.clone(),
+                "GET",
+                "/api/files/a.md/run/log",
+                serde_json::Value::Null
+            )
+            .await
+            .status(),
+            StatusCode::BAD_GATEWAY
+        );
         assert_eq!(
             request(
                 state.clone(),
