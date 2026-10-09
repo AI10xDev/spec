@@ -3,7 +3,7 @@ use axum::{Json, extract::State, http::StatusCode};
 use reqwest::{Client, Url, header::HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 
 pub const MAX_PREFIX: usize = 16 * 1024;
@@ -23,9 +23,33 @@ pub struct Completion {
 
 impl Completion {
     pub fn from_env() -> std::result::Result<Option<Self>, &'static str> {
+        // Read settings without mutating the process environment (the runtime is
+        // already multithreaded). Explicit exports take precedence over the file.
+        let file = match std::env::var_os("SPEC_AI_ENV_FILE") {
+            Some(path) => {
+                dotenvy::from_path_iter(path).map_err(|_| "Could not read SPEC_AI_ENV_FILE")?
+            }
+            None => match dotenvy::from_filename_iter(".env") {
+                Ok(file) => file,
+                Err(dotenvy::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Self::from_settings(&HashMap::new());
+                }
+                Err(_) => return Err("Could not read AI settings from .env"),
+            },
+        };
+        let settings = file
+            .collect::<std::result::Result<HashMap<_, _>, _>>()
+            // Parser errors can include a source line containing credentials.
+            .map_err(|_| "Invalid AI settings file; check dotenv syntax")?;
+        Self::from_settings(&settings)
+    }
+
+    fn from_settings(
+        settings: &HashMap<String, String>,
+    ) -> std::result::Result<Option<Self>, &'static str> {
         let get = |name| match std::env::var(name) {
             Ok(value) => Ok(Some(value)),
-            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotPresent) => Ok(settings.get(name).cloned()),
             Err(_) => Err("Azure completion configuration must be valid UTF-8"),
         };
         Self::configured(

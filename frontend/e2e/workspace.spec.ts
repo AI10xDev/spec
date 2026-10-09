@@ -15,7 +15,7 @@ test.beforeAll(async () => {
   directory = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "spec-e2e-"))
   server = spawn(path.resolve("../backend/target/debug/spec"), [], {
     cwd: path.resolve("../backend"),
-    env: { ...process.env, SPEC_WORKSPACE: directory, SPEC_PORT: "0", SPEC_UI_DIR: path.resolve("dist"), SPEC_COMMAND: undefined, SPEC_SSH_TARGET: undefined, SPEC_SSH_WORKSPACE: undefined, SPEC_SSH_KEY: undefined, SPEC_SSH_BINARY: undefined, AZURE_OPENAI_ENDPOINT: undefined, AZURE_OPENAI_API_KEY: undefined, DEPLOYMENT_NAME: undefined, AZURE_OPENAI_API_VERSION: undefined },
+    env: { ...process.env, SPEC_WORKSPACE: directory, SPEC_PORT: "0", SPEC_UI_DIR: path.resolve("dist"), SPEC_COMMAND: undefined, SPEC_SSH_TARGET: undefined, SPEC_SSH_WORKSPACE: undefined, SPEC_SSH_KEY: undefined, SPEC_SSH_BINARY: undefined, SPEC_AI_ENV_FILE: "/dev/null", AZURE_OPENAI_ENDPOINT: undefined, AZURE_OPENAI_API_KEY: undefined, DEPLOYMENT_NAME: undefined, AZURE_OPENAI_API_VERSION: undefined },
     stdio: ["ignore", "pipe", "pipe"],
   })
   url = await new Promise<string>((resolve, reject) => {
@@ -650,7 +650,7 @@ test.describe("trailing completions", () => {
     const checkbox = page.getByRole("checkbox", { name: "Trailing completions" })
     await expect(checkbox).toBeDisabled()
     await expect(checkbox).not.toBeChecked()
-    await expect(page.getByText("Azure not configured", { exact: true })).toBeVisible()
+    await expect(page.locator("#completion-help")).toContainText("fill in the server .env")
     const editor = page.getByRole("textbox", { name: "Edit unconfigured.md" })
     await editor.fill("Still editable")
     await page.clock.runFor(1500)

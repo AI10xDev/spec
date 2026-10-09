@@ -655,6 +655,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         app.token
     );
     println!("Workspace: {}", app.root.display());
+    if app.completion.is_some() {
+        println!("AI chat and ghost text: enabled");
+    } else {
+        println!(
+            "AI chat and ghost text: disabled. Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env or the server environment; see .env.example. Then restart the server and reload."
+        );
+    }
     if app.remote.is_some() {
         eprintln!(
             "WARNING: SSH spec build requests automatic tool approval (SPEC_BUILD_AUTO=1) with remote user privileges. Only run trusted specs."

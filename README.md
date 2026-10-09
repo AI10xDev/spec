@@ -38,7 +38,9 @@ cd spec
 ./run.sh
 ```
 
-`run.sh` installs frontend dependencies, typechecks/builds the UI, and starts the release Rust server. It can be invoked from any working directory and honors the configuration variables below; relative workspace/UI paths are resolved from `backend/`. Stop it with Ctrl+C.
+`run.sh` loads the remote host from `~/ip` (user `opencode`), uses the local key `$HOME/Downloads/Spec_man.pem`, and creates remote `~/project` if missing. It exports the SSH settings to enable **Save & run**, then installs frontend dependencies, typechecks/builds the UI, and starts the release Rust server. Override the defaults with `SPEC_SSH_TARGET`, `SPEC_SSH_KEY`, and `SPEC_SSH_WORKSPACE`. Use `./run.sh --local` for the editor without SSH. It can be invoked from any working directory; relative workspace/UI paths are resolved from `backend/`. Stop it with Ctrl+C.
+
+For future builds without starting the server, run `./build.sh`. It installs frontend dependencies, typechecks/builds the UI into `frontend/dist`, and builds the release backend in `backend/target/release/spec` (or your configured Cargo target directory). No SSH key is needed to build the app. `run.sh` uses this same build script before launching.
 
 New workspace directories are private. If an existing workspace is writable by group/others, startup stops without changing its permissions. Choose another trusted directory or explicitly run `chmod go-w -- /path/to/workspace` before retrying.
 
@@ -60,7 +62,7 @@ The original shell function mirrors specs into `$HOME/specs`, so this can displa
 
 The **browser, Rust web backend, and editable workspace run on your local computer**. Only **`spec build <snapshot-file>` runs on the remote machine over SSH**. No remote web backend, HTTP port forwarding, or remote frontend build is needed.
 
-Execution is off until an SSH target and remote build directory are configured. On your **local computer**, start the app like this:
+`./run.sh` configures remote execution automatically using the defaults above. To choose another host and directory, start the app on your **local computer** like this:
 
 ```sh
 # One-time SSH setup: connect interactively and verify the host fingerprint
@@ -76,7 +78,38 @@ SPEC_WORKSPACE="$HOME/specs" \
 ./run.sh
 ```
 
-Adjust the host, local key path, and remote project directory for your environment. `SPEC_SSH_TARGET` also accepts a trusted host alias from your local SSH configuration (including its port/ProxyJump settings). Omit `SPEC_SSH_KEY` to use your SSH agent/default identities. Keep private keys **on the local computer**; never paste key contents into a spec or commit them. Builds use batch SSH with strict host-key checking, no TTY, no agent/X11 forwarding, and no port forwarding. Unknown hosts, inaccessible keys, and connection/authentication errors fail the run and appear in its output; they do not fall back to local execution.
+Adjust the host, local key path, and remote project directory for your environment. `SPEC_SSH_TARGET` also accepts a trusted host alias from your local SSH configuration (including its port/ProxyJump settings). Set `SPEC_SSH_KEY=` to use your SSH agent/default identities with the launchers; omitting it selects the default key above. Keep private keys **on the local computer**; never paste key contents into a spec or commit them. Builds use batch SSH with strict host-key checking, no TTY, no agent/X11 forwarding, and no port forwarding. Unknown hosts, inaccessible keys, and connection/authentication errors fail startup or appear in run output; they do not fall back to local execution.
+
+#### Repeatable remote-build launcher
+
+`./ops.sh` delegates to `run.sh` with the local editor workspace defaulting to `$HOME/specs`. Both launchers check SSH and create remote `~/project` if missing before starting the local app. Override those defaults with the variables above. The key path is converted to an absolute path before starting the backend.
+
+```sh
+# One-time key permissions, then build and launch with the defaults:
+chmod 600 "$HOME/Downloads/Spec_man.pem"
+./ops.sh
+# Use another existing local private key:
+SPEC_SSH_KEY="$HOME/.ssh/your_existing_key" ./ops.sh
+# Or use identities already configured in SSH config/ssh-agent:
+SPEC_SSH_KEY= ./ops.sh
+# Build the app without starting it:
+./build.sh
+```
+
+To build **all specs already in remote `~/project`** without starting the web app:
+
+```sh
+./remote-build.sh --check   # Connect, create the directory if missing, list inputs
+./remote-build.sh           # Build each spec serially in that remote directory
+```
+
+This uses the same host/key settings as `ops.sh`. Set `SPEC_SSH_WORKSPACE=/absolute/remote/path` to override the directory. Only top-level regular `.md`, `.txt`, `.spec`, and extensionless files are inputs; hidden files, symlinks, subdirectories, and output logs are excluded. Local specs and remote `~/specs` are not automatically copied. An empty directory prints “No specs found.” Each invocation writes separate logs under remote `project/.spec-runs/batch-*/`, continues after individual failures, and exits nonzero if any build fails. Keep SSH connected until the batch finishes. Use `ops.sh` and **Save & run** for the web app's detached per-file builds.
+
+Both `./ops.sh` and `./run.sh` check an explicitly supplied key before building and convert relative paths (from your current directory) or literal `~/` paths to absolute paths. An empty key is treated as unset. Launching the Rust binary directly still requires an absolute key path.
+
+The error `SPEC_SSH_KEY must be an absolute local private-key file path` could previously mean either a relative path **or a missing file**. The backend now distinguishes those cases. A key must exist on the computer running the local server; a path on the remote host does not work. If this computer has no authorized key or configured SSH identity, provide one before using **Save & run**.
+
+To trace the installed local `spec` command, check `type spec` in your interactive shell. In the Specific installation, `~/.bashrc` sources `~/.local/share/specific/shell/specific.sh`; its `spec build` function calls `bin/specific-run-build`, which invokes `opencode run --agent build`. OpenCode provider credentials may be configured in `~/.config/opencode/opencode.jsonc`. Those API credentials authenticate model requests, not SSH connections, and cannot be used as `SPEC_SSH_KEY`. Remote builds need their own working SSH identity and OpenCode configuration on the remote host.
 
 Open the full localhost URL printed by the **local** Rust server, including its token. **Save & run** first saves locally, then sends just that immutable spec snapshot over SSH. Other local project files are **not synced**. The remote build works in `SPEC_SSH_WORKSPACE`; its file changes remain remote. Prepare that remote checkout separately. `SPEC_WORKSPACE` is the local editor directory and is independent of the remote build directory.
 
@@ -135,7 +168,16 @@ Builds are capped at **120 KiB** because some existing launchers forward the pro
 
 ### Trailing sentence-part completions
 
-Configure Azure on the **local Rust server** to enable editor completions independently of remote builds:
+Configure Azure once on the **local Rust server** to enable both ghost text and session chat. Copy the template to a private `.env` in the repository root:
+
+```sh
+cp .env.example .env
+chmod 600 .env
+```
+
+Fill in your Azure endpoint, API key and deployment in `.env`, then start `./run.sh` (or `./run.sh --local` for the editor without remote builds). Restart an already-running server and reload the browser after changing settings. Startup reports whether chat and ghost text are enabled.
+
+The Rust server reads the nearest `.env` in its working directory or an ancestor, so this works with `run.sh` and with `cargo run` from `backend/`. To use a file elsewhere, set `SPEC_AI_ENV_FILE=/absolute/path/to/ai.env`. Only AI settings are consumed from this file; exported environment variables take precedence. You can also configure everything through exports:
 
 ```sh
 export AZURE_OPENAI_ENDPOINT="https://YOUR-RESOURCE.openai.azure.com/openai/v1"
@@ -143,6 +185,8 @@ export AZURE_OPENAI_API_KEY="YOUR-KEY"
 export DEPLOYMENT_NAME="YOUR-DEPLOYMENT"
 ./run.sh
 ```
+
+If the installed `spec build` command already works, it may be using OpenCode's Azure configuration in `~/.config/opencode/opencode.jsonc`. Map `providers.azure.settings.resourceName` to `https://RESOURCE.openai.azure.com/openai/v1`, its `apiKey` to `AZURE_OPENAI_API_KEY`, and the selected Azure model's `modelID` (or model name when no override exists) to `DEPLOYMENT_NAME`. A value such as `{env:AZURE_OPENAI_API_KEY}` is a reference: use the actual credential from the OpenCode server environment, not that placeholder. The Rust server needs its own exports or private `.env`; credentials available to OpenCode are not automatically inherited by it.
 
 Use your configured deployment name (default `gpt-5.5`). A legacy resource-root endpoint instead requires `AZURE_OPENAI_API_VERSION`. Endpoints must use HTTPS. No credentials are exposed to the browser or bundled in the repo; do not commit keys. Missing endpoint and key disables completions, while partial/invalid configuration fails startup.
 
@@ -173,6 +217,8 @@ Open the Vite URL and paste the Rust server's token into the connection form. Vi
 
 ## Configuration
 
+These are the Rust server's defaults when launched directly. `run.sh` supplies the SSH defaults described above and creates the remote build directory before startup; `--local` clears the SSH settings.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SPEC_WORKSPACE` | `../workspace` | File directory, relative to the backend process working directory |
@@ -186,6 +232,7 @@ Open the Vite URL and paste the Rust server's token into the connection form. Vi
 | `AZURE_OPENAI_API_KEY` | unset | Server-side Azure completion key; required with the endpoint |
 | `DEPLOYMENT_NAME` | `gpt-5.5` | Azure completion deployment name |
 | `AZURE_OPENAI_API_VERSION` | unset | Required only for legacy Azure resource-root endpoints |
+| `SPEC_AI_ENV_FILE` | nearest `.env` in current/ancestor directories | Optional path to the server-side dotenv file shared by chat and ghost text; explicit files must exist |
 
 There are no credentials bundled in this repository and no automatic service installation. The existing `spec` shell alias is not modified. Run the new binary explicitly from `backend/target/release/spec` if the old shell function shadows its name.
 
@@ -217,6 +264,8 @@ Browser tests start isolated real Rust servers and temporary workspaces. They co
 backend/       New Rust HTTP API, filesystem layer, process runner, tests
 frontend/      New Vite + React TypeScript UI, unit and browser tests
 run.sh         Build the frontend and launch the Rust server
+build.sh       Build the frontend and release backend without starting a server
+ops.sh         Build and launch with configurable remote SSH settings
 docs/          Feature guide, review, security notes, screenshot
 archive/       Original source collection and license notices (not executed or bundled)
 workspace/     Local user files (created at runtime; gitignored)

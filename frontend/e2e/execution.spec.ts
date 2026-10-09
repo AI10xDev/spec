@@ -79,6 +79,7 @@ async function startServer(execution = true) {
       SPEC_SSH_BINARY: execution ? path.join(directory, "ssh-fixture") : undefined,
       SPEC_SSH_KEY: undefined,
       AZURE_OPENAI_ENDPOINT: undefined,
+      SPEC_AI_ENV_FILE: "/dev/null",
       AZURE_OPENAI_API_KEY: undefined,
       DEPLOYMENT_NAME: undefined,
       AZURE_OPENAI_API_VERSION: undefined,

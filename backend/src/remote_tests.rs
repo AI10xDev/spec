@@ -32,6 +32,35 @@ fn remote_configuration_rejects_options_and_relative_paths() {
 }
 
 #[test]
+fn remote_key_validation_distinguishes_missing_and_non_file_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let key = root.path().join("identity with spaces");
+    let mut remote = Remote {
+        binary: "/usr/bin/ssh".into(),
+        target: "user@host".into(),
+        directory: "/project".into(),
+        key: Some(key.clone()),
+    };
+    let error = remote.validate().unwrap_err().to_string();
+    assert!(error.contains("Cannot access SPEC_SSH_KEY local file"));
+    assert!(error.contains(key.to_str().unwrap()));
+    assert!(error.contains("unset SPEC_SSH_KEY"));
+
+    remote.key = Some(root.path().into());
+    assert!(
+        remote
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("not a directory or special file")
+    );
+
+    fs::write(&key, b"test identity placeholder").unwrap();
+    remote.key = Some(key);
+    assert!(remote.validate().is_ok());
+}
+
+#[test]
 fn ssh_is_noninteractive_with_host_verification_and_no_forwarding() {
     let remote = Remote {
         binary: "/usr/bin/ssh".into(),

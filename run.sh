@@ -3,15 +3,19 @@ set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-if ! command -v cargo >/dev/null 2>&1; then
-  printf 'Rust/Cargo is required to run spec.\n' >&2
-  exit 1
+if (( $# > 1 )) || [[ "${1:-}" != '' && "${1:-}" != --local ]]; then
+  printf 'Usage: %s [--local]\nStart with remote builds in ~/project; --local starts the editor only.\n' "$0" >&2
+  exit 2
 fi
-if ! command -v bun >/dev/null 2>&1; then
-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    printf 'Install Bun or Node.js (22.12+) with npm to build the frontend.\n' >&2
-    exit 1
-  fi
+
+# Configure SSH and resolve key paths before changing directories.
+source "$root/scripts/ssh-config.bash"
+if [[ "${1:-}" == --local ]]; then
+  unset SPEC_SSH_TARGET SPEC_SSH_WORKSPACE SPEC_SSH_KEY SPEC_SSH_BINARY
+else
+  spec_configure_remote
+  spec_prepare_remote
+  printf 'Remote workspace: %s:%s\n' "$SPEC_SSH_TARGET" "$SPEC_SSH_WORKSPACE"
 fi
 
 cd -- "$root/backend"
@@ -27,17 +31,6 @@ if (( (8#$mode & 0022) != 0 )); then
   exit 1
 fi
 
-(
-  cd -- "$root/frontend"
-  if command -v bun >/dev/null 2>&1; then
-    bun install --frozen-lockfile
-    bun run build
-  else
-    printf 'Bun is unavailable; building with Node/npm (bun.lock is not used).\n'
-    npm install --no-save --package-lock=false --no-audit --no-fund
-    npm run typecheck
-    npm exec --no -- vite build
-  fi
-)
+"$root/build.sh"
 
 exec cargo run --release --locked

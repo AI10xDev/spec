@@ -87,7 +87,7 @@ export function Editor({ name, value: content, token, available, enabled, onEnab
       <label title={available ? "Sends recent editor text to your configured Azure provider" : "Configure Azure completion on the local Rust server"}>
         <input type="checkbox" checked={available && enabled} disabled={!available} onChange={(event) => onEnabled(event.target.checked)} /> Trailing completions
       </label>
-      <span id="completion-help" aria-live="polite">{!available ? "Azure not configured" : suffix ? "Tab to accept part / Esc to dismiss" : message || "One sentence part at a time"}</span>
+      <span id="completion-help" aria-live="polite">{!available ? "Azure not configured: fill in the server .env (see .env.example), restart and reload" : suffix ? "Tab to accept part / Esc to dismiss" : message || "One sentence part at a time"}</span>
       {/* Reserve space so showing acceptance does not shrink a scrolled editor. */}
       <button style={{ visibility: suffix ? "visible" : "hidden" }} disabled={!suffix} onPointerDown={(event) => event.preventDefault()} onClick={accept} title={suffix}>Accept part</button>
     </div>

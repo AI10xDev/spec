@@ -54,10 +54,28 @@ impl Remote {
         {
             return Err("SPEC_SSH_BINARY must be an absolute executable SSH client path".into());
         }
-        if let Some(key) = &self.key
-            && (!key.is_absolute() || !key.is_file())
-        {
-            return Err("SPEC_SSH_KEY must be an absolute local private-key file path".into());
+        if let Some(key) = &self.key {
+            if !key.is_absolute() {
+                return Err("SPEC_SSH_KEY must be an absolute local private-key file path. Use \"$HOME/.ssh/key\" rather than \"~/.ssh/key\", or unset SPEC_SSH_KEY to use SSH config/ssh-agent.".into());
+            }
+            let metadata = fs::metadata(key).map_err(|error| {
+                format!(
+                    "Cannot access SPEC_SSH_KEY local file {}: {error}. Set it to an existing key on this computer, or unset SPEC_SSH_KEY to use SSH config/ssh-agent.",
+                    key.display()
+                )
+            })?;
+            if !metadata.is_file() {
+                return Err(format!(
+                    "SPEC_SSH_KEY must be a local private-key file, not a directory or special file: {}",
+                    key.display()
+                ).into());
+            }
+            fs::File::open(key).map_err(|error| {
+                format!(
+                    "Cannot read SPEC_SSH_KEY local file {}: {error}",
+                    key.display()
+                )
+            })?;
         }
         Ok(())
     }
