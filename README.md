@@ -21,6 +21,7 @@ This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/A
 - **Trailing completions:** optional Azure-powered ghost text for the current sentence part; Tab or **Accept part** inserts it, Escape dismisses it.
 - **Optional Save & run:** explicit confirmation, immutable saved-spec input, live output polling, follow toggle, cancellation, concurrency limits, and a 15-minute timeout.
 - **Recoverable output:** reopening a saved spec restores its latest build output after browser or server restart, without rerunning the build.
+- **Separate session chat:** ask about the current nohup output, written spec, or general topics in a dedicated browser window, without adding chat to the editor/output panes.
 - **Local API protection:** loopback binding, a random access token, no permissive CORS, constrained filenames, and symlink rejection.
 
 The output pane displays available stdout/stderr and explanations. It does **not** request or expose hidden model chain-of-thought.
@@ -148,6 +149,16 @@ Use your configured deployment name (default `gpt-5.5`). A legacy resource-root 
 When configured, **Trailing completions** starts enabled and can be switched off in the editor. After 500 ms idle at a line's end, the browser sends up to 4,000 recent UTF-16 units (at most 16 KiB UTF-8) before the caret to Azure through the authenticated Rust API. This includes **unsaved text** and may incur provider costs. A muted suffix suggests one sentence part, capped at 160 characters and the first clause/sentence punctuation. **Tab** or **Accept part** inserts it; **Escape** dismisses until typing resumes. Selections, IME composition, and text after the caret on the same line suppress suggestions. Long ghost text is clipped at the pane edge; the Accept part button's tooltip shows the suffix. Suggestions are not saved or downloaded until accepted.
 
 Accepting a part waits for your next edit before requesting another suggestion, including when the accepted suffix has no final punctuation. Requests have a 10-second timeout and four-request concurrency cap. Errors leave editing available and retry on subsequent edits, not in a loop. Tests use provider mocks; no live Azure call is needed. This restores inline completion only, not filename ranking.
+
+### Session chat
+
+Click **Open session chat** near the output controls to open a separate browser window (allow popups for this site). Chat uses the same server-side Azure configuration as trailing completions; disabling inline suggestions does not disable chat. No model call is made until you click **Ask**.
+
+The window stays bound to its chosen filename, even when you select another editor tab. While the source workspace remains open, it uses that file's live buffer, including unsaved edits. If the source closes or is unavailable, it explicitly falls back to the saved file; drafts and conversation are not persisted. The current written spec is never presented as the immutable input to an older build.
+
+Before each question, chat reloads the file's latest associated nohup output without launching or cancelling a build. Failed reads block the question rather than silently using stale logs. Context priority is qualitative: current session output/status as execution evidence, written spec as intent, then prior conversation for continuity. A new run clears earlier conversation on the next question. Without a run, spec and general questions still work.
+
+Questions send up to the first **64 KiB of spec**, the last **64 KiB of available output**, and four prior question/answer pairs to Azure through the authenticated API. Truncation is disclosed; remote log retention limits still apply. Questions are capped at 8 KiB, answers at 16 KiB, and provider requests at 60 seconds, sharing the four-request concurrency limit with inline completions. Chat is read-only, has no tools, and renders answers as plain text. Keep sensitive information out of submitted specs/logs and verify important claims.
 
 ### Frontend development
 

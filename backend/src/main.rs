@@ -29,6 +29,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use uuid::Uuid;
 
+mod chat;
 mod completion;
 mod recovery;
 mod remote;
@@ -585,10 +586,15 @@ fn router(app: App) -> Router {
                 Json(serde_json::json!({
                     "execution": app.remote.is_some(),
                     "completion": app.completion.is_some(),
+                    "chat": app.completion.is_some(),
                 }))
             }),
         )
         .route("/api/files", get(list))
+        .route(
+            "/api/chat",
+            post(chat::chat).layer(DefaultBodyLimit::max(chat::MAX_BODY)),
+        )
         .route(
             "/api/completions",
             post(completion::complete)

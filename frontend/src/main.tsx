@@ -3,22 +3,25 @@ import { createRoot } from "react-dom/client"
 import { dirty, openTab, savedTab } from "./tabs"
 import type { Document, Output, Tab } from "./tabs"
 import { Editor } from "./editor"
+import { Chat } from "./chat"
 import "./style.css"
 
 type Entry = { name: string; modified: number; bytes: number }
+const chatName = new URLSearchParams(location.search).get("chat")
 
 function App() {
   const [token, setToken] = useState(() => {
     const fragment = new URLSearchParams(location.hash.slice(1)).get("token")
     if (fragment) {
       sessionStorage.setItem("spec-token", fragment)
-      history.replaceState(null, "", location.pathname)
+      history.replaceState(null, "", location.pathname + location.search)
     }
     return fragment ?? sessionStorage.getItem("spec-token") ?? ""
   })
   const [connected, setConnected] = useState(false)
   const [execution, setExecution] = useState(false)
   const [completion, setCompletion] = useState(false)
+  const [chat, setChat] = useState(false)
   const [complete, setComplete] = useState(true)
   const [files, setFiles] = useState<Entry[]>([])
   const [tabs, setTabs] = useState<Tab[]>([])
@@ -33,6 +36,7 @@ function App() {
   const [loadingOutput, setLoadingOutput] = useState<{ id?: string } | null>(null)
   const [follow, setFollow] = useState(true)
   const log = useRef<HTMLPreElement>(null)
+  const chatWindows = useRef(new Map<Window, string>())
   const tab = tabs.find((item) => item.name === active)
   const output = outputs[active]
 
@@ -64,9 +68,11 @@ function App() {
     event?.preventDefault()
     setError("")
     sessionStorage.setItem("spec-token", token)
-    const config = await api<{ execution: boolean; completion: boolean }>("/config")
+    const config = await api<{ execution: boolean; completion: boolean; chat: boolean }>("/config")
     setExecution(config.execution)
     setCompletion(config.completion)
+    setChat(config.chat)
+    if (chatName) { setConnected(true); return }
     const entries = await api<Entry[]>("/files")
     setFiles(entries)
     let remembered: string | null = null
@@ -80,7 +86,27 @@ function App() {
   useEffect(() => { if (token) void connect().catch(fail) }, [])
 
   useEffect(() => {
-    if (!connected) return
+    const receive = (event: MessageEvent) => {
+      if (event.origin !== location.origin || event.data?.type !== "spec-chat-request") return
+      const source = event.source as Window | null
+      if (!source) return
+      // A workspace reload loses its window map; reconnect only its same-origin chat children.
+      if (!chatWindows.current.has(source)) {
+        try {
+          if (source.opener !== window || source.location.origin !== location.origin || source.location.pathname !== location.pathname || new URLSearchParams(source.location.search).get("chat") !== event.data.name) return
+          chatWindows.current.set(source, event.data.name)
+        } catch { return }
+      }
+      if (chatWindows.current.get(source) !== event.data.name) return
+      const tab = tabs.find((item) => item.name === event.data.name)
+      source.postMessage({ type: "spec-chat-context", id: event.data.id, tab: tab ?? null }, location.origin)
+    }
+    window.addEventListener("message", receive)
+    return () => window.removeEventListener("message", receive)
+  }, [tabs])
+
+  useEffect(() => {
+    if (!connected || chatName) return
     // Remember only the selection, never unsaved buffers or runtime logs.
     try {
       if (tab?.revision) localStorage.setItem("spec-active-file", tab.name)
@@ -194,6 +220,19 @@ function App() {
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
+  function openChat() {
+    if (!tab) return
+    for (const [window, name] of chatWindows.current) {
+      if (window.closed) chatWindows.current.delete(window)
+      else if (name === tab.name) { window.focus(); return }
+    }
+    const url = new URL(location.pathname, location.origin)
+    url.searchParams.set("chat", tab.name)
+    const child = window.open(url, "_blank", "popup,width=960,height=900")
+    if (child) chatWindows.current.set(child, tab.name)
+    else setError("Allow popups for this site to open session chat in a separate window.")
+  }
+
   if (!connected) return <main className="connect">
     <div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ local workspace</span></div>
     <h1>A place to think.<br /><span className="rainbow-text">A space to build.</span></h1>
@@ -205,6 +244,8 @@ function App() {
     </form>
     {error && <p role="alert" className="error">{error}</p>}
   </main>
+
+  if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} />
 
   return <div className="app">
     <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ workspace</span></div><div className="connection"><i /> Local · Rust + TypeScript</div></header>
@@ -248,6 +289,7 @@ function App() {
           </section>
           <section className="output-pane" aria-label="Output and logs pane">
             <div className="pane-heading"><div><span className="eyebrow">02 / OUTPUT</span><h2>Output & logs</h2></div><span className="badge">{output?.status ?? "Idle"}</span></div>
+            {tab && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>Spec + current nohup output in a separate window</span></div>}
             <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{tab?.revision && <button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button>}{output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}</div>
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
             <pre ref={log} className="output" aria-label="Run output">{output?.output ?? (execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>

@@ -116,6 +116,24 @@ impl Completion {
     }
 
     async fn suffix(&self, prefix: &str) -> Result<String> {
+        let text = self
+            .answer(
+                PROMPT,
+                &[json!({"role": "user", "content": prefix})],
+                512,
+                None,
+            )
+            .await?;
+        Ok(normalize(text.as_deref().unwrap_or("")))
+    }
+
+    pub async fn answer(
+        &self,
+        instructions: &str,
+        messages: &[Value],
+        max_tokens: usize,
+        timeout: Option<Duration>,
+    ) -> Result<Option<String>> {
         let _permit = self.slots.try_acquire().map_err(|_| {
             Error(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -125,20 +143,21 @@ impl Completion {
         let payload = if self.responses {
             json!({
                 "model": self.deployment,
-                "instructions": PROMPT,
-                "input": [{"role": "user", "content": prefix}],
-                "max_output_tokens": 512,
+                "instructions": instructions,
+                "input": messages,
+                "max_output_tokens": max_tokens,
                 "store": false,
                 "tools": [],
                 "tool_choice": "none",
             })
         } else {
+            let messages: Vec<_> =
+                std::iter::once(json!({"role": "system", "content": instructions}))
+                    .chain(messages.iter().cloned())
+                    .collect();
             json!({
-                "messages": [
-                    {"role": "system", "content": PROMPT},
-                    {"role": "user", "content": prefix},
-                ],
-                "max_completion_tokens": 512,
+                "messages": messages,
+                "max_completion_tokens": max_tokens,
                 "store": false,
             })
         };
@@ -153,14 +172,15 @@ impl Completion {
                 provider_error()
             }
         };
-        let mut response = self
+        let mut request = self
             .client
             .post(self.url.clone())
             .header("api-key", self.key.clone())
-            .json(&payload)
-            .send()
-            .await
-            .map_err(network_error)?;
+            .json(&payload);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        let mut response = request.send().await.map_err(network_error)?;
         if !response.status().is_success()
             || response
                 .content_length()
@@ -180,7 +200,7 @@ impl Completion {
         if self.responses {
             match body["status"].as_str() {
                 Some("completed") => {}
-                Some("incomplete") => return Ok(String::new()),
+                Some("incomplete") => return Ok(None),
                 _ => return Err(provider_error()),
             }
             for output in body["output"].as_array().ok_or_else(provider_error)? {
@@ -191,7 +211,7 @@ impl Completion {
                 }
                 for content in output["content"].as_array().ok_or_else(provider_error)? {
                     match content["type"].as_str() {
-                        Some("refusal") => return Ok(String::new()),
+                        Some("refusal") => return Ok(None),
                         Some("output_text") => {
                             text.push_str(content["text"].as_str().ok_or_else(provider_error)?);
                         }
@@ -204,23 +224,23 @@ impl Completion {
             match choice["finish_reason"].as_str() {
                 Some("stop") => {}
                 // Token-limited output may end mid-word; don't offer it inline.
-                Some("length" | "content_filter") => return Ok(String::new()),
+                Some("length" | "content_filter") => return Ok(None),
                 _ => return Err(provider_error()),
             }
             let message = &choice["message"];
             if message["refusal"].is_string() {
-                return Ok(String::new());
+                return Ok(None);
             }
             if !message["tool_calls"].is_null() || !message["function_call"].is_null() {
                 return Err(provider_error());
             }
             text.push_str(message["content"].as_str().ok_or_else(provider_error)?);
         }
-        Ok(normalize(&text))
+        Ok(Some(text))
     }
 }
 
-fn provider_error() -> Error {
+pub fn provider_error() -> Error {
     Error(
         StatusCode::BAD_GATEWAY,
         "Completion provider request failed".into(),
@@ -540,7 +560,7 @@ mod tests {
         assert_eq!(config.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(
             response_json(config).await,
-            json!({"execution": false, "completion": false})
+            json!({"execution": false, "completion": false, "chat": false})
         );
         let response = request(
             state.clone(),
@@ -795,6 +815,390 @@ mod tests {
             json!({"prefix": "Hello"}),
         )
         .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response_json(response).await,
+            json!({"error": "Completion provider request failed"})
+        );
+    }
+
+    fn chat_input() -> Value {
+        json!({
+            "name": "idea.md",
+            "spec": "Unsaved editor text\n# Completed line\nPending line",
+            "unsaved": true,
+            "output": {"id": "displayed-run", "status": "running", "output": "Displayed log\nStill running", "truncated": false},
+            "messages": [
+                {"role": "user", "content": "Earlier question"},
+                {"role": "assistant", "content": "Earlier answer"},
+                {"role": "user", "content": "What does the log mean?"},
+            ],
+        })
+    }
+
+    #[tokio::test]
+    async fn chat_uses_displayed_context_preserves_multiline_answers_and_never_mutates_state() {
+        for responses in [false, true] {
+            let text = "First sentence. Second sentence.\n\n```text\nA multiline answer\n```";
+            let mut mock = mock(
+                responses,
+                Json(answer(responses, text)).into_response(),
+                Duration::ZERO,
+            )
+            .await;
+            std::fs::write(
+                mock.state.root.join("idea.md"),
+                "Saved spec, not current buffer",
+            )
+            .unwrap();
+            let (stop, stopped) = tokio::sync::watch::channel(crate::RunControl::Running);
+            mock.state.jobs.lock().unwrap().push(crate::Job {
+                id: "displayed-run".into(),
+                name: "idea.md".into(),
+                status: "completed".into(),
+                output: b"Cached server output, not displayed"
+                    .iter()
+                    .copied()
+                    .collect(),
+                truncated: false,
+                remote_identity: "unused".into(),
+                recover: true,
+                stop,
+                attached: true,
+                dirty: true,
+                persistence_error: None,
+            });
+            let jobs_before = serde_json::to_value(&*mock.state.jobs.lock().unwrap()).unwrap();
+            let input = chat_input();
+            let response = request(mock.state.clone(), "POST", "/api/chat", input.clone()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(
+                response_json(response).await,
+                json!({"answer": text, "contextTruncated": false})
+            );
+            let (_, headers, payload) = mock.requests.recv().await.unwrap();
+            assert_eq!(headers["api-key"], "mock-secret");
+            assert_eq!(payload["store"], false);
+            let messages = if responses {
+                assert_eq!(payload["instructions"], crate::chat::PROMPT);
+                assert_eq!(payload["tools"], json!([]));
+                assert_eq!(payload["tool_choice"], "none");
+                assert_eq!(payload["model"], "gpt-5.5");
+                assert_eq!(payload["max_output_tokens"], 4096);
+                payload["input"].as_array().unwrap().as_slice()
+            } else {
+                assert_eq!(
+                    payload["messages"][0],
+                    json!({"role": "system", "content": crate::chat::PROMPT})
+                );
+                assert!(payload.get("tools").is_none());
+                assert_eq!(payload["max_completion_tokens"], 4096);
+                &payload["messages"].as_array().unwrap()[1..]
+            };
+            assert_eq!(messages[0]["role"], "user");
+            let context: Value =
+                serde_json::from_str(messages[0]["content"].as_str().unwrap()).unwrap();
+            for field in ["name", "spec", "unsaved", "output"] {
+                assert_eq!(context[field], input[field], "{field}");
+            }
+            assert_eq!(
+                context["contextPriority"],
+                json!([
+                    "current session output/status as execution evidence",
+                    "current written spec as intent",
+                    "prior conversation for continuity",
+                ])
+            );
+            assert_eq!(&messages[1..], input["messages"].as_array().unwrap());
+            assert_eq!(
+                context["omissions"],
+                json!({"specTailBytes": 0, "outputHeadBytes": 0})
+            );
+            assert_eq!(
+                serde_json::to_value(&*mock.state.jobs.lock().unwrap()).unwrap(),
+                jobs_before
+            );
+            assert!(*stopped.borrow() == crate::RunControl::Running);
+            assert!(!*mock.state.recovered.lock().unwrap());
+            assert_eq!(
+                std::fs::read_to_string(mock.state.root.join("idea.md")).unwrap(),
+                "Saved spec, not current buffer"
+            );
+            assert_eq!(std::fs::read_dir(&mock.state.root).unwrap().count(), 1);
+            let config =
+                response_json(request(mock.state.clone(), "GET", "/api/config", Value::Null).await)
+                    .await;
+            assert_eq!(config["chat"], true);
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_auth_and_missing_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let state = app(root.path());
+        for token in [None, Some("Bearer wrong")] {
+            let mut req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/chat");
+            if let Some(token) = token {
+                req = req.header(header::AUTHORIZATION, token);
+            }
+            let response = crate::router(state.clone())
+                .oneshot(req.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let response = request(state, "POST", "/api/chat", chat_input()).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response_json(response).await,
+            json!({"error": "AI chat is not configured"})
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_validation_rejects_invalid_fields_sequences_and_byte_bounds_before_provider() {
+        let mut mock = mock(
+            true,
+            Json(answer(true, "unused")).into_response(),
+            Duration::ZERO,
+        )
+        .await;
+        for pointer in ["/name", "/spec", "/unsaved", "/output", "/messages"] {
+            let mut input = chat_input();
+            input.as_object_mut().unwrap().remove(&pointer[1..]);
+            let response = request(mock.state.clone(), "POST", "/api/chat", input).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{pointer}"
+            );
+        }
+        for (pointer, value, status) in [
+            ("/extra", json!(true), StatusCode::UNPROCESSABLE_ENTITY),
+            ("/output/extra", json!(true), StatusCode::UNPROCESSABLE_ENTITY),
+            ("/messages/0/extra", json!(true), StatusCode::UNPROCESSABLE_ENTITY),
+            ("/messages/0/role", json!("system"), StatusCode::UNPROCESSABLE_ENTITY),
+            ("/messages/0/content", json!(3), StatusCode::UNPROCESSABLE_ENTITY),
+            ("/unsaved", json!(null), StatusCode::UNPROCESSABLE_ENTITY),
+            ("/output/truncated", json!("true"), StatusCode::UNPROCESSABLE_ENTITY),
+            ("/name", json!("../secret"), StatusCode::BAD_REQUEST),
+            ("/name", json!("x".repeat(181)), StatusCode::BAD_REQUEST),
+            ("/output/id", json!(""), StatusCode::BAD_REQUEST),
+            ("/output/id", json!("x".repeat(129)), StatusCode::BAD_REQUEST),
+            ("/output/status", json!("x".repeat(257)), StatusCode::BAD_REQUEST),
+            ("/output/status", json!("running\nsecret"), StatusCode::BAD_REQUEST),
+            ("/messages", json!([]), StatusCode::BAD_REQUEST),
+            ("/messages", json!([{"role": "assistant", "content": "hi"}]), StatusCode::BAD_REQUEST),
+            ("/messages", json!([{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hi"}]), StatusCode::BAD_REQUEST),
+            ("/messages", json!((0..11).map(|i| json!({"role": if i % 2 == 0 {"user"} else {"assistant"}, "content": "hi"})).collect::<Vec<_>>()), StatusCode::BAD_REQUEST),
+            ("/messages/1/role", json!("user"), StatusCode::BAD_REQUEST),
+            ("/messages/2/role", json!("assistant"), StatusCode::BAD_REQUEST),
+            ("/messages/2/content", json!(" \n\t"), StatusCode::BAD_REQUEST),
+            ("/messages/0/content", json!("x".repeat(16 * 1024 + 1)), StatusCode::PAYLOAD_TOO_LARGE),
+            ("/messages/1/content", json!("\u{1f331}".repeat(4097)), StatusCode::PAYLOAD_TOO_LARGE),
+            ("/messages/2/content", json!("x".repeat(8 * 1024 + 1)), StatusCode::PAYLOAD_TOO_LARGE),
+            ("/spec", json!("x".repeat(crate::MAX_FILE + 1)), StatusCode::PAYLOAD_TOO_LARGE),
+            ("/output/output", json!("x".repeat(crate::MAX_OUTPUT + 1)), StatusCode::PAYLOAD_TOO_LARGE),
+        ] {
+            let mut input = chat_input();
+            let (parent, key) = pointer.rsplit_once('/').unwrap();
+            input.pointer_mut(parent).unwrap().as_object_mut().unwrap().insert(key.into(), value);
+            let response = request(mock.state.clone(), "POST", "/api/chat", input).await;
+            assert_eq!(response.status(), status, "{pointer}");
+        }
+        let response = crate::router(mock.state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/chat")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(" ".repeat(crate::chat::MAX_BODY + 1)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(mock.requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn chat_truncates_utf8_context_and_discloses_existing_log_truncation() {
+        let cap = 64 * 1024;
+        for (spec, output, expected_spec, expected_log, truncated) in [
+            (
+                format!("{}\u{1f331}end", "s".repeat(cap - 1)),
+                json!({"id": "run", "status": "running", "output": format!("start\u{1f331}{}", "o".repeat(cap - 1)), "truncated": false}),
+                "s".repeat(cap - 1),
+                Some("o".repeat(cap - 1)),
+                true,
+            ),
+            (
+                "spec".into(),
+                json!({"id": "run", "status": "unknown", "output": "partial", "truncated": true}),
+                "spec".into(),
+                Some("partial".into()),
+                true,
+            ),
+            ("spec".into(), Value::Null, "spec".into(), None, false),
+            (
+                "s".repeat(cap),
+                json!({"id": "run", "status": "running", "output": "o".repeat(cap), "truncated": false}),
+                "s".repeat(cap),
+                Some("o".repeat(cap)),
+                false,
+            ),
+        ] {
+            let mut mock = mock(
+                true,
+                Json(answer(true, "Answer")).into_response(),
+                Duration::ZERO,
+            )
+            .await;
+            let mut input = chat_input();
+            input["spec"] = json!(spec);
+            input["output"] = output.clone();
+            let response = request(mock.state.clone(), "POST", "/api/chat", input).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response_json(response).await["contextTruncated"], truncated);
+            let (_, _, payload) = mock.requests.recv().await.unwrap();
+            let context: Value =
+                serde_json::from_str(payload["input"][0]["content"].as_str().unwrap()).unwrap();
+            assert_eq!(context["spec"], expected_spec);
+            assert_eq!(
+                context["output"]["output"].as_str(),
+                expected_log.as_deref()
+            );
+            assert_eq!(context["contextTruncated"], truncated);
+            assert_eq!(
+                context["omissions"]["specTailBytes"],
+                spec.len() - expected_spec.len()
+            );
+            assert_eq!(
+                context["omissions"]["outputHeadBytes"],
+                output["output"].as_str().map_or(0, str::len)
+                    - expected_log.as_ref().map_or(0, String::len)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_accepts_maximum_fields_and_answer_bytes() {
+        let text = "\u{1f331}".repeat(4096);
+        let mut mock = mock(
+            true,
+            Json(answer(true, &text)).into_response(),
+            Duration::ZERO,
+        )
+        .await;
+        let mut input = chat_input();
+        // NUL requires six-byte JSON escaping and tests the route-specific body limit.
+        input["spec"] = json!("\0".repeat(crate::MAX_FILE));
+        input["output"]["output"] = json!("\0".repeat(crate::MAX_OUTPUT));
+        input["output"]["id"] = json!("x".repeat(128));
+        input["output"]["status"] = json!("x".repeat(256));
+        input["messages"] = json!(
+            (0..9)
+                .map(|i| json!({
+                    "role": if i % 2 == 0 {"user"} else {"assistant"},
+                    "content": "q".repeat(if i == 8 { 8 * 1024 } else { 16 * 1024 }),
+                }))
+                .collect::<Vec<_>>()
+        );
+        let response = request(mock.state.clone(), "POST", "/api/chat", input).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            json!({"answer": text, "contextTruncated": true})
+        );
+        let (_, _, payload) = mock.requests.recv().await.unwrap();
+        assert_eq!(payload["input"].as_array().unwrap().len(), 10);
+    }
+
+    #[tokio::test]
+    async fn chat_provider_failures_empty_refusal_incomplete_and_oversized_answers_are_sanitized() {
+        for responses in [false, true] {
+            let incomplete = if responses {
+                json!({"status": "incomplete", "output": []})
+            } else {
+                json!({"choices": [{"finish_reason": "length", "message": {"content": "partial mock-secret"}}]})
+            };
+            let refusal = if responses {
+                json!({"status": "completed", "output": [{"type": "message", "role": "assistant", "content": [{"type": "refusal", "refusal": "mock-secret"}]}]})
+            } else {
+                json!({"choices": [{"finish_reason": "stop", "message": {"refusal": "mock-secret"}}]})
+            };
+            for response in [
+                Json(incomplete).into_response(),
+                Json(refusal).into_response(),
+                Json(answer(responses, " \n\t")).into_response(),
+                Json(answer(responses, &"\u{1f331}".repeat(4097))).into_response(),
+                (StatusCode::UNAUTHORIZED, "mock-secret").into_response(),
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(header::LOCATION, "/mock-secret")],
+                )
+                    .into_response(),
+                "invalid mock-secret JSON".into_response(),
+                Json(json!({"error": "mock-secret"})).into_response(),
+                "x".repeat(MAX_RESPONSE + 1).into_response(),
+                (
+                    [(header::TRANSFER_ENCODING, "chunked")],
+                    "x".repeat(MAX_RESPONSE + 1),
+                )
+                    .into_response(),
+            ] {
+                let mut mock = mock(responses, response, Duration::ZERO).await;
+                let response = request(mock.state.clone(), "POST", "/api/chat", chat_input()).await;
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+                assert_eq!(
+                    response_json(response).await,
+                    json!({"error": "Completion provider request failed"})
+                );
+                mock.requests.recv().await.unwrap();
+                assert!(mock.requests.try_recv().is_err());
+                assert_eq!(
+                    mock.state
+                        .completion
+                        .as_ref()
+                        .unwrap()
+                        .slots
+                        .available_permits(),
+                    4
+                );
+                assert!(mock.state.jobs.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_shares_concurrency_limit_and_overrides_inline_timeout() {
+        let mut mock = mock(
+            true,
+            Json(answer(true, "Answer")).into_response(),
+            Duration::from_millis(100),
+        )
+        .await;
+        mock.state.completion.as_mut().unwrap().client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        let slots = mock.state.completion.as_ref().unwrap().slots.clone();
+        let permits = slots.acquire_many(4).await.unwrap();
+        let response = request(mock.state.clone(), "POST", "/api/chat", chat_input()).await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(mock.requests.try_recv().is_err());
+        drop(permits);
+        let response = request(mock.state.clone(), "POST", "/api/chat", chat_input()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(slots.available_permits(), 4);
+        mock.task.abort();
+        let _ = (&mut mock.task).await;
+        let response = request(mock.state.clone(), "POST", "/api/chat", chat_input()).await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(
             response_json(response).await,

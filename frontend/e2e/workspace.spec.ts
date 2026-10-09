@@ -773,3 +773,232 @@ test.describe("trailing completions", () => {
     await expect(editor).toHaveValue("Retry again now")
   })
 })
+
+test.describe("session chat popup", () => {
+  type ChatRequest = {
+    name: string; spec: string; unsaved: boolean
+    output: { id: string; status: string; output: string; truncated: boolean } | null
+    messages: { role: string; content: string }[]
+  }
+  const name = "session-chat.md"
+  const saved = "Saved spec for session chat."
+  let run: { id: string; name: string; status: string; output: string; truncated: boolean; recoverable: boolean }
+  let requests: ChatRequest[]
+  let logReads: number
+  let runReads: number
+  let logError: boolean
+  let providerError: boolean
+  let answer: string
+
+  test.beforeEach(async ({ page, context }) => {
+    run = { id: "chat-run-1", name, status: "succeeded", output: "Cached output", truncated: false, recoverable: false }
+    requests = []
+    logReads = 0
+    runReads = 0
+    logError = providerError = false
+    answer = "First line\n<img src=x onerror=alert('xss')>\n<script>alert('xss')</script>\n" + "unbroken".repeat(80)
+    await context.route("**/api/config", (route) => route.fulfill({ json: { execution: true, completion: false, chat: true } }))
+    await context.route("**/api/files/*/run", (route) => { runReads++; return route.fulfill({ json: run }) })
+    await context.route("**/api/files/*/run/log", (route) => {
+      logReads++
+      return route.fulfill(logError
+        ? { status: 503, json: { error: "Mock log unavailable" } }
+        : { json: { ...run, output: `Fresh disk output ${logReads}`, truncated: true } })
+    })
+    await context.route("**/api/chat", (route) => {
+      expect(route.request().method()).toBe("POST")
+      expect(route.request().headers().authorization).toBe(`Bearer ${new URLSearchParams(new URL(url).hash.slice(1)).get("token")}`)
+      requests.push(route.request().postDataJSON())
+      return route.fulfill(providerError
+        ? { status: 503, json: { error: "Mock provider unavailable" } }
+        : { json: { answer, contextTruncated: true } })
+    })
+    await page.goto(url)
+    await page.getByRole("textbox", { name: "New filename" }).fill(name)
+    await page.getByRole("button", { name: "Create file" }).click()
+    await page.getByRole("textbox", { name: `Edit ${name}` }).fill(saved)
+    await page.getByRole("button", { name: "Save", exact: true }).click()
+    await expect(page.getByRole("status")).toHaveText(`Saved ${name}`)
+  })
+
+  test("separate authenticated popup polls its pinned dirty spec, refreshes logs and isolates run history", async ({ page, context }) => {
+    const editor = page.getByRole("textbox", { name: `Edit ${name}` })
+    await editor.fill("Initial dirty spec")
+    const opened = page.waitForEvent("popup")
+    await page.getByRole("button", { name: "Open session chat" }).click()
+    const chat = await opened
+    expect(await chat.opener()).toBe(page)
+    await expect(chat).toHaveURL(new URL(`/?chat=${name}`, url).href)
+    expect(await chat.evaluate(() => sessionStorage.getItem("spec-token"))).toBe(new URLSearchParams(new URL(url).hash.slice(1)).get("token"))
+    await expect(chat.getByRole("heading", { name, exact: true })).toBeVisible()
+    await expect(chat.getByLabel("Server access token")).toHaveCount(0)
+    await expect(chat.getByRole("region", { name: /Spec editing pane|Output and logs pane/ })).toHaveCount(0)
+    await expect(chat.getByRole("navigation", { name: "Editor tabs" })).toHaveCount(0)
+    await expect(chat.getByRole("textbox")).toHaveCount(1)
+    await expect(page.getByRole("log", { name: "Conversation" })).toHaveCount(0)
+    await chat.getByText("Inspect current context", { exact: true }).click()
+    const details = chat.getByRole("region", { name: "Chat context" })
+    await expect(details.locator("pre").first()).toHaveText("Initial dirty spec")
+    await expect(details).toContainText("Live editor buffer / unsaved")
+    await expect(details.locator("pre").last()).toHaveText("Cached output")
+    expect(logReads).toBe(0)
+
+    await editor.fill("Latest dirty spec\nNever saved to disk")
+    run = { ...run, output: "Polled session output" }
+    await page.getByRole("textbox", { name: "New filename" }).fill("chat-other.md")
+    await page.getByRole("button", { name: "Create file" }).click()
+    await page.getByRole("textbox", { name: "Edit chat-other.md" }).fill("Other file must not leak")
+    await expect(details.locator("pre").first()).toHaveText("Latest dirty spec\nNever saved to disk")
+    await expect(details.locator("pre").last()).toHaveText("Polled session output")
+    const question = chat.getByRole("textbox", { name: "Your question" })
+    const ask = chat.getByRole("button", { name: "Ask", exact: true })
+    await question.fill("Explain this run")
+    await expect(ask).toBeEnabled()
+    await ask.click()
+    await expect(question).toHaveValue("")
+    expect(requests).toEqual([{
+      name, spec: "Latest dirty spec\nNever saved to disk", unsaved: true,
+      output: { id: run.id, status: run.status, output: "Fresh disk output 1", truncated: true },
+      messages: [{ role: "user", content: "Explain this run" }],
+    }])
+    const conversation = chat.getByRole("log", { name: "Conversation" })
+    const response = conversation.locator(".assistant > div")
+    await expect(response).toHaveText(answer, { useInnerText: false })
+    expect(await response.textContent()).toBe(answer)
+    await expect(response).toHaveCSS("white-space", "pre-wrap")
+    await expect(conversation.locator("img, script")).toHaveCount(0)
+    await expect(chat.getByText(/The last answer used partial context/)).toBeVisible()
+    await chat.getByText("Inspect last answer input", { exact: true }).click()
+    await expect(chat.locator(".chat-answer-context pre").last()).toHaveText("Fresh disk output 1")
+    await expect(details.locator("pre").last()).toHaveText("Polled session output")
+    await expect(chat.locator(".chat-answer-context pre").last()).toHaveText("Fresh disk output 1")
+
+    await question.fill("And next?")
+    await ask.click()
+    await expect(question).toHaveValue("")
+    expect(requests[1].messages).toEqual([
+      { role: "user", content: "Explain this run" }, { role: "assistant", content: answer }, { role: "user", content: "And next?" },
+    ])
+    expect(requests[1].output?.output).toBe("Fresh disk output 2")
+    run = { ...run, id: "chat-run-2", status: "failed" }
+    await question.fill("Explain the new run")
+    await ask.click()
+    await expect(question).toHaveValue("")
+    expect(requests[2].messages).toEqual([{ role: "user", content: "Explain the new run" }])
+    expect(requests[2].output).toEqual({ id: "chat-run-2", status: "failed", output: "Fresh disk output 3", truncated: true })
+    expect(logReads).toBe(3)
+    await expect(chat.getByRole("status")).toContainText("Earlier conversation was cleared")
+    await expect(conversation.locator("article")).toHaveCount(2)
+    await expect(conversation.getByText("Explain this run", { exact: true })).toHaveCount(0)
+    await expect(page.getByRole("textbox", { name: "Edit chat-other.md" })).toHaveValue("Other file must not leak")
+    expect(await readFile(path.join(directory, name), "utf8")).toBe(saved)
+    expect(context.pages()).toHaveLength(2)
+  })
+
+  test("failed log and provider requests retain the question and retry without duplicating history", async ({ page }) => {
+    const opened = page.waitForEvent("popup")
+    await page.getByRole("button", { name: "Open session chat" }).click()
+    const chat = await opened
+    const question = chat.getByRole("textbox", { name: "Your question" })
+    const ask = chat.getByRole("button", { name: "Ask", exact: true })
+    await question.fill("A successful question")
+    await ask.click()
+    await expect(question).toHaveValue("")
+    logError = true
+    const previousReads = runReads
+    await question.fill("Keep this question for retry")
+    await ask.click()
+    await expect(question).toBeEnabled()
+    await expect(question).toHaveValue("Keep this question for retry")
+    expect(logReads).toBe(2)
+    expect(requests).toHaveLength(1)
+    await expect(chat.getByRole("log").locator("article")).toHaveCount(2)
+    await expect(chat.getByRole("alert")).toHaveText("Mock log unavailable")
+    await expect.poll(() => runReads).toBeGreaterThan(previousReads)
+    await expect(chat.getByRole("alert")).toHaveText("Mock log unavailable")
+
+    logError = false
+    providerError = true
+    await ask.click()
+    await expect(question).toBeEnabled()
+    await expect(question).toHaveValue("Keep this question for retry")
+    expect(requests).toHaveLength(2)
+    await expect(chat.getByRole("log").locator("article")).toHaveCount(2)
+    await expect(chat.getByRole("alert")).toHaveText("Mock provider unavailable")
+    providerError = false
+    await ask.click()
+    await expect(question).toHaveValue("")
+    expect(requests).toHaveLength(3)
+    expect(requests[2].messages).toEqual([
+      { role: "user", content: "A successful question" }, { role: "assistant", content: answer },
+      { role: "user", content: "Keep this question for retry" },
+    ])
+    expect(requests[1].messages).toEqual(requests[2].messages)
+    expect(requests[2].output?.output).toBe("Fresh disk output 4")
+    expect(logReads).toBe(4)
+    await expect(chat.getByRole("log").locator("article")).toHaveCount(4)
+  })
+
+  test("missing chat configuration leaves context readable and Ask disabled", async ({ page, context }) => {
+    await context.route("**/api/config", (route) => route.fulfill({ json: { execution: true, completion: false } }))
+    const opened = page.waitForEvent("popup")
+    await page.getByRole("button", { name: "Open session chat" }).click()
+    const chat = await opened
+    await expect(chat.getByText(/AI chat is not configured/)).toBeVisible()
+    await expect(chat.getByRole("textbox", { name: "Your question" })).toBeDisabled()
+    await expect(chat.getByRole("button", { name: "Ask", exact: true })).toBeDisabled()
+    await chat.getByText("Inspect current context", { exact: true }).click()
+    await expect(chat.getByRole("region", { name: "Chat context" }).locator("pre").first()).toHaveText(saved)
+    expect(requests).toEqual([])
+    expect(logReads).toBe(0)
+  })
+
+  test("workspace reload reconnects the existing popup to live drafts", async ({ page, context }) => {
+    const opened = page.waitForEvent("popup")
+    await page.getByRole("button", { name: "Open session chat" }).click()
+    const chat = await opened
+    await expect(chat.getByRole("region", { name: "Chat context" })).toContainText("Live editor buffer")
+    await page.reload()
+    await page.getByRole("textbox", { name: `Edit ${name}` }).fill("Draft after workspace reload")
+    await chat.getByText("Inspect current context", { exact: true }).click()
+    await expect(chat.getByRole("region", { name: "Chat context" }).locator("pre").first()).toHaveText("Draft after workspace reload")
+    await page.getByRole("button", { name: "Open session chat" }).click()
+    expect(context.pages()).toHaveLength(2)
+    await chat.getByRole("textbox", { name: "Your question" }).fill("Read the reconnected draft")
+    await chat.getByRole("button", { name: "Ask", exact: true }).click()
+    await expect(chat.getByRole("textbox", { name: "Your question" })).toHaveValue("")
+    expect(requests[0].spec).toBe("Draft after workspace reload")
+    expect(requests[0].unsaved).toBe(true)
+  })
+
+  test("closed opener and standalone reload use saved context without execution and fit mobile", async ({ page, context }) => {
+    await context.route("**/api/config", (route) => route.fulfill({ json: { execution: false, completion: false, chat: true } }))
+    let runRequests = 0
+    await context.route("**/api/files/*/run{,/log}", (route) => { runRequests++; return route.fulfill({ json: null }) })
+    await page.getByRole("textbox", { name: `Edit ${name}` }).fill("Unsaved opener text must not survive its closure")
+    const opened = page.waitForEvent("popup")
+    await page.getByRole("button", { name: "Open session chat" }).click()
+    const chat = await opened
+    await chat.setViewportSize({ width: 320, height: 740 })
+    const details = chat.getByRole("region", { name: "Chat context" })
+    await expect(details).toContainText("Live editor buffer / unsaved")
+    await page.close()
+    await expect(details).toContainText("Saved file (editor unavailable) / saved")
+    await chat.reload()
+    await expect(details).toContainText("Saved file (editor unavailable) / saved")
+    await expect(chat).toHaveURL(new URL(`/?chat=${name}`, url).href)
+    await chat.getByText("Inspect current context", { exact: true }).click()
+    await expect(details.locator("pre").first()).toHaveText(saved)
+    await expect(details).toContainText("No associated run output")
+    await chat.getByRole("textbox", { name: "Your question" }).fill("Explain saved spec")
+    await chat.getByRole("button", { name: "Ask", exact: true }).click()
+    await expect(chat.getByRole("textbox", { name: "Your question" })).toHaveValue("")
+    expect(requests).toEqual([{ name, spec: saved, unsaved: false, output: null, messages: [{ role: "user", content: "Explain saved spec" }] }])
+    expect(runRequests).toBe(0)
+    expect(logReads).toBe(0)
+    await expect(chat.getByRole("log").locator(".assistant > div")).toHaveText(answer)
+    expect(await chat.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+    await chat.getByRole("button", { name: "Ask", exact: true }).scrollIntoViewIfNeeded()
+    await expect(chat.getByRole("button", { name: "Ask", exact: true })).toBeInViewport()
+  })
+})
