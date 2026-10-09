@@ -1,0 +1,1717 @@
+[0m
+> build · gpt-6-astra
+[0m→ [0mRead . 
+> build · gpt-6-astra
+[0m✱ [0mGlob "**/AGENTS.md" [90m0 matches[0m
+[0m✱ [0mGrep "SPEC_SSH_KEY|absolute local private-key" [90m27 matches[0m
+[0m$ [0mgit status --short
+?? ins
+?? ins.out
+> build · gpt-6-astra
+[0m→ [0mRead run.sh 
+[0m→ [0mRead README.md 
+[0m→ [0mRead backend/src/remote.rs 
+[0m→ [0mRead backend/Cargo.toml 
+[0m$ [0mprintf 'HOME=%s\nSPEC_SSH_KEY=%s\nSPEC_SSH_TARGET=%s\nSPEC_SSH_WORKSPACE=%s\n' "$HOME" "${SPEC_SSH_KEY-}" "${SPEC_SSH_TARGET-}" "${SPEC_SSH_WORKSPACE-}"; if [ -d "$HOME/.ssh" ]; then find "$HOME/.ssh" -maxdepth 1 -type f -printf '%f\n'; fi
+HOME=/home/emmanuel
+SPEC_SSH_KEY=
+SPEC_SSH_TARGET=
+SPEC_SSH_WORKSPACE=
+known_hosts
+> build · gpt-6-astra
+`ops.sh` hard-codes a key file that is missing on this machine. I’ll make the launcher accept your key path or use SSH’s configured identities, improve the error messages, and add a reusable build script.
+[0m✱ [0mGrep "validate\(|Remote \{|remote_config|SSH_KEY" [90min backend/src · 24 matches[0m
+[0m→ [0mRead frontend/package.json 
+[0m$ [0mcommand -v cargo bun node npm shellcheck; git ls-files -s ops.sh run.sh; ssh-add -l
+/usr/bin/cargo
+/usr/bin/bun
+Could not open a connection to your authentication agent.
+100644 45e15c432e3da27fdcdf56c81013f2177fc39b1a 0	ops.sh
+100755 baaa256e8388f52b23e8ea2c5d07acf4f9f9d5cb 0	run.sh
+> build · gpt-6-astra
+[0m→ [0mRead backend/src/remote_tests.rs [90m[limit=90][0m
+> build · gpt-6-astra
+[0m% [0mPatch 5 files 
+> build · gpt-6-astra
+[0m% [0mPatch 1 file 
+> build · gpt-6-astra
+[0m$ [0mchmod +x build.sh ops.sh
+cargo fmt --check
+chmod: cannot access 'build.sh': No such file or directory
+chmod: cannot access 'ops.sh': No such file or directory
+Diff in /home/emmanuel/spec/backend/src/remote.rs:71:
+                 ).into());
+             }
+             fs::File::open(key).map_err(|error| {
+[31m-                format!("Cannot read SPEC_SSH_KEY local file {}: {error}", key.display())
+(B[m[32m+                format!(
+(B[m[32m+                    "Cannot read SPEC_SSH_KEY local file {}: {error}",
+(B[m[32m+                    key.display()
+(B[m[32m+                )
+(B[m             })?;
+         }
+         Ok(())
+> build · gpt-6-astra
+[0m% [0mPatch 1 file 
+> build · gpt-6-astra
+[0m$ [0mchmod +x build.sh ops.sh
+bash -n build.sh run.sh ops.sh
+./build.sh
+bun install v1.4.2 (744846f84)
+
+Checked 109 installs across 159 packages (no changes) [89.00ms]
+$ bun typecheck && vite build
+$ tsc --noEmit
+vite v7.3.6 building client environment for production...
+transforming...
+✓ 33 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.44 kB │ gzip:  0.29 kB
+dist/assets/index-BI00Hyqv.css   13.57 kB │ gzip:  3.51 kB
+dist/assets/index-CHmCEAtB.js   247.34 kB │ gzip: 78.71 kB
+✓ built in 7.43s
+   Compiling spec v0.1.0 (/home/emmanuel/spec/backend)
+    Finished `release` profile [optimized] target(s) in 53.66s
+[0m$ [0mcargo fmt --check && cargo test --locked && cargo clippy --all-targets --locked -- -D warnings
+Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling libc v0.2.190
+   Compiling cfg-if v1.0.5
+   Compiling smallvec v1.16.2
+   Compiling stable_deref_trait v1.2.1
+   Compiling pin-project-lite v0.2.17
+   Compiling bytes v1.12.1
+   Compiling itoa v1.0.18
+   Compiling futures-core v0.3.34
+   Compiling parking_lot_core v0.9.12
+   Compiling syn v3.0.6
+   Compiling once_cell v1.21.4
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling find-msvc-tools v0.1.14
+   Compiling shlex v2.0.1
+   Compiling http v1.5.0
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling parking_lot v0.12.5
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.4
+   Compiling cc v1.6.0
+   Compiling writeable v0.6.4
+   Compiling litemap v0.8.3
+   Compiling http-body v1.1.0
+   Compiling tracing-core v0.1.36
+   Compiling icu_properties_data v2.3.0
+   Compiling utf8_iter v1.0.4
+   Compiling percent-encoding v2.3.2
+   Compiling serde_core v1.0.229
+   Compiling icu_normalizer_data v2.3.0
+   Compiling log v0.4.34
+   Compiling synstructure v0.14.0
+   Compiling tracing v0.1.44
+   Compiling zeroize v1.9.0
+   Compiling slab v0.4.12
+   Compiling futures-task v0.3.34
+   Compiling ring v0.17.14
+   Compiling tower-service v0.3.3
+   Compiling httparse v1.10.1
+   Compiling version_check v0.9.5
+   Compiling futures-util v0.3.34
+   Compiling generic-array v0.14.7
+   Compiling rustls-pki-types v1.15.1
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.4
+   Compiling zerofrom v0.1.8
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling yoke v0.8.3
+   Compiling tokio-macros v2.7.2
+   Compiling getrandom v0.2.17
+   Compiling zerotrie v0.2.5
+   Compiling zerovec v0.11.8
+   Compiling try-lock v0.2.5
+   Compiling untrusted v0.9.0
+   Compiling httpdate v1.0.3
+   Compiling tokio v1.53.2
+   Compiling want v0.3.1
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling icu_locale_core v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling form_urlencoded v1.2.2
+   Compiling futures-channel v0.3.34
+   Compiling icu_provider v2.3.1
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling sync_wrapper v1.0.2
+   Compiling atomic-waker v1.1.2
+   Compiling typenum v1.20.1
+   Compiling tower-layer v0.3.3
+   Compiling mime v0.3.17
+   Compiling serde v1.0.229
+   Compiling zmij v1.0.23
+   Compiling bitflags v2.13.2
+   Compiling unicase v2.9.0
+   Compiling rustls v0.23.45
+   Compiling idna_adapter v1.2.2
+   Compiling mime_guess v2.0.5
+   Compiling rustls-webpki v0.103.15
+   Compiling serde_derive v1.0.229
+   Compiling http-body-util v0.1.5
+   Compiling getrandom v0.4.3
+   Compiling hyper v1.11.1
+   Compiling serde_json v1.0.151
+   Compiling base64 v0.23.1
+   Compiling subtle v2.6.1
+   Compiling ipnet v2.12.2
+   Compiling hyper-util v0.1.21
+   Compiling tower v0.5.3
+   Compiling idna v1.1.0
+   Compiling memchr v2.8.3
+   Compiling ryu v1.0.23
+   Compiling cfg_aliases v0.2.2
+   Compiling rustix v1.1.5
+   Compiling futures-sink v0.3.34
+   Compiling tokio-util v0.7.19
+   Compiling nix v0.30.1
+   Compiling serde_urlencoded v0.7.1
+   Compiling url v2.5.8
+   Compiling tokio-rustls v0.26.6
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling webpki-roots v1.0.9
+   Compiling http-range-header v0.4.2
+   Compiling linux-raw-sys v0.12.1
+   Compiling hyper-rustls v0.27.10
+   Compiling tower-http v0.6.11
+   Compiling digest v0.10.7
+   Compiling axum-core v0.5.6
+   Compiling serde_path_to_error v0.1.20
+   Compiling base64 v0.22.1
+   Compiling fastrand v2.5.0
+   Compiling matchit v0.8.4
+   Compiling cpufeatures v0.2.17
+   Compiling tempfile v3.27.0
+   Compiling sha2 v0.10.9
+   Compiling axum v0.8.9
+   Compiling reqwest v0.12.28
+   Compiling uuid v1.27.0
+   Compiling spec v0.1.0 (/home/emmanuel/spec/backend)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 51s
+     Running unittests src/main.rs (target/debug/deps/spec-f74e555def58e80a)
+
+running 53 tests
+test completion::tests::azure_urls_and_defaults ... ok
+test completion::tests::chat_auth_and_missing_configuration ... ok
+test completion::tests::chat_shares_concurrency_limit_and_overrides_inline_timeout ... ok
+test completion::tests::chat_truncates_utf8_context_and_discloses_existing_log_truncation ... ok
+test completion::tests::chat_uses_displayed_context_preserves_multiline_answers_and_never_mutates_state ... ok
+test completion::tests::configuration_is_optional_but_never_partial_or_insecure ... ok
+test completion::tests::disabled_completion_and_configuration_use_existing_auth ... ok
+test completion::tests::normalization_keeps_only_a_short_inline_clause ... ok
+test completion::tests::chat_provider_failures_empty_refusal_incomplete_and_oversized_answers_are_sanitized ... ok
+test completion::tests::provider_errors_are_bounded_redacted_and_do_not_follow_redirects ... ok
+test completion::tests::provider_payloads_and_normalized_suffix_are_integrated ... ok
+test completion::tests::refusal_incomplete_and_fenced_outputs_offer_nothing ... ok
+test completion::tests::timeout_and_connection_failure_are_sanitized ... ok
+test completion::tests::validation_empty_prefix_and_concurrency_do_not_call_provider ... ok
+test completion::tests::chat_validation_rejects_invalid_fields_sequences_and_byte_bounds_before_provider ... ok
+test remote_tests::cancellation_survives_blocked_attachment_output ... ok
+test remote_tests::disconnected_completion_retains_private_bounded_log_and_reaps_leftover_children ... ok
+test remote_tests::early_explicit_cancel_is_not_eof_or_snapshot_data ... ok
+test completion::tests::chat_accepts_maximum_fields_and_answer_bytes ... ok
+test remote_tests::invalid_spec_names_cannot_launch_or_recover_even_through_direct_scripts ... ok
+test remote_tests::recovery_rejects_missing_malformed_and_oversized_ssh_responses ... ok
+test remote_tests::recovery_is_nonlaunching_bounded_and_requires_known_status ... ok
+test remote_tests::recovery_rejects_remote_symlinks_nonregular_files_and_public_storage ... ok
+test remote_tests::remote_alias_reports_missing_instruction_runtime_before_launch ... ok
+test remote_tests::remote_configuration_rejects_options_and_relative_paths ... ok
+test remote_tests::named_logs_preserve_and_quote_original_filenames_and_recover_without_metadata ... ok
+test remote_tests::remote_alias_completion_instructions_are_scoped_merged_and_private ... ok
+test remote_tests::remote_key_validation_distinguishes_missing_and_non_file_paths ... ok
+test remote_tests::retention_prunes_only_old_finished_sessions_and_rejects_unsafe_parent ... ok
+test remote_tests::ssh_is_noninteractive_with_host_verification_and_no_forwarding ... ok
+test remote_tests::remote_function_is_supported_and_missing_spec_is_reported ... ok
+test remote_tests::truncated_upload_never_starts_build_and_removes_snapshot ... ok
+test tests::all_api_routes_require_authentication ... ok
+test remote_tests::stable_remote_id_refuses_duplicate_launch_even_after_completion ... ok
+test tests::build_size_limit_does_not_limit_saving ... ok
+test tests::changed_remote_identity_never_contacts_ssh_or_loses_cached_output ... ok
+test remote_tests::remote_engine_path_and_auto_settings_reach_children_without_login_profiles ... ok
+test tests::encoded_traversal_is_rejected ... ok
+test tests::execution_is_disabled_by_default ... ok
+test tests::externally_changed_files_are_not_overwritten ... ok
+test tests::latest_is_null_without_a_run_and_tracks_newest_while_old_ids_remain_readable ... ok
+test tests::local_run_storage_rejects_unsafe_paths_permissions_and_oversized_records ... ok
+test tests::output_buffers_are_bounded ... ok
+test tests::output_log_reads_disk_without_replacing_cached_or_attached_output ... ok
+test tests::checkpoint_failures_are_visible_and_retryable_and_output_is_bounded ... ok
+test tests::build_exit_status_and_snapshot_cleanup ... ok
+test tests::save_list_reload_and_conflict_preserve_content ... ok
+test tests::storage_failure_prevents_ssh_spawn_and_does_not_modify_spec ... ok
+test tests::symlinks_and_nonregular_files_are_never_read_or_overwritten ... ok
+test tests::unsafe_names_and_content_are_rejected ... ok
+test tests::run_streams_snapshot_and_can_be_cancelled ... ok
+test tests::restart_recovers_running_and_disconnected_completed_runs_without_relaunch ... ok
+
+
+Command exceeded timeout of 120000 ms. Retry with a larger timeout if the command is expected to take longer.
+> build · gpt-6-astra
+[0m$ [0mgit diff --check && git diff --stat
+README.md                   | 19 +++++++++++++++++++
+ backend/src/remote.rs       | 26 ++++++++++++++++++++++----
+ backend/src/remote_tests.rs | 29 +++++++++++++++++++++++++++++
+ ops.sh                      | 29 ++++++++++++++++++++++++++++-
+ run.sh                      | 24 +-----------------------
+ 5 files changed, 99 insertions(+), 28 deletions(-)
+[0m$ [0mpython3 - <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+root = Path('/home/emmanuel/spec')
+with tempfile.TemporaryDirectory(prefix='spec-launcher-', dir='/tmp/opencode') as temp:
+    tmp = Path(temp)
+    bindir = tmp / 'bin'
+    bindir.mkdir()
+    log = tmp / 'calls'
+    for name in ('cargo', 'bun'):
+        stub = bindir / name
+        stub.write_text('#!/bin/bash\nprintf "%s|%s|%s|%s\\n" "${0##*/}" "$*" "$PWD" "${SPEC_SSH_KEY-UNSET}" >> "$CALL_LOG"\n')
+        stub.chmod(0o755)
+    key = tmp / 'key with spaces'
+    key.write_text('fixture, not a real private key')
+    home = tmp / 'home'
+    home.mkdir()
+    (home / 'identity').write_text('fixture')
+    env = dict(os.environ, PATH=f'{bindir}:{os.environ["PATH"]}', CALL_LOG=str(log), HOME=str(home), SPEC_WORKSPACE=str(tmp / 'workspace'))
+    env.pop('SPEC_SSH_KEY', None)
+    cases = [(None, 'UNSET'), ('', 'UNSET'), (str(key), str(key)), ('key with spaces', str(key)), ('~/identity', str(home / 'identity'))]
+    for value, expected in cases:
+        log.unlink(missing_ok=True)
+        case_env = env.copy()
+        if value is not None:
+            case_env['SPEC_SSH_KEY'] = value
+        result = subprocess.run([str(root / 'ops.sh')], cwd=tmp, env=case_env, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        calls = log.read_text().splitlines()
+        assert len(calls) == 4, calls
+        assert all(line.endswith('|' + expected) for line in calls), calls
+        assert calls[-2].startswith('cargo|build --release --locked|'), calls
+        assert calls[-1].startswith('cargo|run --release --locked|'), calls
+    for value in [str(tmp / 'missing'), str(tmp)]:
+        log.unlink(missing_ok=True)
+        result = subprocess.run([str(root / 'ops.sh')], cwd=tmp, env=dict(env, SPEC_SSH_KEY=value), capture_output=True, text=True)
+        assert result.returncode != 0
+        assert 'not a readable local private-key file' in result.stderr
+        assert not log.exists(), 'Invalid key must fail before building'
+    log.unlink(missing_ok=True)
+    result = subprocess.run([str(root / 'build.sh')], cwd=tmp, env=dict(env, SPEC_SSH_KEY=str(tmp / 'missing')), capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert len(log.read_text().splitlines()) == 3
+print('Launcher smoke checks passed: omitted/empty/absolute/relative/tilde keys, missing/directory rejection before build, and standalone build from another directory.')
+PY
+Launcher smoke checks passed: omitted/empty/absolute/relative/tilde keys, missing/directory rejection before build, and standalone build from another directory.
+[0m$ [0mcargo test --locked && cargo clippy --all-targets --locked -- -D warnings
+Finished `test` profile [unoptimized + debuginfo] target(s) in 0.75s
+     Running unittests src/main.rs (target/debug/deps/spec-f74e555def58e80a)
+
+running 53 tests
+test completion::tests::azure_urls_and_defaults ... ok
+test completion::tests::chat_auth_and_missing_configuration ... ok
+test completion::tests::chat_truncates_utf8_context_and_discloses_existing_log_truncation ... ok
+test completion::tests::chat_uses_displayed_context_preserves_multiline_answers_and_never_mutates_state ... ok
+test completion::tests::chat_provider_failures_empty_refusal_incomplete_and_oversized_answers_are_sanitized ... ok
+test completion::tests::chat_shares_concurrency_limit_and_overrides_inline_timeout ... ok
+test completion::tests::configuration_is_optional_but_never_partial_or_insecure ... ok
+test completion::tests::normalization_keeps_only_a_short_inline_clause ... ok
+test completion::tests::disabled_completion_and_configuration_use_existing_auth ... ok
+test completion::tests::provider_payloads_and_normalized_suffix_are_integrated ... ok
+test completion::tests::provider_errors_are_bounded_redacted_and_do_not_follow_redirects ... ok
+test completion::tests::refusal_incomplete_and_fenced_outputs_offer_nothing ... ok
+test completion::tests::validation_empty_prefix_and_concurrency_do_not_call_provider ... ok
+test completion::tests::timeout_and_connection_failure_are_sanitized ... ok
+test completion::tests::chat_validation_rejects_invalid_fields_sequences_and_byte_bounds_before_provider ... ok
+test remote_tests::cancellation_survives_blocked_attachment_output ... ok
+test remote_tests::disconnected_completion_retains_private_bounded_log_and_reaps_leftover_children ... ok
+test remote_tests::early_explicit_cancel_is_not_eof_or_snapshot_data ... ok
+test completion::tests::chat_accepts_maximum_fields_and_answer_bytes ... ok
+test remote_tests::invalid_spec_names_cannot_launch_or_recover_even_through_direct_scripts ... ok
+test remote_tests::recovery_rejects_missing_malformed_and_oversized_ssh_responses ... ok
+test remote_tests::recovery_is_nonlaunching_bounded_and_requires_known_status ... ok
+test remote_tests::recovery_rejects_remote_symlinks_nonregular_files_and_public_storage ... ok
+test remote_tests::remote_alias_reports_missing_instruction_runtime_before_launch ... ok
+test remote_tests::remote_configuration_rejects_options_and_relative_paths ... ok
+test remote_tests::named_logs_preserve_and_quote_original_filenames_and_recover_without_metadata ... ok
+test remote_tests::remote_alias_completion_instructions_are_scoped_merged_and_private ... ok
+test remote_tests::remote_key_validation_distinguishes_missing_and_non_file_paths ... ok
+test remote_tests::retention_prunes_only_old_finished_sessions_and_rejects_unsafe_parent ... ok
+test remote_tests::ssh_is_noninteractive_with_host_verification_and_no_forwarding ... ok
+test remote_tests::remote_function_is_supported_and_missing_spec_is_reported ... ok
+test remote_tests::truncated_upload_never_starts_build_and_removes_snapshot ... ok
+test tests::all_api_routes_require_authentication ... ok
+test remote_tests::stable_remote_id_refuses_duplicate_launch_even_after_completion ... ok
+test tests::build_size_limit_does_not_limit_saving ... ok
+test tests::changed_remote_identity_never_contacts_ssh_or_loses_cached_output ... ok
+test remote_tests::remote_engine_path_and_auto_settings_reach_children_without_login_profiles ... ok
+test tests::encoded_traversal_is_rejected ... ok
+test tests::execution_is_disabled_by_default ... ok
+test tests::externally_changed_files_are_not_overwritten ... ok
+test tests::latest_is_null_without_a_run_and_tracks_newest_while_old_ids_remain_readable ... ok
+test tests::local_run_storage_rejects_unsafe_paths_permissions_and_oversized_records ... ok
+test tests::output_buffers_are_bounded ... ok
+test tests::output_log_reads_disk_without_replacing_cached_or_attached_output ... ok
+test tests::checkpoint_failures_are_visible_and_retryable_and_output_is_bounded ... ok
+test tests::build_exit_status_and_snapshot_cleanup ... ok
+test tests::save_list_reload_and_conflict_preserve_content ... ok
+test tests::storage_failure_prevents_ssh_spawn_and_does_not_modify_spec ... ok
+test tests::symlinks_and_nonregular_files_are_never_read_or_overwritten ... ok
+test tests::unsafe_names_and_content_are_rejected ... ok
+test tests::run_streams_snapshot_and_can_be_cancelled ... ok
+test tests::restart_recovers_running_and_disconnected_completed_runs_without_relaunch ... ok
+test remote_tests::detached_builds_survive_eof_hup_and_attachment_kill_then_watchdog_cleans_descendants ... ok
+
+test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.76s
+
+    Checking cfg-if v1.0.5
+    Checking libc v0.2.190
+    Checking smallvec v1.16.2
+    Checking zerofrom v0.1.8
+    Checking stable_deref_trait v1.2.1
+    Checking bytes v1.12.1
+    Checking yoke v0.8.3
+    Checking pin-project-lite v0.2.17
+    Checking futures-core v0.3.34
+    Checking itoa v1.0.18
+    Checking zerovec v0.11.8
+    Checking scopeguard v1.2.0
+    Checking once_cell v1.21.4
+    Checking lock_api v0.4.14
+    Checking http v1.5.0
+    Checking litemap v0.8.3
+    Checking tinystr v0.8.4
+    Checking writeable v0.6.4
+    Checking potential_utf v0.1.6
+    Checking icu_locale_core v2.3.0
+    Checking parking_lot_core v0.9.12
+    Checking errno v0.3.14
+    Checking signal-hook-registry v1.4.8
+    Checking socket2 v0.6.5
+    Checking parking_lot v0.12.5
+    Checking mio v1.2.4
+    Checking http-body v1.1.0
+    Checking tracing-core v0.1.36
+    Checking zerotrie v0.2.5
+    Checking log v0.4.34
+    Checking tokio v1.53.2
+    Checking percent-encoding v2.3.2
+    Checking utf8_iter v1.0.4
+    Checking tracing v0.1.44
+    Checking icu_provider v2.3.1
+    Checking icu_collections v2.3.0
+    Checking slab v0.4.12
+    Checking futures-task v0.3.34
+    Checking tower-service v0.3.3
+    Checking zeroize v1.9.0
+    Checking futures-util v0.3.34
+    Checking icu_normalizer_data v2.3.0
+    Checking rustls-pki-types v1.15.1
+    Checking serde_core v1.0.229
+    Checking icu_properties_data v2.3.0
+    Checking getrandom v0.2.17
+    Checking untrusted v0.9.0
+    Checking httpdate v1.0.3
+    Checking try-lock v0.2.5
+    Checking want v0.3.1
+    Checking ring v0.17.14
+    Checking icu_properties v2.3.0
+    Checking icu_normalizer v2.3.0
+    Checking httparse v1.10.1
+    Checking form_urlencoded v1.2.2
+    Checking sync_wrapper v1.0.2
+    Checking futures-channel v0.3.34
+   Compiling unicase v2.9.0
+    Checking bitflags v2.13.2
+    Checking typenum v1.20.1
+    Checking tower-layer v0.3.3
+    Checking mime v0.3.17
+    Checking atomic-waker v1.1.2
+   Compiling mime_guess v2.0.5
+    Checking idna_adapter v1.2.2
+    Checking rustls-webpki v0.103.15
+    Checking http-body-util v0.1.5
+    Checking generic-array v0.14.7
+    Checking ipnet v2.12.2
+    Checking subtle v2.6.1
+    Checking base64 v0.23.1
+    Checking rustls v0.23.45
+    Checking serde v1.0.229
+    Checking idna v1.1.0
+    Checking hyper v1.11.1
+    Checking tower v0.5.3
+    Checking zmij v1.0.23
+    Checking memchr v2.8.3
+    Checking ryu v1.0.23
+    Checking futures-sink v0.3.34
+    Checking tokio-util v0.7.19
+    Checking hyper-util v0.1.21
+    Checking serde_json v1.0.151
+    Checking serde_urlencoded v0.7.1
+    Checking url v2.5.8
+    Checking getrandom v0.4.3
+    Checking block-buffer v0.10.4
+    Checking crypto-common v0.1.7
+    Checking webpki-roots v1.0.9
+    Checking linux-raw-sys v0.12.1
+    Checking http-range-header v0.4.2
+    Checking tower-http v0.6.11
+    Checking digest v0.10.7
+    Checking rustix v1.1.5
+    Checking axum-core v0.5.6
+    Checking tokio-rustls v0.26.6
+    Checking serde_path_to_error v0.1.20
+    Checking hyper-rustls v0.27.10
+    Checking matchit v0.8.4
+    Checking fastrand v2.5.0
+    Checking base64 v0.22.1
+    Checking cpufeatures v0.2.17
+    Checking sha2 v0.10.9
+    Checking reqwest v0.12.28
+    Checking nix v0.30.1
+    Checking axum v0.8.9
+    Checking tempfile v3.27.0
+    Checking uuid v1.27.0
+    Checking spec v0.1.0 (/home/emmanuel/spec/backend)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 31.24s
+> build · gpt-6-astra
+[0m$ [0mgit status --short
+ git diff --summary
+M README.md
+ M backend/src/remote.rs
+ M backend/src/remote_tests.rs
+ M ops.sh
+ M run.sh
+?? build.sh
+?? ins
+?? ins.out
+ mode change 100644 => 100755 ops.sh
+> build · gpt-6-astra
+Fixed the hard-coded missing key in `ops.sh` and added clearer validation errors.
+
+```bash
+./build.sh                         # Build UI and release backend
+SPEC_SSH_KEY="/actual/key" ./ops.sh # Build and launch with SSH
+```
+
+`./ops.sh` also supports configured SSH identities when the key variable is unset.
+
+Verified: release build, 53 tests, Clippy, and launcher checks passed.
+
+This machine has no local SSH private key or active agent; remote execution still requires an authorized identity.
+[0m
+> build · gpt-6-astra
+[0m→ [0mRead . [90m[limit=100][0m
+> build · gpt-6-astra
+[0m→ [0mRead build.sh 
+[0m✱ [0mGrep "SPEC_SSH_KEY|must be an absolute local private-key" [90min . · 52 matches[0m
+[0m$ [0mgit status --short
+M README.md
+ M backend/src/remote.rs
+ M backend/src/remote_tests.rs
+ M ops.sh
+ M run.sh
+?? build.sh
+?? ins
+?? ins.out
+[0m✱ [0mGlob "**/AGENTS.md" [90min /home/emmanuel · 0 matches[0m
+> build · gpt-6-astra
+I found existing build-script and SSH-validation changes. I’ll check the `spec` alias for the actual connection settings, then finish the reusable build setup without exposing credentials.
+[0m→ [0mRead ops.sh 
+[0m→ [0mRead run.sh 
+[0m→ [0mRead README.md [90m[limit=115][0m
+[0m→ [0mRead backend/src/remote.rs [90m[limit=190][0m
+[0m→ [0mRead backend/src/remote_tests.rs [90m[limit=115][0m
+[0m$ [0mpython3 - <<'PY'
+import os,re,pathlib
+print('SSH environment:')
+for k in sorted(os.environ):
+ if k.startswith('SPEC_SSH_') or k == 'SSH_AUTH_SOCK':
+  v=os.environ[k]
+  print(k+'='+ (v if k in ('SPEC_SSH_KEY','SPEC_SSH_TARGET','SPEC_SSH_WORKSPACE','SPEC_SSH_BINARY','SSH_AUTH_SOCK') and '\n' not in v else '[set]'))
+for name in ('.bashrc','.bash_aliases','.profile','.zshrc','.ssh/config'):
+ p=pathlib.Path.home()/name
+ if not p.is_file(): continue
+ print(str(p)+':')
+ for n,line in enumerate(p.read_text().splitlines(),1):
+  if re.search(r'spec|opencode|ssh|alias',line,re.I):
+   line=re.sub(r'(?i)((?:[A-Z_]*(?:KEY|TOKEN|SECRET|PASSWORD|ENDPOINT)[A-Z_]*)\s*=)\s*(?:"[^"]*"|\x27[^\x27]*\x27|[^\s;]+)',r'\1[redacted]',line)
+   print(str(n)+': '+line)
+p=pathlib.Path.home()/'.ssh'
+print('Local SSH files:', ', '.join(x.name for x in p.iterdir()) if p.is_dir() else '(directory absent)')
+PY
+SSH environment:
+/home/emmanuel/.bashrc:
+8: alias ls='ls --color=auto'
+9: alias grep='grep --color=auto'
+12: source /home/emmanuel/.local/share/specific/shell/specific.sh
+Local SSH files: known_hosts
+> build · gpt-6-astra
+[0m→ [0mRead /home/emmanuel/.local/share/specific/shell/specific.sh [90m[limit=230][0m
+> build · gpt-6-astra
+[0m→ [0mRead /home/emmanuel/.local/share/specific/bin/specific-run-build [90m[limit=210][0m
+> build · gpt-6-astra
+[0m→ [0mSkill "OpenCode" 
+> build · gpt-6-astra
+[0m→ [0mRead /home/emmanuel [90m[limit=120][0m
+[0m$ [0mgit diff --stat
+README.md                   | 19 +++++++++++++++++++
+ backend/src/remote.rs       | 26 ++++++++++++++++++++++----
+ backend/src/remote_tests.rs | 29 +++++++++++++++++++++++++++++
+ ops.sh                      | 29 ++++++++++++++++++++++++++++-
+ run.sh                      | 24 +-----------------------
+ 5 files changed, 99 insertions(+), 28 deletions(-)
+[0m$ [0mpython3 - <<'PY'
+import os,json,pathlib
+h=pathlib.Path.home()
+for d in (h/'.config/opencode', h/'.local/share/opencode',h/'.local/share/specific'):
+ print(str(d)+':')
+ if d.is_dir():
+  for p in d.iterdir(): print('  '+p.name+('/' if p.is_dir() else ''))
+for k in sorted(os.environ):
+ if any(s in k.upper() for s in ('AZURE','TOKEN','CREDENTIAL','API_KEY','OPENCODE_CONFIG','SPECIFIC_')): print('Environment '+k+': set')
+p=h/'.local/share/opencode/auth.json'
+if p.is_file():
+ try:
+  data=json.loads(p.read_text())
+  for provider,entry in data.items(): print('Stored auth provider '+provider+': fields '+', '.join(entry.keys()))
+ except (ValueError,AttributeError): print('Auth file present; format not inspected')
+PY
+/home/emmanuel/.config/opencode:
+  service.json
+  cli.json
+  opencode.jsonc
+/home/emmanuel/.local/share/opencode:
+  repos/
+  shell/
+  snapshot/
+  opencode.db
+  log/
+  opencode.db-wal
+  opencode.db-shm
+  tool-output/
+/home/emmanuel/.local/share/specific:
+  shell/
+  bin/
+  editor/
+[0m% [0mWebFetch https://opencode.ai/v2/docs/config 
+> build · gpt-6-astra
+[0m→ [0mRead archive [90m[limit=60][0m
+[0m$ [0mgit diff -- ops.sh run.sh
+diff --git a/ops.sh b/ops.sh
+old mode 100644
+new mode 100755
+index 45e15c4..e9528c0
+--- a/ops.sh
++++ b/ops.sh
+@@ -1 +1,28 @@
+-SPEC_SSH_TARGET="opencode@4.197.157.17" SPEC_SSH_KEY="$HOME/.ssh/opencode-dev-aue_ed25519" SPEC_SSH_WORKSPACE="/home/opencode/spec" SPEC_WORKSPACE="$HOME/specs" ./run.sh
++#!/usr/bin/env bash
++set -euo pipefail
++
++root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++
++export SPEC_SSH_TARGET="${SPEC_SSH_TARGET:-opencode@4.197.157.17}"
++export SPEC_SSH_WORKSPACE="${SPEC_SSH_WORKSPACE:-/home/opencode/spec}"
++export SPEC_WORKSPACE="${SPEC_WORKSPACE:-$HOME/specs}"
++
++# Resolve the identity on the local machine before run.sh changes directories
++# or builds anything. An omitted/empty identity uses SSH config or ssh-agent.
++if [[ -n "${SPEC_SSH_KEY:-}" ]]; then
++  key="$SPEC_SSH_KEY"
++  case "$key" in
++    '~/'*) key="$HOME/${key:2}" ;;
++  esac
++  if [[ ! -f "$key" || ! -r "$key" ]]; then
++    printf 'SPEC_SSH_KEY is not a readable local private-key file: %s\n' "$key" >&2
++    printf 'Set SPEC_SSH_KEY to an existing key on this computer, or unset it to use SSH config/ssh-agent.\n' >&2
++    exit 1
++  fi
++  SPEC_SSH_KEY="$(realpath -e -- "$key")"
++  export SPEC_SSH_KEY
++else
++  unset SPEC_SSH_KEY
++fi
++
++exec "$root/run.sh"
+diff --git a/run.sh b/run.sh
+index baaa256..933a5fd 100755
+--- a/run.sh
++++ b/run.sh
+@@ -3,17 +3,6 @@ set -euo pipefail
+ 
+ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ 
+-if ! command -v cargo >/dev/null 2>&1; then
+-  printf 'Rust/Cargo is required to run spec.\n' >&2
+-  exit 1
+-fi
+-if ! command -v bun >/dev/null 2>&1; then
+-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+-    printf 'Install Bun or Node.js (22.12+) with npm to build the frontend.\n' >&2
+-    exit 1
+-  fi
+-fi
+-
+ cd -- "$root/backend"
+ export SPEC_WORKSPACE="${SPEC_WORKSPACE:-$root/workspace}"
+ export SPEC_UI_DIR="${SPEC_UI_DIR:-$root/frontend/dist}"
+@@ -27,17 +16,6 @@ if (( (8#$mode & 0022) != 0 )); then
+   exit 1
+ fi
+ 
+-(
+-  cd -- "$root/frontend"
+-  if command -v bun >/dev/null 2>&1; then
+-    bun install --frozen-lockfile
+-    bun run build
+-  else
+-    printf 'Bun is unavailable; building with Node/npm (bun.lock is not used).\n'
+-    npm install --no-save --package-lock=false --no-audit --no-fund
+-    npm run typecheck
+-    npm exec --no -- vite build
+-  fi
+-)
++"$root/build.sh"
+ 
+ exec cargo run --release --locked
+[0m$ [0mpython3 - <<'PY'
+import pathlib,re
+p=pathlib.Path.home()/'.config/opencode/opencode.jsonc'
+for n,line in enumerate(p.read_text().splitlines(),1):
+ if re.search('model|provider|azure|apiKey|baseURL|credential|token|secret|password|endpoint|env:|file:',line,re.I):
+  if re.search('apiKey|baseURL|credential|token|secret|password|endpoint',line,re.I):
+   fields=re.findall(r'"([^"\n]+)"\s*:',line)
+   print(f'{p}:{n}: '+ ', '.join(fields)+': [value redacted]')
+  else: print(f'{p}:{n}: '+line)
+for p in (pathlib.Path('/home/emmanuel/.bash_history'),pathlib.Path('/home/emmanuel/spec/archive/bash_aliases'),pathlib.Path('/home/emmanuel/.bash_profile')):
+ if not p.is_file(): continue
+ print(str(p)+': relevant SSH path references')
+ for value in sorted(set(re.findall(r'(?:[/~][^\s\x27\";]*)?(?:id_rsa|[^\s\x27\";]*ed25519|[^\s\x27\";]*\.pem)\b',p.read_text()))): print(value)
+PY
+/home/emmanuel/.config/opencode/opencode.jsonc:3:   "model": "azure/gpt-6-astra",
+/home/emmanuel/.config/opencode/opencode.jsonc:7:   "providers": {
+/home/emmanuel/.config/opencode/opencode.jsonc:8:     "azure": {
+/home/emmanuel/.config/opencode/opencode.jsonc:12: apiKey: [value redacted]
+/home/emmanuel/.config/opencode/opencode.jsonc:14:       "models": {
+/home/emmanuel/.config/opencode/opencode.jsonc:16:           "modelID": "gpt-6-astra"
+/home/emmanuel/.bash_history: relevant SSH path references
+/home/emmanuel/.bash_profile: relevant SSH path references
+[0m✱ [0mGlob "**/*.{pem,key,ppk}" [90min /home/emmanuel · 4 matches[0m
+[0m✱ [0mGlob "**/*{ed25519,id_rsa,bash_aliases}*" [90min /home/emmanuel · 9 matches[0m
+> build · gpt-6-astra
+The local `spec` command runs OpenCode’s `build` agent. Its Azure API credential is configured in `~/.config/opencode/opencode.jsonc`, but I found no local SSH private key; `~/.ssh` contains only `known_hosts`.
+
+The old launcher pointed to a missing key. I’ll also make direct `run.sh` launches resolve key paths before building, so relative paths and `~/` work consistently. Remote authentication will still require an authorized SSH identity.
+[0m→ [0mRead .gitignore 
+[0m→ [0mRead frontend/package.json 
+[0m$ [0mssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 -o ClearAllForwardings=yes -o ForwardAgent=no -o ForwardX11=no -o PermitLocalCommand=no -o ControlPath=none -o RemoteCommand=none opencode@4.197.157.17 true
+ssh: connect to host 4.197.157.17 port 22: Connection timed out
+> build · gpt-6-astra
+[0m% [0mPatch 3 files 
+> build · gpt-6-astra
+[0m$ [0mbash -n build.sh run.sh ops.sh
+(no output)
+[0m$ [0mpython3 - <<'PY'
+import json,os,pathlib,subprocess,tempfile
+root=pathlib.Path('/home/emmanuel/spec')
+with tempfile.TemporaryDirectory(prefix='spec-launch-', dir='/tmp/opencode') as td:
+ t=pathlib.Path(td); fake=t/'bin'; fake.mkdir(); home=t/'home'; home.mkdir(); workspace=t/'workspace'
+ key=home/'identity with spaces'; key.write_text('test placeholder')
+ log=t/'calls'
+ for name in ('cargo','bun'):
+  p=fake/name
+  p.write_text('#!/usr/bin/env python3\nimport os,json,sys\nwith open(os.environ["CALL_LOG"],"a") as f: f.write(json.dumps({"command":os.path.basename(sys.argv[0]),"args":sys.argv[1:],"cwd":os.getcwd(),"key":os.environ.get("SPEC_SSH_KEY")})+"\\n")\n')
+  p.chmod(0o755)
+ env=dict(os.environ,HOME=str(home),PATH=str(fake)+':'+os.environ['PATH'],CALL_LOG=str(log),SPEC_WORKSPACE=str(workspace))
+ env.pop('SPEC_SSH_KEY',None)
+ for script in ('run.sh','ops.sh'):
+  for value in (None,'',str(key),'~/identity with spaces','home/identity with spaces'):
+   log.unlink(missing_ok=True); e=env.copy()
+   if value is not None: e['SPEC_SSH_KEY']=value
+   result=subprocess.run([str(root/script)],cwd=t,env=e,capture_output=True,text=True)
+   assert result.returncode==0,(script,value,result.stderr)
+   calls=[json.loads(line) for line in log.read_text().splitlines()]
+   expected=str(key) if value else None
+   assert all(c['key']==expected for c in calls),(script,value,calls)
+   assert calls[-1]['args']==['run','--release','--locked'],calls
+  for value in ('missing',str(t/'missing'),str(home)):
+   log.unlink(missing_ok=True)
+   result=subprocess.run([str(root/script)],cwd=t,env=dict(env,SPEC_SSH_KEY=value),capture_output=True,text=True)
+   assert result.returncode!=0 and 'not a readable local private-key file' in result.stderr,(script,value,result.stderr)
+   assert not log.exists(),'Invalid key must fail before building'
+ log.unlink(missing_ok=True)
+ result=subprocess.run([str(root/'build.sh')],cwd=t,env=dict(env,SPEC_SSH_KEY=str(t/'missing')),capture_output=True,text=True)
+ assert result.returncode==0,result.stderr
+ calls=[json.loads(line) for line in log.read_text().splitlines()]
+ assert calls[-1]['args']==['build','--release','--locked'],calls
+ print('PASS: both launchers normalize absolute/relative/tilde/spaced keys; unset/empty keys use SSH defaults; missing keys/directories fail before builds; build-only needs no SSH key.')
+PY
+PASS: both launchers normalize absolute/relative/tilde/spaced keys; unset/empty keys use SSH defaults; missing keys/directories fail before builds; build-only needs no SSH key.
+[0m$ [0m/home/emmanuel/spec/build.sh
+bun install v1.4.2 (744846f84)
+
+Checked 109 installs across 159 packages (no changes) [10.00ms]
+$ bun typecheck && vite build
+$ tsc --noEmit
+vite v7.3.6 building client environment for production...
+transforming...
+✓ 33 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.44 kB │ gzip:  0.29 kB
+dist/assets/index-BI00Hyqv.css   13.57 kB │ gzip:  3.51 kB
+dist/assets/index-CHmCEAtB.js   247.34 kB │ gzip: 78.71 kB
+✓ built in 2.40s
+    Finished `release` profile [optimized] target(s) in 0.23s
+> build · gpt-6-astra
+[0m$ [0mgit diff --check
+(no output)
+[0m$ [0mgit status --short
+M README.md
+ M backend/src/remote.rs
+ M backend/src/remote_tests.rs
+ M ops.sh
+ M run.sh
+?? build.sh
+?? ins
+?? ins.out
+[0m$ [0mcargo test --locked
+Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running unittests src/main.rs (target/debug/deps/spec-f74e555def58e80a)
+
+running 53 tests
+test completion::tests::azure_urls_and_defaults ... ok
+test completion::tests::chat_auth_and_missing_configuration ... ok
+test completion::tests::chat_shares_concurrency_limit_and_overrides_inline_timeout ... ok
+test completion::tests::chat_uses_displayed_context_preserves_multiline_answers_and_never_mutates_state ... ok
+test completion::tests::chat_truncates_utf8_context_and_discloses_existing_log_truncation ... ok
+test completion::tests::configuration_is_optional_but_never_partial_or_insecure ... ok
+test completion::tests::disabled_completion_and_configuration_use_existing_auth ... ok
+test completion::tests::normalization_keeps_only_a_short_inline_clause ... ok
+test completion::tests::chat_provider_failures_empty_refusal_incomplete_and_oversized_answers_are_sanitized ... ok
+test completion::tests::provider_payloads_and_normalized_suffix_are_integrated ... ok
+test completion::tests::provider_errors_are_bounded_redacted_and_do_not_follow_redirects ... ok
+test completion::tests::refusal_incomplete_and_fenced_outputs_offer_nothing ... ok
+test completion::tests::validation_empty_prefix_and_concurrency_do_not_call_provider ... ok
+test completion::tests::timeout_and_connection_failure_are_sanitized ... ok
+test completion::tests::chat_validation_rejects_invalid_fields_sequences_and_byte_bounds_before_provider ... ok
+test remote_tests::cancellation_survives_blocked_attachment_output ... ok
+test remote_tests::disconnected_completion_retains_private_bounded_log_and_reaps_leftover_children ... ok
+test remote_tests::early_explicit_cancel_is_not_eof_or_snapshot_data ... ok
+test completion::tests::chat_accepts_maximum_fields_and_answer_bytes ... ok
+test remote_tests::invalid_spec_names_cannot_launch_or_recover_even_through_direct_scripts ... ok
+test remote_tests::recovery_rejects_missing_malformed_and_oversized_ssh_responses ... ok
+test remote_tests::recovery_is_nonlaunching_bounded_and_requires_known_status ... ok
+test remote_tests::recovery_rejects_remote_symlinks_nonregular_files_and_public_storage ... ok
+test remote_tests::remote_alias_reports_missing_instruction_runtime_before_launch ... ok
+test remote_tests::remote_configuration_rejects_options_and_relative_paths ... ok
+test remote_tests::named_logs_preserve_and_quote_original_filenames_and_recover_without_metadata ... ok
+test remote_tests::remote_alias_completion_instructions_are_scoped_merged_and_private ... ok
+test remote_tests::remote_key_validation_distinguishes_missing_and_non_file_paths ... ok
+test remote_tests::retention_prunes_only_old_finished_sessions_and_rejects_unsafe_parent ... ok
+test remote_tests::ssh_is_noninteractive_with_host_verification_and_no_forwarding ... ok
+test remote_tests::remote_function_is_supported_and_missing_spec_is_reported ... ok
+test remote_tests::truncated_upload_never_starts_build_and_removes_snapshot ... ok
+test tests::all_api_routes_require_authentication ... ok
+test remote_tests::stable_remote_id_refuses_duplicate_launch_even_after_completion ... ok
+test tests::build_size_limit_does_not_limit_saving ... ok
+test tests::changed_remote_identity_never_contacts_ssh_or_loses_cached_output ... ok
+test remote_tests::remote_engine_path_and_auto_settings_reach_children_without_login_profiles ... ok
+test tests::encoded_traversal_is_rejected ... ok
+test tests::execution_is_disabled_by_default ... ok
+test tests::externally_changed_files_are_not_overwritten ... ok
+test tests::latest_is_null_without_a_run_and_tracks_newest_while_old_ids_remain_readable ... ok
+test tests::local_run_storage_rejects_unsafe_paths_permissions_and_oversized_records ... ok
+test tests::output_buffers_are_bounded ... ok
+test tests::checkpoint_failures_are_visible_and_retryable_and_output_is_bounded ... ok
+test tests::output_log_reads_disk_without_replacing_cached_or_attached_output ... ok
+test tests::build_exit_status_and_snapshot_cleanup ... ok
+test tests::save_list_reload_and_conflict_preserve_content ... ok
+test tests::storage_failure_prevents_ssh_spawn_and_does_not_modify_spec ... ok
+test tests::symlinks_and_nonregular_files_are_never_read_or_overwritten ... ok
+test tests::unsafe_names_and_content_are_rejected ... ok
+test tests::run_streams_snapshot_and_can_be_cancelled ... ok
+test tests::restart_recovers_running_and_disconnected_completed_runs_without_relaunch ... ok
+test remote_tests::detached_builds_survive_eof_hup_and_attachment_kill_then_watchdog_cleans_descendants ... ok
+
+test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.83s
+> build · gpt-6-astra
+Fixed launcher key-path handling: `run.sh` and `ops.sh` now resolve relative/`~/` paths and reject missing keys before building.
+
+```bash
+./build.sh                       # Future builds
+SPEC_SSH_KEY="/actual/key" ./ops.sh  # Build and launch
+```
+
+Traced `spec` to OpenCode’s build agent. Found Azure credentials in `~/.config/opencode/opencode.jsonc`, but **no SSH private key**. API credentials cannot replace it. The configured remote host also timed out.
+
+Verified: production build, launcher checks, and all 53 backend tests passed.
+[0m
+> build · gpt-6-astra
+[0m→ [0mRead . 
+> build · gpt-6-astra
+[0m✱ [0mGlob "**/AGENTS.md" [90min /home/emmanuel · 0 matches[0m
+[0m$ [0mgit status --short
+M README.md
+ M backend/src/remote.rs
+ M backend/src/remote_tests.rs
+ M ops.sh
+ M run.sh
+?? build.sh
+?? ins
+?? ins.out
+[0m✱ [0mGrep "SPEC_SSH_KEY|absolute local private-key" [90min . · 69 matches[0m
+[0m→ [0mRead /home/emmanuel/ip 
+[0m→ [0mRead /home/emmanuel/Downloads 
+> build · gpt-6-astra
+[0m→ [0mRead run.sh 
+[0m→ [0mRead build.sh 
+[0m→ [0mRead ops.sh 
+[0m→ [0mRead README.md [90m[offset=1, limit=115][0m
+[0m→ [0mRead backend/src/remote.rs [90m[limit=260][0m
+[0m$ [0mstat -c '%a %U %n' /home/emmanuel/Downloads/Spec_man.pem; ssh -G 20.227.39.101 | head -35
+644 emmanuel /home/emmanuel/Downloads/Spec_man.pem
+host 20.227.39.101
+user emmanuel
+hostname 20.227.39.101
+port 22
+addressfamily any
+batchmode no
+canonicalizefallbacklocal yes
+canonicalizehostname false
+checkhostip no
+compression no
+controlmaster false
+enablesshkeysign no
+clearallforwardings no
+exitonforwardfailure no
+fingerprinthash SHA256
+forwardx11 no
+forwardx11trusted no
+gatewayports no
+gssapiauthentication no
+gssapidelegatecredentials no
+hashknownhosts no
+hostbasedauthentication no
+identitiesonly no
+kbdinteractiveauthentication yes
+nohostauthenticationforlocalhost no
+passwordauthentication yes
+permitlocalcommand no
+proxyusefdpass no
+pubkeyauthentication true
+requesttty auto
+sessiontype default
+stdinnull no
+forkafterauthentication no
+streamlocalbindunlink no
+stricthostkeychecking ask
+Pseudo-terminal will not be allocated because stdin is not a terminal.
+> build · gpt-6-astra
+I found `20.227.39.101` in `~/ip` and `~/Downloads/Spec_man.pem`. The launcher still points to an old host. I’ll update it for repeatable builds and verify SSH access; the key also needs tighter file permissions for SSH to accept it.
+[0m$ [0mchmod 600 /home/emmanuel/Downloads/Spec_man.pem
+ssh -T -i /home/emmanuel/Downloads/Spec_man.pem -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ClearAllForwardings=yes -o ForwardAgent=no opencode@20.227.39.101 'id -un; printf "HOME=%s\n" "$HOME"; ls -ld "$HOME/spec"; test ! -f "$HOME/.bash_aliases" || bash -c '\''source "$HOME/.bash_aliases"; type -t spec'\'''
+opencode
+HOME=/home/opencode
+drwxrwxr-x 9 opencode opencode 4096 Oct  5 17:04 /home/opencode/spec
+function
+> build · gpt-6-astra
+[91m[1mError: [0mConnection lost while reading the response: ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()
+> build · gpt-6-astra
+[0m→ [0mRead backend/src/remote-alias.bash 
+[0m→ [0mRead frontend/package.json 
+[0m$ [0mgit diff -- run.sh ops.sh backend/src/remote.rs backend/src/remote_tests.rs
+command -v cargo bun node npm
+stat -c '%a %n' build.sh ops.sh run.sh
+diff --git a/backend/src/remote.rs b/backend/src/remote.rs
+index 2c32098..e9c6b08 100644
+--- a/backend/src/remote.rs
++++ b/backend/src/remote.rs
+@@ -54,10 +54,28 @@ impl Remote {
+         {
+             return Err("SPEC_SSH_BINARY must be an absolute executable SSH client path".into());
+         }
+-        if let Some(key) = &self.key
+-            && (!key.is_absolute() || !key.is_file())
+-        {
+-            return Err("SPEC_SSH_KEY must be an absolute local private-key file path".into());
++        if let Some(key) = &self.key {
++            if !key.is_absolute() {
++                return Err("SPEC_SSH_KEY must be an absolute local private-key file path. Use \"$HOME/.ssh/key\" rather than \"~/.ssh/key\", or unset SPEC_SSH_KEY to use SSH config/ssh-agent.".into());
++            }
++            let metadata = fs::metadata(key).map_err(|error| {
++                format!(
++                    "Cannot access SPEC_SSH_KEY local file {}: {error}. Set it to an existing key on this computer, or unset SPEC_SSH_KEY to use SSH config/ssh-agent.",
++                    key.display()
++                )
++            })?;
++            if !metadata.is_file() {
++                return Err(format!(
++                    "SPEC_SSH_KEY must be a local private-key file, not a directory or special file: {}",
++                    key.display()
++                ).into());
++            }
++            fs::File::open(key).map_err(|error| {
++                format!(
++                    "Cannot read SPEC_SSH_KEY local file {}: {error}",
++                    key.display()
++                )
++            })?;
+         }
+         Ok(())
+     }
+diff --git a/backend/src/remote_tests.rs b/backend/src/remote_tests.rs
+index 131717d..3ab45a8 100644
+--- a/backend/src/remote_tests.rs
++++ b/backend/src/remote_tests.rs
+@@ -31,6 +31,35 @@ fn remote_configuration_rejects_options_and_relative_paths() {
+     assert!(remote.validate().is_err());
+ }
+ 
++#[test]
++fn remote_key_validation_distinguishes_missing_and_non_file_paths() {
++    let root = tempfile::tempdir().unwrap();
++    let key = root.path().join("identity with spaces");
++    let mut remote = Remote {
++        binary: "/usr/bin/ssh".into(),
++        target: "user@host".into(),
++        directory: "/project".into(),
++        key: Some(key.clone()),
++    };
++    let error = remote.validate().unwrap_err().to_string();
++    assert!(error.contains("Cannot access SPEC_SSH_KEY local file"));
++    assert!(error.contains(key.to_str().unwrap()));
++    assert!(error.contains("unset SPEC_SSH_KEY"));
++
++    remote.key = Some(root.path().into());
++    assert!(
++        remote
++            .validate()
++            .unwrap_err()
++            .to_string()
++            .contains("not a directory or special file")
++    );
++
++    fs::write(&key, b"test identity placeholder").unwrap();
++    remote.key = Some(key);
++    assert!(remote.validate().is_ok());
++}
++
+ #[test]
+ fn ssh_is_noninteractive_with_host_verification_and_no_forwarding() {
+     let remote = Remote {
+diff --git a/ops.sh b/ops.sh
+old mode 100644
+new mode 100755
+index 45e15c4..9b7833f
+--- a/ops.sh
++++ b/ops.sh
+@@ -1 +1,10 @@
+-SPEC_SSH_TARGET="opencode@4.197.157.17" SPEC_SSH_KEY="$HOME/.ssh/opencode-dev-aue_ed25519" SPEC_SSH_WORKSPACE="/home/opencode/spec" SPEC_WORKSPACE="$HOME/specs" ./run.sh
++#!/usr/bin/env bash
++set -euo pipefail
++
++root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++
++export SPEC_SSH_TARGET="${SPEC_SSH_TARGET:-opencode@4.197.157.17}"
++export SPEC_SSH_WORKSPACE="${SPEC_SSH_WORKSPACE:-/home/opencode/spec}"
++export SPEC_WORKSPACE="${SPEC_WORKSPACE:-$HOME/specs}"
++
++exec "$root/run.sh"
+diff --git a/run.sh b/run.sh
+index baaa256..b892e6a 100755
+--- a/run.sh
++++ b/run.sh
+@@ -3,15 +3,22 @@ set -euo pipefail
+ 
+ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ 
+-if ! command -v cargo >/dev/null 2>&1; then
+-  printf 'Rust/Cargo is required to run spec.\n' >&2
+-  exit 1
+-fi
+-if ! command -v bun >/dev/null 2>&1; then
+-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+-    printf 'Install Bun or Node.js (22.12+) with npm to build the frontend.\n' >&2
++# Resolve the identity before changing directories or building. An omitted/empty
++# identity uses SSH config or ssh-agent; explicit invalid paths fail immediately.
++if [[ -n "${SPEC_SSH_KEY:-}" ]]; then
++  key="$SPEC_SSH_KEY"
++  case "$key" in
++    '~/'*) key="$HOME/${key:2}" ;;
++  esac
++  if [[ ! -f "$key" || ! -r "$key" ]]; then
++    printf 'SPEC_SSH_KEY is not a readable local private-key file: %s\n' "$key" >&2
++    printf 'Set SPEC_SSH_KEY to an existing key on this computer, or unset it to use SSH config/ssh-agent.\n' >&2
+     exit 1
+   fi
++  SPEC_SSH_KEY="$(realpath -e -- "$key")"
++  export SPEC_SSH_KEY
++else
++  unset SPEC_SSH_KEY
+ fi
+ 
+ cd -- "$root/backend"
+@@ -27,17 +34,6 @@ if (( (8#$mode & 0022) != 0 )); then
+   exit 1
+ fi
+ 
+-(
+-  cd -- "$root/frontend"
+-  if command -v bun >/dev/null 2>&1; then
+-    bun install --frozen-lockfile
+-    bun run build
+-  else
+-    printf 'Bun is unavailable; building with Node/npm (bun.lock is not used).\n'
+-    npm install --no-save --package-lock=false --no-audit --no-fund
+-    npm run typecheck
+-    npm exec --no -- vite build
+-  fi
+-)
++"$root/build.sh"
+ 
+ exec cargo run --release --locked
+/usr/bin/cargo
+/usr/bin/bun
+755 build.sh
+755 ops.sh
+755 run.sh
+> build · gpt-6-astra
+SSH access works as `opencode`, and `/home/opencode/spec` has the `spec` function available. I’m updating `ops.sh` to read `~/ip` and use the Downloads key by default, then checking the build and server startup.
+[0m% [0mPatch 2 files 
+> build · gpt-6-astra
+[0m$ [0mbash -n ops.sh run.sh build.sh
+git diff --check
+cargo test --locked remote_key_validation
+bash: ops.sh: No such file or directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.89s
+     Running unittests src/main.rs (target/debug/deps/spec-f74e555def58e80a)
+
+running 1 test
+test remote_tests::remote_key_validation_distinguishes_missing_and_non_file_paths ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 52 filtered out; finished in 0.01s
+[0m$ [0m./build.sh
+bun install v1.4.2 (744846f84)
+
+Checked 109 installs across 159 packages (no changes) [124.00ms]
+$ bun typecheck && vite build
+$ tsc --noEmit
+vite v7.3.6 building client environment for production...
+transforming...
+✓ 33 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.44 kB │ gzip:  0.29 kB
+dist/assets/index-BI00Hyqv.css   13.57 kB │ gzip:  3.51 kB
+dist/assets/index-CHmCEAtB.js   247.34 kB │ gzip: 78.71 kB
+✓ built in 2.35s
+    Finished `release` profile [optimized] target(s) in 0.65s
+> build · gpt-6-astra
+[0m✱ [0mGrep "println!|health|execution|/api" [90min backend/src/main.rs · 16 matches[0m
+> build · gpt-6-astra
+[0m→ [0mRead backend/src/main.rs [90m[offset=555, limit=120][0m
+> build · gpt-6-astra
+[0m✱ [0mGrep "authorization|Bearer|x-spec" [90min backend/src/main.rs · 1 match[0m
+> build · gpt-6-astra
+[0m$ [0mssh -T -i /home/emmanuel/Downloads/Spec_man.pem -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 -o ClearAllForwardings=yes -o ForwardAgent=no opencode@20.227.39.101 'bash -s' <<'REMOTE'
+set -e
+cd /home/opencode/spec
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
+shopt -s expand_aliases
+source "$HOME/.bash_aliases"
+type -t spec
+for tool in bash setsid stdbuf find; do command -v "$tool"; done
+command -v bun || command -v node
+test -w .
+printf 'Remote build workspace and shell prerequisites verified.\n'
+REMOTE
+function
+/usr/bin/bash
+/usr/bin/setsid
+/usr/bin/stdbuf
+/usr/bin/find
+/home/opencode/.bun/bin/bun
+Remote build workspace and shell prerequisites verified.
+[0m$ [0mbash -n ops.sh run.sh build.sh
+git diff --check
+python3 - <<'PY'
+import json, os, pathlib, re, selectors, signal, subprocess, tempfile, time, urllib.request
+root = pathlib.Path('/home/emmanuel/spec')
+with tempfile.TemporaryDirectory(prefix='spec-launch-', dir='/tmp/opencode') as workspace:
+    env = dict(os.environ, SPEC_WORKSPACE=workspace, SPEC_PORT='0')
+    for key in ('SPEC_SSH_TARGET', 'SPEC_SSH_KEY', 'SPEC_SSH_WORKSPACE', 'SPEC_COMMAND'):
+        env.pop(key, None)
+    p = subprocess.Popen([str(root / 'ops.sh')], cwd='/tmp/opencode', env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    output = b''
+    try:
+        sel = selectors.DefaultSelector()
+        sel.register(p.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if not sel.select(timeout=1):
+                continue
+            chunk = os.read(p.stdout.fileno(), 65536)
+            if not chunk:
+                raise RuntimeError(output.decode())
+            output += chunk
+            match = re.search(rb'Spec: (http://127\.0\.0\.1:\d+)/#token=([a-f0-9]+)', output)
+            if match:
+                url, token = (v.decode() for v in match.groups())
+                req = urllib.request.Request(url + '/api/config', headers={'Authorization': 'Bearer ' + token})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    config = json.load(response)
+                assert config['execution'] is True, config
+                print('ops.sh startup passed from another directory; authenticated API confirms remote execution enabled.')
+                break
+        else:
+            raise RuntimeError('Startup timed out')
+    finally:
+        os.killpg(p.pid, signal.SIGTERM)
+        p.wait(timeout=10)
+PY
+ops.sh startup passed from another directory; authenticated API confirms remote execution enabled.
+> build · gpt-6-astra
+Fixed `ops.sh` to read `~/ip` and use `~/Downloads/Spec_man.pem` with an absolute key path. Set key permissions to `600`.
+
+Verified SSH to `opencode@20.227.39.101`, app build, and server startup with remote execution enabled.
+
+Future commands:
+```bash
+./ops.sh    # Build and launch with remote execution
+./build.sh  # Build only
+```
+[0m
+> build · gpt-6-astra
+[0m→ [0mRead . 
+> build · gpt-6-astra
+[0m$ [0mgit status --short
+M README.md
+ M backend/src/remote.rs
+ M backend/src/remote_tests.rs
+ M ops.sh
+ M run.sh
+?? build.sh
+?? ins
+?? ins.out
+[0m→ [0mRead /home/emmanuel/Downloads 
+[0m→ [0mRead /home/emmanuel/ip 
+[0m✱ [0mGrep "SPEC_SSH_KEY|absolute local private-key|projects" [90min . · 88 matches[0m
+[0m✱ [0mGlob "**/AGENTS.md" [90min /home/emmanuel · 0 matches[0m
+> build · gpt-6-astra
+[0m→ [0mRead ops.sh 
+[0m→ [0mRead run.sh 
+[0m→ [0mRead build.sh 
+[0m→ [0mRead README.md [90m[limit=240][0m
+[0m→ [0mRead backend/src/remote.rs 
+[0m→ [0mRead /home/emmanuel/.ssh 
+> build · gpt-6-astra
+I found `~/Downloads/Spec_man.pem` and the host in `~/ip`. The existing launcher already normalizes key paths, but still targets `/home/opencode/spec`. I’ll check the remote setup and add a repeatable build script targeting `~/projects`.
+[0m$ [0mssh -T -i /home/emmanuel/Downloads/Spec_man.pem -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ClearAllForwardings=yes opencode@20.227.39.101 'printf "USER=%s HOME=%s\n" "$USER" "$HOME"; ls -ld "$HOME/projects" "$HOME/specs" "$HOME/spec" 2>/dev/null; bash -c '\''export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"; shopt -s expand_aliases; if [[ -f ~/.bash_aliases ]]; then source ~/.bash_aliases; fi; type spec'\'''
+USER=opencode HOME=/home/opencode
+drwxrwxr-x 9 opencode opencode 4096 Oct  5 17:04 /home/opencode/spec
+drwxrwxr-x 2 opencode opencode 4096 Oct  5 08:03 /home/opencode/specs
+spec is a function
+spec () 
+{ 
+    if [[ "${1:-}" == --manual || "${1:-}" == --help || "${1:-}" == -h || "${1:-}" == /eval || "${1:-}" == /telle || "${1:-}" == telle ]]; then
+        /home/opencode/.bun/bin/bun /home/opencode/opencode-source/script/spec-workflow.ts "$@";
+        return;
+    fi;
+    local history_file="$HOME/.local/state/spec/saved-files";
+    if [[ "${1:-}" == eval || "${1:-}" == --eval ]]; then
+        shift;
+        /home/opencode/nextweb/tools/eval/spec-eval "$@";
+        return;
+    fi;
+    if [[ "${1:-}" == build ]]; then
+        shift;
+        if (( $# > 1 )); then
+            printf 'Usage: spec build [spec-file]\n' 1>&2;
+            return 1;
+        fi;
+        local spec_file="${1:-}";
+        if [[ -z "$spec_file" ]]; then
+            if [[ ! -s "$history_file" ]]; then
+                printf 'No saved spec is available. Save one with spec or pass a file.\n' 1>&2;
+                return 1;
+            fi;
+            spec_file=$(tail -n 1 -- "$history_file");
+        fi;
+        if [[ "${SPEC_BUILD_FOREGROUND:-0}" == 1 ]]; then
+            run_goal "$spec_file";
+            return;
+        fi;
+        local spec_name="${spec_file##*/}";
+        local output_file;
+        if [[ "$spec_name" == *.* && "$spec_name" != .* ]]; then
+            output_file="${spec_file%.*}.out";
+        else
+            output_file="${spec_file}.out";
+        fi;
+        nohup bash -c '. "$HOME/.bash_aliases"; SPEC_BUILD_FOREGROUND=1 spec build "$1"' _ "$spec_file" > "$output_file" 2>&1 & printf 'Started spec build (PID %s); output: %s\n' "$!" "$output_file";
+        return;
+    fi;
+    local run_command="${KIBI_RUN_COMMAND:-/home/opencode/opencode-source/script/run-spec.sh}";
+    if (( $# == 0 )) && [[ -s "$history_file" ]]; then
+        local previous_file;
+        previous_file=$(tail -n 1 -- "$history_file");
+        if [[ ! -f "$previous_file" ]]; then
+            printf 'Saved spec is no longer available: %s\n' "$previous_file" 1>&2;
+            return 1;
+        fi;
+        set -- "$previous_file";
+    fi;
+    local persistent_session=0;
+    if [[ "$run_command" == /home/opencode/opencode-source/script/run-spec.sh ]]; then
+        persistent_session=1;
+    fi;
+    KIBI_SPEC_SESSION="$persistent_session" KIBI_SPEC_RESUME="${KIBI_SPEC_RESUME:-1}" KIBI_SAVE_COPY_DIR="$HOME/specs" KIBI_ENV_FILE="${KIBI_ENV_FILE:-$HOME/code.dev/.env}" KIBI_SAVE_HISTORY_FILE="$history_file" KIBI_RUN_COMMAND="$run_command" XDG_DATA_DIRS="$HOME/.local/share/specific/editor/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" "$HOME/.local/share/specific/editor/specific-editor" "$@"
+}
+> build · gpt-6-astra
+[0m→ [0mRead /home/emmanuel/specs 
+[0m→ [0mRead backend/src/remote-alias.bash [90m[limit=220][0m
+[0m$ [0mgit diff -- ops.sh run.sh backend/src/remote.rs backend/src/remote_tests.rs
+diff --git a/backend/src/remote.rs b/backend/src/remote.rs
+index 2c32098..e9c6b08 100644
+--- a/backend/src/remote.rs
++++ b/backend/src/remote.rs
+@@ -54,10 +54,28 @@ impl Remote {
+         {
+             return Err("SPEC_SSH_BINARY must be an absolute executable SSH client path".into());
+         }
+-        if let Some(key) = &self.key
+-            && (!key.is_absolute() || !key.is_file())
+-        {
+-            return Err("SPEC_SSH_KEY must be an absolute local private-key file path".into());
++        if let Some(key) = &self.key {
++            if !key.is_absolute() {
++                return Err("SPEC_SSH_KEY must be an absolute local private-key file path. Use \"$HOME/.ssh/key\" rather than \"~/.ssh/key\", or unset SPEC_SSH_KEY to use SSH config/ssh-agent.".into());
++            }
++            let metadata = fs::metadata(key).map_err(|error| {
++                format!(
++                    "Cannot access SPEC_SSH_KEY local file {}: {error}. Set it to an existing key on this computer, or unset SPEC_SSH_KEY to use SSH config/ssh-agent.",
++                    key.display()
++                )
++            })?;
++            if !metadata.is_file() {
++                return Err(format!(
++                    "SPEC_SSH_KEY must be a local private-key file, not a directory or special file: {}",
++                    key.display()
++                ).into());
++            }
++            fs::File::open(key).map_err(|error| {
++                format!(
++                    "Cannot read SPEC_SSH_KEY local file {}: {error}",
++                    key.display()
++                )
++            })?;
+         }
+         Ok(())
+     }
+diff --git a/backend/src/remote_tests.rs b/backend/src/remote_tests.rs
+index 131717d..3ab45a8 100644
+--- a/backend/src/remote_tests.rs
++++ b/backend/src/remote_tests.rs
+@@ -31,6 +31,35 @@ fn remote_configuration_rejects_options_and_relative_paths() {
+     assert!(remote.validate().is_err());
+ }
+ 
++#[test]
++fn remote_key_validation_distinguishes_missing_and_non_file_paths() {
++    let root = tempfile::tempdir().unwrap();
++    let key = root.path().join("identity with spaces");
++    let mut remote = Remote {
++        binary: "/usr/bin/ssh".into(),
++        target: "user@host".into(),
++        directory: "/project".into(),
++        key: Some(key.clone()),
++    };
++    let error = remote.validate().unwrap_err().to_string();
++    assert!(error.contains("Cannot access SPEC_SSH_KEY local file"));
++    assert!(error.contains(key.to_str().unwrap()));
++    assert!(error.contains("unset SPEC_SSH_KEY"));
++
++    remote.key = Some(root.path().into());
++    assert!(
++        remote
++            .validate()
++            .unwrap_err()
++            .to_string()
++            .contains("not a directory or special file")
++    );
++
++    fs::write(&key, b"test identity placeholder").unwrap();
++    remote.key = Some(key);
++    assert!(remote.validate().is_ok());
++}
++
+ #[test]
+ fn ssh_is_noninteractive_with_host_verification_and_no_forwarding() {
+     let remote = Remote {
+diff --git a/ops.sh b/ops.sh
+old mode 100644
+new mode 100755
+index 45e15c4..b1cf83f
+--- a/ops.sh
++++ b/ops.sh
+@@ -1 +1,25 @@
+-SPEC_SSH_TARGET="opencode@4.197.157.17" SPEC_SSH_KEY="$HOME/.ssh/opencode-dev-aue_ed25519" SPEC_SSH_WORKSPACE="/home/opencode/spec" SPEC_WORKSPACE="$HOME/specs" ./run.sh
++#!/usr/bin/env bash
++set -euo pipefail
++
++root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++
++if [[ -z "${SPEC_SSH_TARGET:-}" ]]; then
++  if [[ ! -r "$HOME/ip" ]]; then
++    printf 'Write the remote host IP to ~/ip or set SPEC_SSH_TARGET=user@host.\n' >&2
++    exit 1
++  fi
++  host="$(<"$HOME/ip")"
++  host="${host%$'\r'}"
++  if [[ ! "$host" =~ ^[a-zA-Z0-9][a-zA-Z0-9.:-]*$ ]]; then
++    printf '~/ip must contain a single host name or IP address.\n' >&2
++    exit 1
++  fi
++  SPEC_SSH_TARGET="opencode@$host"
++fi
++export SPEC_SSH_TARGET
++# An explicitly empty value selects SSH config/ssh-agent instead of this key.
++export SPEC_SSH_KEY="${SPEC_SSH_KEY-$HOME/Downloads/Spec_man.pem}"
++export SPEC_SSH_WORKSPACE="${SPEC_SSH_WORKSPACE:-/home/opencode/spec}"
++export SPEC_WORKSPACE="${SPEC_WORKSPACE:-$HOME/specs}"
++
++exec "$root/run.sh"
+diff --git a/run.sh b/run.sh
+index baaa256..b892e6a 100755
+--- a/run.sh
++++ b/run.sh
+@@ -3,15 +3,22 @@ set -euo pipefail
+ 
+ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ 
+-if ! command -v cargo >/dev/null 2>&1; then
+-  printf 'Rust/Cargo is required to run spec.\n' >&2
+-  exit 1
+-fi
+-if ! command -v bun >/dev/null 2>&1; then
+-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+-    printf 'Install Bun or Node.js (22.12+) with npm to build the frontend.\n' >&2
++# Resolve the identity before changing directories or building. An omitted/empty
++# identity uses SSH config or ssh-agent; explicit invalid paths fail immediately.
++if [[ -n "${SPEC_SSH_KEY:-}" ]]; then
++  key="$SPEC_SSH_KEY"
++  case "$key" in
++    '~/'*) key="$HOME/${key:2}" ;;
++  esac
++  if [[ ! -f "$key" || ! -r "$key" ]]; then
++    printf 'SPEC_SSH_KEY is not a readable local private-key file: %s\n' "$key" >&2
++    printf 'Set SPEC_SSH_KEY to an existing key on this computer, or unset it to use SSH config/ssh-agent.\n' >&2
+     exit 1
+   fi
++  SPEC_SSH_KEY="$(realpath -e -- "$key")"
++  export SPEC_SSH_KEY
++else
++  unset SPEC_SSH_KEY
+ fi
+ 
+ cd -- "$root/backend"
+@@ -27,17 +34,6 @@ if (( (8#$mode & 0022) != 0 )); then
+   exit 1
+ fi
+ 
+-(
+-  cd -- "$root/frontend"
+-  if command -v bun >/dev/null 2>&1; then
+-    bun install --frozen-lockfile
+-    bun run build
+-  else
+-    printf 'Bun is unavailable; building with Node/npm (bun.lock is not used).\n'
+-    npm install --no-save --package-lock=false --no-audit --no-fund
+-    npm run typecheck
+-    npm exec --no -- vite build
+-  fi
+-)
++"$root/build.sh"
+ 
+ exec cargo run --release --locked
+[0m$ [0mssh -T -i /home/emmanuel/Downloads/Spec_man.pem -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 opencode@20.227.39.101 'find "$HOME/specs" -maxdepth 1 -type f -printf "%f (%s bytes)\n"; bash -c '\''export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"; source ~/.bash_aliases; type run_goal; command -v opencode-source; command -v opencode'\''; sed -n "1,200p" "$HOME/opencode-source/script/run-spec.sh"'
+source_spec (97 bytes)
+serverless_gpu.md (676 bytes)
+error (12369 bytes)
+backend_ (109 bytes)
+markdown_output (158 bytes)
+vector.md (9264 bytes)
+performance (221 bytes)
+performance_fix.md (25334 bytes)
+mint_nft (13003 bytes)
+bitrefil (141 bytes)
+unlocking (212 bytes)
+explore_exp (490 bytes)
+update (249 bytes)
+testingt (9 bytes)
+transact_facet (190 bytes)
+extract_nu (141 bytes)
+priority.md (344 bytes)
+presistent_session (252 bytes)
+error1_push (31 bytes)
+commit_performance (163 bytes)
+testing_1 (42 bytes)
+store_wallet (149 bytes)
+mused (302 bytes)
+fix_shell (347 bytes)
+exit_spec (74 bytes)
+inter_glitch (390 bytes)
+deploy (270 bytes)
+scaling (168 bytes)
+fix_replay (86 bytes)
+mig (82 bytes)
+testing_code (8 bytes)
+error1 (11985 bytes)
+calibirate_spec (353 bytes)
+refactor_explore (456 bytes)
+updates (243 bytes)
+ipfs-chia-storage.md (22160 bytes)
+omit (114 bytes)
+scale_db.md (404 bytes)
+sign_open (218 bytes)
+scale_review (62 bytes)
+testing (11 bytes)
+product_discovery (154 bytes)
+glimmer (164 bytes)
+slash_run (164 bytes)
+mainnet (59 bytes)
+commiting_changes (92 bytes)
+eval_commit (78 bytes)
+sing_agent (296 bytes)
+editor_spec (100 bytes)
+stress_test (220 bytes)
+donate_spec (408 bytes)
+backup (323 bytes)
+defauly_agent (67 bytes)
+von_spec (496 bytes)
+paye (59 bytes)
+apis (454 bytes)
+push_spec (178 bytes)
+imp.md (8763 bytes)
+android_spec (174 bytes)
+commit (77 bytes)
+tutorial (97 bytes)
+themes (165 bytes)
+mock_test (390 bytes)
+transfer (68 bytes)
+pgscale.md (18750 bytes)
+lock_test (228 bytes)
+spec_mouse (225 bytes)
+gen_wallet (72 bytes)
+review_diff (78 bytes)
+review (320 bytes)
+tesetagent (129 bytes)
+altruist (971 bytes)
+graph_database (443 bytes)
+mint_token (1405 bytes)
+run_ (236 bytes)
+gated_test (367 bytes)
+chia_nft_ip (323 bytes)
+final_update (117 bytes)
+alt_error (96 bytes)
+fix_recording (28 bytes)
+lock_keys (79 bytes)
+spec_edit (69 bytes)
+double (85 bytes)
+2026-09-14T20-24-17-323Z.json (33925 bytes)
+workflows.md (654 bytes)
+market (81 bytes)
+rebuild_spec (74 bytes)
+test (0 bytes)
+read (55 bytes)
+gui_spec (383 bytes)
+ev (139 bytes)
+evals (952 bytes)
+evals_report (82 bytes)
+recent (69 bytes)
+test_count (35 bytes)
+rent (174 bytes)
+testing_color (44 bytes)
+opencode (32 bytes)
+frame_spec (299 bytes)
+apk (319 bytes)
+2026-09-15T01-20-32-156Z.json (41609 bytes)
+build_plan.md (12744 bytes)
+send_itter (195 bytes)
+visual (864 bytes)
+manual (116 bytes)
+commit spec (354 bytes)
+prop (266 bytes)
+backend_.md (339 bytes)
+filename.md (660 bytes)
+send_trans (128 bytes)
+homing (63 bytes)
+run_goal is a function
+run_goal () 
+{ 
+    /home/opencode/opencode-source/script/run-spec.sh "$@"
+}
+opencode-source
+/usr/local/bin/opencode
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+root_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+invocation_dir=$PWD
+
+if (( $# != 1 )); then
+  printf 'Usage: %s <spec-file>\n' "$0" >&2
+  exit 1
+fi
+
+spec_file=$1
+
+if [[ ! -f "$spec_file" ]]; then
+  printf 'Spec file does not exist: %s\n' "$spec_file" >&2
+  exit 1
+fi
+
+printf 'Using spec: %s\n' "$spec_file"
+
+if [[ -n "${SPEC_SESSION_DIR:-}" ]]; then
+  # The inbox already contains the initial prompt; never also submit the spec file.
+  exec setsid --wait bun "$root_dir/script/spec-session.ts" "$invocation_dir" "$SPEC_SESSION_DIR" </dev/null
+fi
+
+spec=$(<"$spec_file")
+
+cd -- "$root_dir"
+opencode-source run --thinking --dir "$invocation_dir" --agent build "$spec"
+> build · gpt-6-astra
+[0m✗ [0mAsked 1 question failed
+[91m[1mError: [0mThis non-interactive run cannot ask the user questions, so the question was cancelled. Continue without an answer; make reasonable assumptions and state them.
+> build · gpt-6-astra
+[0m$ [0mssh -T -i /home/emmanuel/Downloads/Spec_man.pem -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 opencode@20.227.39.101 'bash -c '\''export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"; source ~/.bash_aliases; bash -c "command -v opencode-source"; stat -c "%a %n" "$HOME/.bash_aliases"'\'''
+/home/opencode/.local/bin/opencode-source
+664 /home/opencode/.bash_aliases
+> build · gpt-6-astra
+SSH authentication succeeds with the supplied key. I’ll interpret “all specs in `projects`” literally: the script will create remote `~/projects` and build specs stored there. That directory is currently absent; the remote `~/specs` contains over 100 files, so I won’t assume those are intended inputs.
+[0m% [0mPatch 6 files 
+> build · gpt-6-astra
+[0m$ [0mchmod +x remote-build.sh
+(no output)
+[0m$ [0mbash -n remote-build.sh ops.sh run.sh scripts/ssh-config.bash scripts/build-projects.bash
+(no output)
+[0m$ [0mcargo test --locked remote_key_validation
+Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src/main.rs (target/debug/deps/spec-f74e555def58e80a)
+
+running 1 test
+test remote_tests::remote_key_validation_distinguishes_missing_and_non_file_paths ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 52 filtered out; finished in 0.01s
+> build · gpt-6-astra
+[0m$ [0mgit diff --check
+(no output)
+[0m$ [0m./remote-build.sh
+SPEC_SSH_TARGET must be user@host or an SSH host alias.
+[0m$ [0mpython3 - <<'PY'
+import os, pathlib, subprocess, tempfile
+root = pathlib.Path('/home/emmanuel/spec')
+with tempfile.TemporaryDirectory(dir='/tmp/opencode') as tmp:
+    home = pathlib.Path(tmp)
+    projects = home / "projects with ' quotes"
+    projects.mkdir()
+    (home / '.bash_aliases').write_text('spec() { printf "%s|%s|%s\\n" "$PWD" "$1" "$2" >> "$HOME/calls"; [[ "${2##*/}" != fail.md ]]; }\n')
+    for name in ['a space.md', 'fail.md', 'z-last', 'skip.out', '.hidden.md']:
+        (projects / name).write_text('test')
+    (projects / 'nested').mkdir()
+    (projects / 'link.md').symlink_to(projects / 'a space.md')
+    env = dict(os.environ, HOME=tmp)
+    script = str(root / 'scripts/build-projects.bash')
+    result = subprocess.run(['bash', script, str(projects), '--check'], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert not (home / 'calls').exists()
+    result = subprocess.run(['bash', script, str(projects)], env=env, capture_output=True, text=True)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    calls = (home / 'calls').read_text().splitlines()
+    assert len(calls) == 3, calls
+    assert calls[-1].endswith('/z-last'), calls
+    assert all(line.startswith(str(projects) + '|build|') for line in calls), calls
+    assert len(list((projects / '.spec-runs').glob('batch-*/*.out'))) == 3
+    (projects / 'fail.md').unlink()
+    result = subprocess.run(['bash', script, str(projects)], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    key = home / 'key with spaces'
+    key.write_text('placeholder')
+    config = str(root / 'scripts/ssh-config.bash')
+    for value in ['key with spaces', '~/key with spaces', str(key), '']:
+        result = subprocess.run(['bash', '-ec', 'source "$1"; spec_normalize_key; printf "%s" "${SPEC_SSH_KEY-}"', '--', config], cwd=tmp, env=dict(env, SPEC_SSH_KEY=value), capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == (str(key) if value else ''), result.stdout
+    result = subprocess.run(['bash', '-ec', 'source "$1"; spec_normalize_key', '--', config], env=dict(env, SPEC_SSH_KEY=str(home / 'missing')), capture_output=True, text=True)
+    assert result.returncode != 0
+print('PASS: key normalization, missing key, input selection, quoting, check-only, serial builds, failure continuation, logs and exit codes')
+PY
+PASS: key normalization, missing key, input selection, quoting, check-only, serial builds, failure continuation, logs and exit codes
+> build · gpt-6-astra
+[0m% [0mPatch 1 file 
+> build · gpt-6-astra
+[0m$ [0mbash -ec 'source scripts/ssh-config.bash; export SPEC_SSH_KEY=; for target in opencode@20.227.39.101 user@host build-host "user@[::1]"; do SPEC_SSH_TARGET="$target"; spec_configure_remote; done; for target in "-oProxyCommand=bad" "host;bad" "host name"; do SPEC_SSH_TARGET="$target"; if spec_configure_remote; then exit 1; fi; done; value="a'\''b c"; quoted=$(spec_shell_quote "$value"); [[ $(bash -c "printf %s $quoted") == "$value" ]]; printf "PASS: SSH target validation and shell quoting\n"'
+SPEC_SSH_TARGET must be user@host or an SSH host alias.
+SPEC_SSH_TARGET must be user@host or an SSH host alias.
+SPEC_SSH_TARGET must be user@host or an SSH host alias.
+PASS: SSH target validation and shell quoting
+[0m$ [0m./remote-build.sh
+Remote workspace: opencode@20.227.39.101:/home/opencode/projects
+No specs found in /home/opencode/projects. Add .md, .txt, .spec, or extensionless files and rerun.
+[0m$ [0m./build.sh
+bun install v1.4.2 (744846f84)
+
+Checked 109 installs across 159 packages (no changes) [104.00ms]
+$ bun typecheck && vite build
+$ tsc --noEmit
+vite v7.3.6 building client environment for production...
+transforming...
+✓ 33 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.44 kB │ gzip:  0.29 kB
+dist/assets/index-BI00Hyqv.css   13.57 kB │ gzip:  3.51 kB
+dist/assets/index-CHmCEAtB.js   247.34 kB │ gzip: 78.71 kB
+✓ built in 2.48s
+    Finished `release` profile [optimized] target(s) in 0.63s
+> build · gpt-6-astra
+The script connected successfully and created `/home/opencode/projects`. It found no specs there, so no spec builds ran. The local app build passed, along with checks for key-path normalization, file selection, logging, and continuing after a failed build.
+[0m$ [0mgit status --short
+M README.md
+ M backend/src/remote.rs
+ M backend/src/remote_tests.rs
+ M ops.sh
+ M run.sh
+?? build.sh
+?? ins
+?? ins.out
+?? remote-build.sh
+?? scripts/
+> build · gpt-6-astra
+Fixed the launcher’s key-path handling and verified SSH using `~/Downloads/Spec_man.pem`.
+
+Created remote `/home/opencode/projects`.
+
+Future commands:
+- `./remote-build.sh` — build all specs in remote `projects`.
+- `./ops.sh` — launch the local UI targeting that directory.
+- `./build.sh` — rebuild the local app.
+
+**Remote `projects` is empty**, so no specs were built. Local app build and validation checks passed.

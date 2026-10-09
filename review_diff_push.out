@@ -1,0 +1,1220 @@
+[0m
+> build · gpt-6-astra
+[0m$ [0mgit status --short --branch
+## dev...origin/dev [ahead 1]
+?? ghost_chat
+?? ghost_chat.out
+?? ins
+?? ins.out
+?? remote_dir
+?? remote_dir.out
+?? review_diff_push
+?? review_diff_push.out
+> build · gpt-6-astra
+[0m✱ [0mGlob "**/AGENTS.md" [90m0 matches[0m
+> build · gpt-6-astra
+[0m→ [0mRead . 
+[0m$ [0mgit log -4 --oneline --decorate
+1328b0c (HEAD -> dev) fix: load shared AI settings and streamline remote builds
+0c4bae5 (origin/dev, origin/HEAD) feat: add separate session chat with spec and nohup context
+accd0f8 fix: prevent polling from discarding loaded nohup output
+3e0b439 fix: point detached builds to the nohup output button
+[0m$ [0mgit diff --stat origin/dev...HEAD
+.env.example                   |   8 +++
+ README.md                      |  57 ++++++++++++++++++--
+ backend/Cargo.lock             |   7 +++
+ backend/Cargo.toml             |   1 +
+ backend/src/completion.rs      |  28 +++++++++-
+ backend/src/main.rs            |   7 +++
+ backend/src/remote.rs          |  26 +++++++--
+ backend/src/remote_tests.rs    |  29 ++++++++++
+ backend/tests/ai_config.rs     | 118 +++++++++++++++++++++++++++++++++++++++++
+ build.sh                       |  31 +++++++++++
+ frontend/e2e/execution.spec.ts |   1 +
+ frontend/e2e/workspace.spec.ts |   4 +-
+ frontend/src/chat.tsx          |   2 +-
+ frontend/src/editor.tsx        |   2 +-
+ frontend/src/style.css         |   5 +-
+ ops.sh                         |   9 +++-
+ remote-build.sh                |  13 +++++
+ run.sh                         |  33 +++++-------
+ scripts/build-projects.bash    |  55 +++++++++++++++++++
+ scripts/ssh-config.bash        |  77 +++++++++++++++++++++++++++
+ 20 files changed, 477 insertions(+), 36 deletions(-)
+[0m$ [0mgit remote -v
+origin	https://github.com/AI10xDev/spec.git (fetch)
+origin	https://github.com/AI10xDev/spec.git (push)
+> build · gpt-6-astra
+[0m→ [0mRead review_diff_push 
+[0m$ [0mgit diff origin/dev...HEAD
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..2a52a7b
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,8 @@
++# Shared server-side configuration for session chat and ghost text.
++# Copy to .env in the repository root and replace these placeholders.
++AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com/openai/v1
++AZURE_OPENAI_API_KEY=YOUR-KEY
++DEPLOYMENT_NAME=YOUR-DEPLOYMENT
++
++# Only needed when the endpoint is a legacy resource root (without /openai/v1):
++# AZURE_OPENAI_API_VERSION=2025-04-01-preview
+diff --git a/README.md b/README.md
+index e38ca80..643c696 100644
+--- a/README.md
++++ b/README.md
+@@ -38,7 +38,9 @@ cd spec
+ ./run.sh
+ ```
+ 
+-`run.sh` installs frontend dependencies, typechecks/builds the UI, and starts the release Rust server. It can be invoked from any working directory and honors the configuration variables below; relative workspace/UI paths are resolved from `backend/`. Stop it with Ctrl+C.
++`run.sh` loads the remote host from `~/ip` (user `opencode`), uses the local key `$HOME/Downloads/Spec_man.pem`, and creates remote `~/project` if missing. It exports the SSH settings to enable **Save & run**, then installs frontend dependencies, typechecks/builds the UI, and starts the release Rust server. Override the defaults with `SPEC_SSH_TARGET`, `SPEC_SSH_KEY`, and `SPEC_SSH_WORKSPACE`. Use `./run.sh --local` for the editor without SSH. It can be invoked from any working directory; relative workspace/UI paths are resolved from `backend/`. Stop it with Ctrl+C.
++
++For future builds without starting the server, run `./build.sh`. It installs frontend dependencies, typechecks/builds the UI into `frontend/dist`, and builds the release backend in `backend/target/release/spec` (or your configured Cargo target directory). No SSH key is needed to build the app. `run.sh` uses this same build script before launching.
+ 
+ New workspace directories are private. If an existing workspace is writable by group/others, startup stops without changing its permissions. Choose another trusted directory or explicitly run `chmod go-w -- /path/to/workspace` before retrying.
+ 
+@@ -60,7 +62,7 @@ The original shell function mirrors specs into `$HOME/specs`, so this can displa
+ 
+ The **browser, Rust web backend, and editable workspace run on your local computer**. Only **`spec build <snapshot-file>` runs on the remote machine over SSH**. No remote web backend, HTTP port forwarding, or remote frontend build is needed.
+ 
+-Execution is off until an SSH target and remote build directory are configured. On your **local computer**, start the app like this:
++`./run.sh` configures remote execution automatically using the defaults above. To choose another host and directory, start the app on your **local computer** like this:
+ 
+ ```sh
+ # One-time SSH setup: connect interactively and verify the host fingerprint
+@@ -76,7 +78,38 @@ SPEC_WORKSPACE="$HOME/specs" \
+ ./run.sh
+ ```
+ 
+-Adjust the host, local key path, and remote project directory for your environment. `SPEC_SSH_TARGET` also accepts a trusted host alias from your local SSH configuration (including its port/ProxyJump settings). Omit `SPEC_SSH_KEY` to use your SSH agent/default identities. Keep private keys **on the local computer**; never paste key contents into a spec or commit them. Builds use batch SSH with strict host-key checking, no TTY, no agent/X11 forwarding, and no port forwarding. Unknown hosts, inaccessible keys, and connection/authentication errors fail the run and appear in its output; they do not fall back to local execution.
++Adjust the host, local key path, and remote project directory for your environment. `SPEC_SSH_TARGET` also accepts a trusted host alias from your local SSH configuration (including its port/ProxyJump settings). Set `SPEC_SSH_KEY=` to use your SSH agent/default identities with the launchers; omitting it selects the default key above. Keep private keys **on the local computer**; never paste key contents into a spec or commit them. Builds use batch SSH with strict host-key checking, no TTY, no agent/X11 forwarding, and no port forwarding. Unknown hosts, inaccessible keys, and connection/authentication errors fail startup or appear in run output; they do not fall back to local execution.
++
++#### Repeatable remote-build launcher
++
++`./ops.sh` delegates to `run.sh` with the local editor workspace defaulting to `$HOME/specs`. Both launchers check SSH and create remote `~/project` if missing before starting the local app. Override those defaults with the variables above. The key path is converted to an absolute path before starting the backend.
++
++```sh
++# One-time key permissions, then build and launch with the defaults:
++chmod 600 "$HOME/Downloads/Spec_man.pem"
++./ops.sh
++# Use another existing local private key:
++SPEC_SSH_KEY="$HOME/.ssh/your_existing_key" ./ops.sh
++# Or use identities already configured in SSH config/ssh-agent:
++SPEC_SSH_KEY= ./ops.sh
++# Build the app without starting it:
++./build.sh
++```
++
++To build **all specs already in remote `~/project`** without starting the web app:
++
++```sh
++./remote-build.sh --check   # Connect, create the directory if missing, list inputs
++./remote-build.sh           # Build each spec serially in that remote directory
++```
++
++This uses the same host/key settings as `ops.sh`. Set `SPEC_SSH_WORKSPACE=/absolute/remote/path` to override the directory. Only top-level regular `.md`, `.txt`, `.spec`, and extensionless files are inputs; hidden files, symlinks, subdirectories, and output logs are excluded. Local specs and remote `~/specs` are not automatically copied. An empty directory prints “No specs found.” Each invocation writes separate logs under remote `project/.spec-runs/batch-*/`, continues after individual failures, and exits nonzero if any build fails. Keep SSH connected until the batch finishes. Use `ops.sh` and **Save & run** for the web app's detached per-file builds.
++
++Both `./ops.sh` and `./run.sh` check an explicitly supplied key before building and convert relative paths (from your current directory) or literal `~/` paths to absolute paths. An empty key is treated as unset. Launching the Rust binary directly still requires an absolute key path.
++
++The error `SPEC_SSH_KEY must be an absolute local private-key file path` could previously mean either a relative path **or a missing file**. The backend now distinguishes those cases. A key must exist on the computer running the local server; a path on the remote host does not work. If this computer has no authorized key or configured SSH identity, provide one before using **Save & run**.
++
++To trace the installed local `spec` command, check `type spec` in your interactive shell. In the Specific installation, `~/.bashrc` sources `~/.local/share/specific/shell/specific.sh`; its `spec build` function calls `bin/specific-run-build`, which invokes `opencode run --agent build`. OpenCode provider credentials may be configured in `~/.config/opencode/opencode.jsonc`. Those API credentials authenticate model requests, not SSH connections, and cannot be used as `SPEC_SSH_KEY`. Remote builds need their own working SSH identity and OpenCode configuration on the remote host.
+ 
+ Open the full localhost URL printed by the **local** Rust server, including its token. **Save & run** first saves locally, then sends just that immutable spec snapshot over SSH. Other local project files are **not synced**. The remote build works in `SPEC_SSH_WORKSPACE`; its file changes remain remote. Prepare that remote checkout separately. `SPEC_WORKSPACE` is the local editor directory and is independent of the remote build directory.
+ 
+@@ -135,7 +168,16 @@ Builds are capped at **120 KiB** because some existing launchers forward the pro
+ 
+ ### Trailing sentence-part completions
+ 
+-Configure Azure on the **local Rust server** to enable editor completions independently of remote builds:
++Configure Azure once on the **local Rust server** to enable both ghost text and session chat. Copy the template to a private `.env` in the repository root:
++
++```sh
++cp .env.example .env
++chmod 600 .env
++```
++
++Fill in your Azure endpoint, API key and deployment in `.env`, then start `./run.sh` (or `./run.sh --local` for the editor without remote builds). Restart an already-running server and reload the browser after changing settings. Startup reports whether chat and ghost text are enabled.
++
++The Rust server reads the nearest `.env` in its working directory or an ancestor, so this works with `run.sh` and with `cargo run` from `backend/`. To use a file elsewhere, set `SPEC_AI_ENV_FILE=/absolute/path/to/ai.env`. Only AI settings are consumed from this file; exported environment variables take precedence. You can also configure everything through exports:
+ 
+ ```sh
+ export AZURE_OPENAI_ENDPOINT="https://YOUR-RESOURCE.openai.azure.com/openai/v1"
+@@ -144,6 +186,8 @@ export DEPLOYMENT_NAME="YOUR-DEPLOYMENT"
+ ./run.sh
+ ```
+ 
++If the installed `spec build` command already works, it may be using OpenCode's Azure configuration in `~/.config/opencode/opencode.jsonc`. Map `providers.azure.settings.resourceName` to `https://RESOURCE.openai.azure.com/openai/v1`, its `apiKey` to `AZURE_OPENAI_API_KEY`, and the selected Azure model's `modelID` (or model name when no override exists) to `DEPLOYMENT_NAME`. A value such as `{env:AZURE_OPENAI_API_KEY}` is a reference: use the actual credential from the OpenCode server environment, not that placeholder. The Rust server needs its own exports or private `.env`; credentials available to OpenCode are not automatically inherited by it.
++
+ Use your configured deployment name (default `gpt-5.5`). A legacy resource-root endpoint instead requires `AZURE_OPENAI_API_VERSION`. Endpoints must use HTTPS. No credentials are exposed to the browser or bundled in the repo; do not commit keys. Missing endpoint and key disables completions, while partial/invalid configuration fails startup.
+ 
+ When configured, **Trailing completions** starts enabled and can be switched off in the editor. After 500 ms idle at a line's end, the browser sends up to 4,000 recent UTF-16 units (at most 16 KiB UTF-8) before the caret to Azure through the authenticated Rust API. This includes **unsaved text** and may incur provider costs. A muted suffix suggests one sentence part, capped at 160 characters and the first clause/sentence punctuation. **Tab** or **Accept part** inserts it; **Escape** dismisses until typing resumes. Selections, IME composition, and text after the caret on the same line suppress suggestions. Long ghost text is clipped at the pane edge; the Accept part button's tooltip shows the suffix. Suggestions are not saved or downloaded until accepted.
+@@ -173,6 +217,8 @@ Open the Vite URL and paste the Rust server's token into the connection form. Vi
+ 
+ ## Configuration
+ 
++These are the Rust server's defaults when launched directly. `run.sh` supplies the SSH defaults described above and creates the remote build directory before startup; `--local` clears the SSH settings.
++
+ | Variable | Default | Meaning |
+ | --- | --- | --- |
+ | `SPEC_WORKSPACE` | `../workspace` | File directory, relative to the backend process working directory |
+@@ -186,6 +232,7 @@ Open the Vite URL and paste the Rust server's token into the connection form. Vi
+ | `AZURE_OPENAI_API_KEY` | unset | Server-side Azure completion key; required with the endpoint |
+ | `DEPLOYMENT_NAME` | `gpt-5.5` | Azure completion deployment name |
+ | `AZURE_OPENAI_API_VERSION` | unset | Required only for legacy Azure resource-root endpoints |
++| `SPEC_AI_ENV_FILE` | nearest `.env` in current/ancestor directories | Optional path to the server-side dotenv file shared by chat and ghost text; explicit files must exist |
+ 
+ There are no credentials bundled in this repository and no automatic service installation. The existing `spec` shell alias is not modified. Run the new binary explicitly from `backend/target/release/spec` if the old shell function shadows its name.
+ 
+@@ -217,6 +264,8 @@ Browser tests start isolated real Rust servers and temporary workspaces. They co
+ backend/       New Rust HTTP API, filesystem layer, process runner, tests
+ frontend/      New Vite + React TypeScript UI, unit and browser tests
+ run.sh         Build the frontend and launch the Rust server
++build.sh       Build the frontend and release backend without starting a server
++ops.sh         Build and launch with configurable remote SSH settings
+ docs/          Feature guide, review, security notes, screenshot
+ archive/       Original source collection and license notices (not executed or bundled)
+ workspace/     Local user files (created at runtime; gitignored)
+diff --git a/backend/Cargo.lock b/backend/Cargo.lock
+index 9457871..04ba1d3 100644
+--- a/backend/Cargo.lock
++++ b/backend/Cargo.lock
+@@ -181,6 +181,12 @@ dependencies = [
+  "syn",
+ ]
+ 
++[[package]]
++name = "dotenvy"
++version = "0.15.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
++
+ [[package]]
+ name = "errno"
+ version = "0.3.14"
+@@ -1026,6 +1032,7 @@ name = "spec"
+ version = "0.1.0"
+ dependencies = [
+  "axum",
++ "dotenvy",
+  "http-body-util",
+  "nix",
+  "reqwest",
+diff --git a/backend/Cargo.toml b/backend/Cargo.toml
+index 8749ece..b3dec26 100644
+--- a/backend/Cargo.toml
++++ b/backend/Cargo.toml
+@@ -16,6 +16,7 @@ tempfile = "3"
+ tower-http = { version = "0.6", features = ["fs", "set-header"] }
+ nix = { version = "0.30", features = ["signal", "process", "fs"] }
+ reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
++dotenvy = "0.15"
+ 
+ [dev-dependencies]
+ tower = { version = "0.5", features = ["util"] }
+diff --git a/backend/src/completion.rs b/backend/src/completion.rs
+index 96d5da8..0f0def7 100644
+--- a/backend/src/completion.rs
++++ b/backend/src/completion.rs
+@@ -3,7 +3,7 @@ use axum::{Json, extract::State, http::StatusCode};
+ use reqwest::{Client, Url, header::HeaderValue};
+ use serde::{Deserialize, Serialize};
+ use serde_json::{Value, json};
+-use std::{sync::Arc, time::Duration};
++use std::{collections::HashMap, sync::Arc, time::Duration};
+ use tokio::sync::Semaphore;
+ 
+ pub const MAX_PREFIX: usize = 16 * 1024;
+@@ -23,9 +23,33 @@ pub struct Completion {
+ 
+ impl Completion {
+     pub fn from_env() -> std::result::Result<Option<Self>, &'static str> {
++        // Read settings without mutating the process environment (the runtime is
++        // already multithreaded). Explicit exports take precedence over the file.
++        let file = match std::env::var_os("SPEC_AI_ENV_FILE") {
++            Some(path) => {
++                dotenvy::from_path_iter(path).map_err(|_| "Could not read SPEC_AI_ENV_FILE")?
++            }
++            None => match dotenvy::from_filename_iter(".env") {
++                Ok(file) => file,
++                Err(dotenvy::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
++                    return Self::from_settings(&HashMap::new());
++                }
++                Err(_) => return Err("Could not read AI settings from .env"),
++            },
++        };
++        let settings = file
++            .collect::<std::result::Result<HashMap<_, _>, _>>()
++            // Parser errors can include a source line containing credentials.
++            .map_err(|_| "Invalid AI settings file; check dotenv syntax")?;
++        Self::from_settings(&settings)
++    }
++
++    fn from_settings(
++        settings: &HashMap<String, String>,
++    ) -> std::result::Result<Option<Self>, &'static str> {
+         let get = |name| match std::env::var(name) {
+             Ok(value) => Ok(Some(value)),
+-            Err(std::env::VarError::NotPresent) => Ok(None),
++            Err(std::env::VarError::NotPresent) => Ok(settings.get(name).cloned()),
+             Err(_) => Err("Azure completion configuration must be valid UTF-8"),
+         };
+         Self::configured(
+diff --git a/backend/src/main.rs b/backend/src/main.rs
+index 78da670..d818a88 100644
+--- a/backend/src/main.rs
++++ b/backend/src/main.rs
+@@ -655,6 +655,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+         app.token
+     );
+     println!("Workspace: {}", app.root.display());
++    if app.completion.is_some() {
++        println!("AI chat and ghost text: enabled");
++    } else {
++        println!(
++            "AI chat and ghost text: disabled. Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env or the server environment; see .env.example. Then restart the server and reload."
++        );
++    }
+     if app.remote.is_some() {
+         eprintln!(
+             "WARNING: SSH spec build requests automatic tool approval (SPEC_BUILD_AUTO=1) with remote user privileges. Only run trusted specs."
+diff --git a/backend/src/remote.rs b/backend/src/remote.rs
+index 2c32098..e9c6b08 100644
+--- a/backend/src/remote.rs
++++ b/backend/src/remote.rs
+@@ -54,10 +54,28 @@ impl Remote {
+         {
+             return Err("SPEC_SSH_BINARY must be an absolute executable SSH client path".into());
+         }
+-        if let Some(key) = &self.key
+-            && (!key.is_absolute() || !key.is_file())
+-        {
+-            return Err("SPEC_SSH_KEY must be an absolute local private-key file path".into());
++        if let Some(key) = &self.key {
++            if !key.is_absolute() {
++                return Err("SPEC_SSH_KEY must be an absolute local private-key file path. Use \"$HOME/.ssh/key\" rather than \"~/.ssh/key\", or unset SPEC_SSH_KEY to use SSH config/ssh-agent.".into());
++            }
++            let metadata = fs::metadata(key).map_err(|error| {
++                format!(
++                    "Cannot access SPEC_SSH_KEY local file {}: {error}. Set it to an existing key on this computer, or unset SPEC_SSH_KEY to use SSH config/ssh-agent.",
++                    key.display()
++                )
++            })?;
++            if !metadata.is_file() {
++                return Err(format!(
++                    "SPEC_SSH_KEY must be a local private-key file, not a directory or special file: {}",
++                    key.display()
++                ).into());
++            }
++            fs::File::open(key).map_err(|error| {
++                format!(
++                    "Cannot read SPEC_SSH_KEY local file {}: {error}",
++                    key.display()
++                )
++            })?;
+         }
+         Ok(())
+     }
+diff --git a/backend/src/remote_tests.rs b/backend/src/remote_tests.rs
+index 131717d..3ab45a8 100644
+--- a/backend/src/remote_tests.rs
++++ b/backend/src/remote_tests.rs
+@@ -31,6 +31,35 @@ fn remote_configuration_rejects_options_and_relative_paths() {
+     assert!(remote.validate().is_err());
+ }
+ 
++#[test]
++fn remote_key_validation_distinguishes_missing_and_non_file_paths() {
++    let root = tempfile::tempdir().unwrap();
++    let key = root.path().join("identity with spaces");
++    let mut remote = Remote {
++        binary: "/usr/bin/ssh".into(),
++        target: "user@host".into(),
++        directory: "/project".into(),
++        key: Some(key.clone()),
++    };
++    let error = remote.validate().unwrap_err().to_string();
++    assert!(error.contains("Cannot access SPEC_SSH_KEY local file"));
++    assert!(error.contains(key.to_str().unwrap()));
++    assert!(error.contains("unset SPEC_SSH_KEY"));
++
++    remote.key = Some(root.path().into());
++    assert!(
++        remote
++            .validate()
++            .unwrap_err()
++            .to_string()
++            .contains("not a directory or special file")
++    );
++
++    fs::write(&key, b"test identity placeholder").unwrap();
++    remote.key = Some(key);
++    assert!(remote.validate().is_ok());
++}
++
+ #[test]
+ fn ssh_is_noninteractive_with_host_verification_and_no_forwarding() {
+     let remote = Remote {
+diff --git a/backend/tests/ai_config.rs b/backend/tests/ai_config.rs
+new file mode 100644
+index 0000000..fc472ff
+--- /dev/null
++++ b/backend/tests/ai_config.rs
+@@ -0,0 +1,118 @@
++use serde_json::{Value, json};
++use std::{path::Path, process::Stdio, time::Duration};
++use tokio::{io::AsyncBufReadExt, process::Command};
++
++const SETTINGS: &str = "export AZURE_OPENAI_ENDPOINT='https://azure.test/openai/v1'\nAZURE_OPENAI_API_KEY=mock-secret\nDEPLOYMENT_NAME=test-model\n";
++
++fn server(directory: &Path) -> Command {
++    let mut command = Command::new(env!("CARGO_BIN_EXE_spec"));
++    command
++        .env_clear()
++        .current_dir(directory)
++        .env("SPEC_WORKSPACE", directory)
++        .env("SPEC_PORT", "0")
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped())
++        .kill_on_drop(true);
++    command
++}
++
++async fn assert_config(mut command: Command, enabled: bool) {
++    let mut child = command.spawn().unwrap();
++    let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
++    let address = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
++        .await
++        .unwrap()
++        .unwrap()
++        .expect("server should start");
++    let (url, token) = address
++        .strip_prefix("Spec: ")
++        .unwrap()
++        .split_once("/#token=")
++        .unwrap();
++    let response = reqwest::Client::new()
++        .get(format!("{url}/api/config"))
++        .bearer_auth(token)
++        .timeout(Duration::from_secs(5))
++        .send()
++        .await
++        .unwrap()
++        .error_for_status()
++        .unwrap();
++    let config: Value = response.json().await.unwrap();
++    assert_eq!(
++        config,
++        json!({"execution": false, "completion": enabled, "chat": enabled})
++    );
++    child.kill().await.unwrap();
++}
++
++#[tokio::test]
++async fn repository_dotenv_enables_both_features_from_backend_directory() {
++    let root = tempfile::tempdir().unwrap();
++    let backend = root.path().join("backend");
++    std::fs::create_dir(&backend).unwrap();
++    std::fs::write(root.path().join(".env"), SETTINGS).unwrap();
++    assert_config(server(&backend), true).await;
++}
++
++#[tokio::test]
++async fn explicit_file_and_exported_overrides_enable_both_features() {
++    let root = tempfile::tempdir().unwrap();
++    let file = root.path().join("ai.env");
++    std::fs::write(
++        &file,
++        SETTINGS.replace("https://azure.test/openai/v1", "invalid"),
++    )
++    .unwrap();
++    let mut command = server(root.path());
++    command
++        .env("SPEC_AI_ENV_FILE", &file)
++        .env("AZURE_OPENAI_ENDPOINT", "https://override.test/openai/v1");
++    assert_config(command, true).await;
++}
++
++#[tokio::test]
++async fn empty_file_disables_both_features() {
++    let root = tempfile::tempdir().unwrap();
++    let mut command = server(root.path());
++    command.env("SPEC_AI_ENV_FILE", "/dev/null");
++    assert_config(command, false).await;
++}
++
++#[tokio::test]
++async fn missing_partial_and_malformed_files_fail_without_exposing_keys() {
++    for (settings, expected) in [
++        (None, "Could not read SPEC_AI_ENV_FILE"),
++        (
++            Some("AZURE_OPENAI_API_KEY=mock-secret\n"),
++            "Set AZURE_OPENAI_ENDPOINT",
++        ),
++        (
++            Some("AZURE_OPENAI_API_KEY='mock-secret\n"),
++            "Invalid AI settings file",
++        ),
++    ] {
++        let root = tempfile::tempdir().unwrap();
++        let file = root.path().join("ai.env");
++        if let Some(settings) = settings {
++            std::fs::write(&file, settings).unwrap();
++        }
++        let output = tokio::time::timeout(
++            Duration::from_secs(10),
++            server(root.path()).env("SPEC_AI_ENV_FILE", &file).output(),
++        )
++        .await
++        .unwrap()
++        .unwrap();
++        assert!(!output.status.success());
++        let stderr = String::from_utf8(output.stderr).unwrap();
++        assert!(stderr.contains(expected), "{stderr}");
++        assert!(!stderr.contains("mock-secret"));
++        assert!(
++            !String::from_utf8(output.stdout)
++                .unwrap()
++                .contains("mock-secret")
++        );
++    }
++}
+diff --git a/build.sh b/build.sh
+new file mode 100755
+index 0000000..494f606
+--- /dev/null
++++ b/build.sh
+@@ -0,0 +1,31 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++
++if ! command -v cargo >/dev/null 2>&1; then
++  printf 'Rust/Cargo is required to build spec.\n' >&2
++  exit 1
++fi
++if ! command -v bun >/dev/null 2>&1; then
++  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
++    printf 'Install Bun or Node.js (22.12+) with npm to build the frontend.\n' >&2
++    exit 1
++  fi
++fi
++
++(
++  cd -- "$root/frontend"
++  if command -v bun >/dev/null 2>&1; then
++    bun install --frozen-lockfile
++    bun run build
++  else
++    printf 'Bun is unavailable; building with Node/npm (bun.lock is not used).\n'
++    npm install --no-save --package-lock=false --no-audit --no-fund
++    npm run typecheck
++    npm exec --no -- vite build
++  fi
++)
++
++cd -- "$root/backend"
++exec cargo build --release --locked
+diff --git a/frontend/e2e/execution.spec.ts b/frontend/e2e/execution.spec.ts
+index 494ffa8..0acd191 100644
+--- a/frontend/e2e/execution.spec.ts
++++ b/frontend/e2e/execution.spec.ts
+@@ -79,6 +79,7 @@ async function startServer(execution = true) {
+       SPEC_SSH_BINARY: execution ? path.join(directory, "ssh-fixture") : undefined,
+       SPEC_SSH_KEY: undefined,
+       AZURE_OPENAI_ENDPOINT: undefined,
++      SPEC_AI_ENV_FILE: "/dev/null",
+       AZURE_OPENAI_API_KEY: undefined,
+       DEPLOYMENT_NAME: undefined,
+       AZURE_OPENAI_API_VERSION: undefined,
+diff --git a/frontend/e2e/workspace.spec.ts b/frontend/e2e/workspace.spec.ts
+index 9c3fbc2..cf64fc8 100644
+--- a/frontend/e2e/workspace.spec.ts
++++ b/frontend/e2e/workspace.spec.ts
+@@ -15,7 +15,7 @@ test.beforeAll(async () => {
+   directory = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "spec-e2e-"))
+   server = spawn(path.resolve("../backend/target/debug/spec"), [], {
+     cwd: path.resolve("../backend"),
+-    env: { ...process.env, SPEC_WORKSPACE: directory, SPEC_PORT: "0", SPEC_UI_DIR: path.resolve("dist"), SPEC_COMMAND: undefined, SPEC_SSH_TARGET: undefined, SPEC_SSH_WORKSPACE: undefined, SPEC_SSH_KEY: undefined, SPEC_SSH_BINARY: undefined, AZURE_OPENAI_ENDPOINT: undefined, AZURE_OPENAI_API_KEY: undefined, DEPLOYMENT_NAME: undefined, AZURE_OPENAI_API_VERSION: undefined },
++    env: { ...process.env, SPEC_WORKSPACE: directory, SPEC_PORT: "0", SPEC_UI_DIR: path.resolve("dist"), SPEC_COMMAND: undefined, SPEC_SSH_TARGET: undefined, SPEC_SSH_WORKSPACE: undefined, SPEC_SSH_KEY: undefined, SPEC_SSH_BINARY: undefined, SPEC_AI_ENV_FILE: "/dev/null", AZURE_OPENAI_ENDPOINT: undefined, AZURE_OPENAI_API_KEY: undefined, DEPLOYMENT_NAME: undefined, AZURE_OPENAI_API_VERSION: undefined },
+     stdio: ["ignore", "pipe", "pipe"],
+   })
+   url = await new Promise<string>((resolve, reject) => {
+@@ -650,7 +650,7 @@ test.describe("trailing completions", () => {
+     const checkbox = page.getByRole("checkbox", { name: "Trailing completions" })
+     await expect(checkbox).toBeDisabled()
+     await expect(checkbox).not.toBeChecked()
+-    await expect(page.getByText("Azure not configured", { exact: true })).toBeVisible()
++    await expect(page.locator("#completion-help")).toContainText("fill in the server .env")
+     const editor = page.getByRole("textbox", { name: "Edit unconfigured.md" })
+     await editor.fill("Still editable")
+     await page.clock.runFor(1500)
+diff --git a/frontend/src/chat.tsx b/frontend/src/chat.tsx
+index 2d23460..21171ae 100644
+--- a/frontend/src/chat.tsx
++++ b/frontend/src/chat.tsx
+@@ -128,7 +128,7 @@ export function Chat({ name, api, available, execution }: { name: string; api: A
+         {context && <small>Session preview checked at {context.updated}; polling may use cached output. {context.output?.truncated ? "Available output is truncated." : ""}</small>}
+         <details><summary>Inspect current context</summary><h2>Written spec</h2><pre>{context?.spec ?? "Loading..."}</pre><h2>Available output</h2><pre>{context?.output?.output ?? "No output supplied. You can still ask about the spec or general topics."}</pre></details>
+       </section>
+-      {!available && <p className="hint">AI chat is not configured. Set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY and DEPLOYMENT_NAME on the Rust server, then restart and reload.</p>}
++      {!available && <p className="hint">AI chat is not configured. Copy .env.example to .env in the server repository and fill in your Azure endpoint, API key and deployment. This enables both chat and ghost text. Restart the server and reload.</p>}
+       <div ref={controller} className="chat-messages" role="log" aria-label="Conversation" aria-live="polite">
+         {answerContext && <details className="chat-answer-context"><summary>Inspect last answer input</summary><p>Session: {answerContext.output?.id ?? "Spec only"}{answerContext.output ? ` / ${answerContext.output.status}` : ""}. Checked at {answerContext.updated}. {answerContext.source}{answerContext.unsaved ? " / unsaved" : " / saved"}.</p><p>Snapshot before provider context limits. Later polling does not change this evidence.</p><h2>Written spec</h2><pre>{answerContext.spec}</pre><h2>Nohup output</h2><pre>{answerContext.output?.output ?? "No output supplied."}</pre></details>}
+         {answerContext && (context?.output?.id ?? null) !== conversationRun.current && <p className="hint">The current session has changed; your next question will start a new conversation.</p>}
+diff --git a/frontend/src/editor.tsx b/frontend/src/editor.tsx
+index 66a12f9..0f37187 100644
+--- a/frontend/src/editor.tsx
++++ b/frontend/src/editor.tsx
+@@ -87,7 +87,7 @@ export function Editor({ name, value: content, token, available, enabled, onEnab
+       <label title={available ? "Sends recent editor text to your configured Azure provider" : "Configure Azure completion on the local Rust server"}>
+         <input type="checkbox" checked={available && enabled} disabled={!available} onChange={(event) => onEnabled(event.target.checked)} /> Trailing completions
+       </label>
+-      <span id="completion-help" aria-live="polite">{!available ? "Azure not configured" : suffix ? "Tab to accept part / Esc to dismiss" : message || "One sentence part at a time"}</span>
++      <span id="completion-help" aria-live="polite">{!available ? "Azure not configured: fill in the server .env (see .env.example), restart and reload" : suffix ? "Tab to accept part / Esc to dismiss" : message || "One sentence part at a time"}</span>
+       {/* Reserve space so showing acceptance does not shrink a scrolled editor. */}
+       <button style={{ visibility: suffix ? "visible" : "hidden" }} disabled={!suffix} onPointerDown={(event) => event.preventDefault()} onClick={accept} title={suffix}>Accept part</button>
+     </div>
+diff --git a/frontend/src/style.css b/frontend/src/style.css
+index 224d1b1..8c14618 100644
+--- a/frontend/src/style.css
++++ b/frontend/src/style.css
+@@ -87,7 +87,10 @@ h2 { margin: 8px 0 0; font-size: 17px; font-weight: 500; overflow-wrap: anywhere
+ .completion-ghost { position: absolute; left: 0; top: 0; color: var(--subtle); white-space: pre; line-height: normal; }
+ .completion-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-height: 42px; padding: 8px 16px; color: var(--muted); font-size: 10px; border-bottom: 1px solid var(--border); }
+ .completion-controls label { display: flex; align-items: center; gap: 5px; }
+-.completion-controls button { padding: 3px 7px; font-size: 10px; }
++/* Keep status text on its own row so suggestions do not reflow the controls
++   and shrink a scrolled editor after the caret has been positioned. */
++.completion-controls #completion-help { flex-basis: 100%; order: 1; }
++.completion-controls button { margin-left: auto; padding: 3px 7px; font-size: 10px; }
+ .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--border); padding: 12px; font-size: 10px; color: var(--muted); }
+ .toolbar div { display: flex; flex-wrap: wrap; gap: 6px; }
+ .toolbar button { font-size: 11px; padding: 7px 9px; }
+diff --git a/ops.sh b/ops.sh
+old mode 100644
+new mode 100755
+index 45e15c4..3059c6e
+--- a/ops.sh
++++ b/ops.sh
+@@ -1 +1,8 @@
+-SPEC_SSH_TARGET="opencode@4.197.157.17" SPEC_SSH_KEY="$HOME/.ssh/opencode-dev-aue_ed25519" SPEC_SSH_WORKSPACE="/home/opencode/spec" SPEC_WORKSPACE="$HOME/specs" ./run.sh
++#!/usr/bin/env bash
++set -euo pipefail
++
++root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++
++export SPEC_WORKSPACE="${SPEC_WORKSPACE:-$HOME/specs}"
++
++exec "$root/run.sh" "$@"
+diff --git a/remote-build.sh b/remote-build.sh
+new file mode 100755
+index 0000000..ee45328
+--- /dev/null
++++ b/remote-build.sh
+@@ -0,0 +1,13 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++if (( $# > 1 )) || [[ "${1:-}" != '' && "${1:-}" != --check ]]; then
++  printf 'Usage: %s [--check]\nBuild all specs in remote ~/project; --check only lists inputs.\n' "$0" >&2
++  exit 2
++fi
++source "$root/scripts/ssh-config.bash"
++spec_configure_remote
++spec_prepare_remote
++printf 'Remote workspace: %s:%s\n' "$SPEC_SSH_TARGET" "$SPEC_SSH_WORKSPACE"
++exec "${spec_ssh[@]}" "bash -s -- $(spec_shell_quote "$SPEC_SSH_WORKSPACE") $(spec_shell_quote "${1:-}")" < "$root/scripts/build-projects.bash"
+diff --git a/run.sh b/run.sh
+index baaa256..9a49f17 100755
+--- a/run.sh
++++ b/run.sh
+@@ -3,15 +3,19 @@ set -euo pipefail
+ 
+ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ 
+-if ! command -v cargo >/dev/null 2>&1; then
+-  printf 'Rust/Cargo is required to run spec.\n' >&2
+-  exit 1
++if (( $# > 1 )) || [[ "${1:-}" != '' && "${1:-}" != --local ]]; then
++  printf 'Usage: %s [--local]\nStart with remote builds in ~/project; --local starts the editor only.\n' "$0" >&2
++  exit 2
+ fi
+-if ! command -v bun >/dev/null 2>&1; then
+-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+-    printf 'Install Bun or Node.js (22.12+) with npm to build the frontend.\n' >&2
+-    exit 1
+-  fi
++
++# Configure SSH and resolve key paths before changing directories.
++source "$root/scripts/ssh-config.bash"
++if [[ "${1:-}" == --local ]]; then
++  unset SPEC_SSH_TARGET SPEC_SSH_WORKSPACE SPEC_SSH_KEY SPEC_SSH_BINARY
++else
++  spec_configure_remote
++  spec_prepare_remote
++  printf 'Remote workspace: %s:%s\n' "$SPEC_SSH_TARGET" "$SPEC_SSH_WORKSPACE"
+ fi
+ 
+ cd -- "$root/backend"
+@@ -27,17 +31,6 @@ if (( (8#$mode & 0022) != 0 )); then
+   exit 1
+ fi
+ 
+-(
+-  cd -- "$root/frontend"
+-  if command -v bun >/dev/null 2>&1; then
+-    bun install --frozen-lockfile
+-    bun run build
+-  else
+-    printf 'Bun is unavailable; building with Node/npm (bun.lock is not used).\n'
+-    npm install --no-save --package-lock=false --no-audit --no-fund
+-    npm run typecheck
+-    npm exec --no -- vite build
+-  fi
+-)
++"$root/build.sh"
+ 
+ exec cargo run --release --locked
+diff --git a/scripts/build-projects.bash b/scripts/build-projects.bash
+new file mode 100644
+index 0000000..6042480
+--- /dev/null
++++ b/scripts/build-projects.bash
+@@ -0,0 +1,55 @@
++# Sent to remote Bash over SSH stdin by remote-build.sh.
++set -eo pipefail
++umask 077
++cd -- "$1"
++directory="$PWD"
++check="${2:-}"
++shopt -s nullglob
++specs=()
++for file in "$directory"/*; do
++  [[ -f "$file" && ! -L "$file" ]] || continue
++  case "${file##*/}" in
++    *.md|*.txt|*.spec) specs+=("$file") ;;
++    *.*) ;;
++    *) specs+=("$file") ;;
++  esac
++done
++if (( ${#specs[@]} == 0 )); then
++  printf 'No specs found in %s. Add .md, .txt, .spec, or extensionless files and rerun.\n' "$directory"
++  exit 0
++fi
++printf 'Found %s spec(s):\n' "${#specs[@]}"
++printf '  %s\n' "${specs[@]}"
++[[ "$check" != --check ]] || exit 0
++
++export PATH="$HOME/.local/bin:$HOME/.bun/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
++shopt -s expand_aliases
++if [[ -f "$HOME/.bash_aliases" ]]; then
++  source "$HOME/.bash_aliases"
++fi
++type spec >/dev/null 2>&1 || {
++  printf 'Remote spec command not found; configure ~/.bash_aliases or PATH.\n' >&2
++  exit 127
++}
++unset SPEC_SESSION_DIR KIBI_SPEC_SESSION
++export SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1
++export OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1 OPENCODE_QUESTION_AUTO_RECOMMEND=1
++cd -- "$directory"
++mkdir -p -- .spec-runs
++logs="$(mktemp -d "$directory/.spec-runs/batch-XXXXXXXX")"
++printf 'Build logs: %s\n' "$logs"
++failed=0
++for file in "${specs[@]}"; do
++  printf '\nBuilding %s\n' "${file##*/}"
++  # Run serially, and keep the build from consuming the SSH script on stdin.
++  # A subshell keeps each invocation in the same project directory.
++  if (spec build "$file") </dev/null 2>&1 | tee -- "$logs/${file##*/}.out"; then
++    printf 'OK: %s\n' "${file##*/}"
++  else
++    code=$?
++    printf 'FAILED (%s): %s\n' "$code" "${file##*/}" >&2
++    failed=$((failed + 1))
++  fi
++done
++printf '\nBuilt %s spec(s); %s failed. Logs: %s\n' "${#specs[@]}" "$failed" "$logs"
++(( failed == 0 ))
+diff --git a/scripts/ssh-config.bash b/scripts/ssh-config.bash
+new file mode 100644
+index 0000000..e5f1af0
+--- /dev/null
++++ b/scripts/ssh-config.bash
+@@ -0,0 +1,77 @@
++# Shared by the local launchers; source this file from Bash.
++spec_normalize_key() {
++  if [[ -n "${SPEC_SSH_KEY:-}" ]]; then
++    local key="$SPEC_SSH_KEY"
++    case "$key" in
++      '~/'*) key="$HOME/${key:2}" ;;
++    esac
++    if [[ ! -f "$key" || ! -r "$key" ]]; then
++      printf 'SPEC_SSH_KEY is not a readable local private-key file: %s\n' "$key" >&2
++      printf 'Set it to an existing key on this computer, or leave it empty to use SSH config/ssh-agent.\n' >&2
++      return 1
++    fi
++    SPEC_SSH_KEY="$(realpath -e -- "$key")" || return
++    export SPEC_SSH_KEY
++  else
++    unset SPEC_SSH_KEY
++  fi
++}
++
++spec_configure_remote() {
++  if [[ -z "${SPEC_SSH_TARGET:-}" ]]; then
++    if [[ ! -r "$HOME/ip" ]]; then
++      printf 'Write the remote host IP to ~/ip or set SPEC_SSH_TARGET=user@host.\n' >&2
++      return 1
++    fi
++    local host
++    host="$(<"$HOME/ip")"
++    host="${host%$'\r'}"
++    if [[ ! "$host" =~ ^[a-zA-Z0-9][a-zA-Z0-9.:-]*$ ]]; then
++      printf '~/ip must contain a single host name or IP address.\n' >&2
++      return 1
++    fi
++    SPEC_SSH_TARGET="opencode@$host"
++  fi
++  if [[ "$SPEC_SSH_TARGET" == -* || "$SPEC_SSH_TARGET" == *[!a-zA-Z0-9_.@:\[\]-]* ]]; then
++    printf 'SPEC_SSH_TARGET must be user@host or an SSH host alias.\n' >&2
++    return 1
++  fi
++  export SPEC_SSH_TARGET
++  # An explicitly empty value selects SSH config/ssh-agent.
++  export SPEC_SSH_KEY="${SPEC_SSH_KEY-$HOME/Downloads/Spec_man.pem}"
++  spec_normalize_key || return
++  spec_ssh=("${SPEC_SSH_BINARY:-/usr/bin/ssh}" -T
++    -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10
++    -o ServerAliveInterval=15 -o ServerAliveCountMax=2
++    -o ClearAllForwardings=yes -o ForwardAgent=no -o ForwardX11=no
++    -o PermitLocalCommand=no -o ControlMaster=no -o ControlPath=none
++    -o RemoteCommand=none -o StdinNull=no -o ForkAfterAuthentication=no
++    -o SessionType=default)
++  if [[ -n "${SPEC_SSH_KEY:-}" ]]; then
++    spec_ssh+=(-i "$SPEC_SSH_KEY" -o IdentitiesOnly=yes)
++  fi
++  spec_ssh+=(-- "$SPEC_SSH_TARGET")
++}
++
++# SSH joins command arguments as shell code, so quote values explicitly.
++spec_shell_quote() {
++  printf "'%s'" "${1//\'/\'\"\'\"\'}"
++}
++
++spec_prepare_remote() {
++  local directory="${SPEC_SSH_WORKSPACE:-}"
++  if [[ -n "$directory" && ( "$directory" != /* || "$directory" =~ [[:cntrl:]] ) ]]; then
++    printf 'SPEC_SSH_WORKSPACE must be an absolute remote directory.\n' >&2
++    return 1
++  fi
++  SPEC_SSH_WORKSPACE="$("${spec_ssh[@]}" "bash -s -- $(spec_shell_quote "$directory")" <<'REMOTE'
++set -euo pipefail
++umask 077
++directory="${1:-$HOME/project}"
++mkdir -p -- "$directory"
++cd -- "$directory"
++pwd -P
++REMOTE
++  )" || return
++  export SPEC_SSH_WORKSPACE
++}
+[0m$ [0mgit ls-files
+.env.example
+.gitignore
+.spec-runs/run-277c2841-480a-4506-a1a8-acbeac10de56/lease
+.spec-runs/run-277c2841-480a-4506-a1a8-acbeac10de56/status
+.spec-runs/run-4SKxySqbC2/status
+.spec-runs/run-4e688fdf-ad50-49ec-8fa5-0d5184286a1a/lease
+.spec-runs/run-4e688fdf-ad50-49ec-8fa5-0d5184286a1a/status
+.spec-runs/run-9006cf93-eaff-4e02-b742-cf11946571d2/lease
+.spec-runs/run-9006cf93-eaff-4e02-b742-cf11946571d2/spec-build-instructions.GFsxRm.md
+.spec-runs/run-9006cf93-eaff-4e02-b742-cf11946571d2/status
+.spec-runs/run-96hAIybBZx/status
+.spec-runs/run-Gzzqflyme3/status
+.spec-runs/run-K5YZLbuITw/status
+.spec-runs/run-lMNJ0Nm3wG/status
+.spec-runs/run-nMKTe6OORn/status
+LICENSE
+NOTICE
+README.md
+Screenshot From 2026-10-05 19-07-10.png
+archive/README.md
+archive/manifest.json
+archive/opencode/LICENSE
+archive/opencode/packages/opencode/test/cli/fixtures/spec-server.ts
+archive/opencode/packages/opencode/test/cli/run-spec.test.ts
+archive/opencode/packages/opencode/test/cli/spec-session.test.ts
+archive/opencode/packages/opencode/test/cli/spec-workflow.test.ts
+archive/opencode/script/run-spec-plan.sh
+archive/opencode/script/run-spec.sh
+archive/opencode/script/spec-help.txt
+archive/opencode/script/spec-manual.md
+archive/opencode/script/spec-session.md
+archive/opencode/script/spec-session.ts
+archive/opencode/script/spec-workflow.ts
+archive/opencode/script/spec-workflows.md
+archive/opencode/script/telle.md
+archive/opencode/script/telle.ts
+archive/shell/spec-launcher.bash
+archive/shell/spec.bash
+archive/specific/LICENSE
+archive/specific/NOTICE
+archive/specific/QUICK_START.md
+archive/specific/README.md
+archive/specific/bin/specific-run-build
+archive/specific/bin/specific-run-plan
+archive/specific/editor/COPYRIGHT
+archive/specific/editor/Cargo.lock
+archive/specific/editor/Cargo.toml
+archive/specific/editor/LICENSE-APACHE
+archive/specific/editor/LICENSE-MIT
+archive/specific/editor/scripts/completion_agent.py
+archive/specific/editor/scripts/filename_ranker.py
+archive/specific/editor/src/ansi_escape.rs
+archive/specific/editor/src/config.rs
+archive/specific/editor/src/editor.rs
+archive/specific/editor/src/error.rs
+archive/specific/editor/src/filename.rs
+archive/specific/editor/src/filename_search.rs
+archive/specific/editor/src/lib.rs
+archive/specific/editor/src/main.rs
+archive/specific/editor/src/markdown.rs
+archive/specific/editor/src/output.rs
+archive/specific/editor/src/row.rs
+archive/specific/editor/src/spec_session.rs
+archive/specific/editor/src/syntax.rs
+archive/specific/editor/src/terminal.rs
+archive/specific/editor/src/unix.rs
+archive/specific/editor/src/wasi.rs
+archive/specific/editor/src/windows.rs
+archive/specific/editor/src/xdg.rs
+archive/specific/editor/syntax.d/bash.ini
+archive/specific/editor/syntax.d/c.ini
+archive/specific/editor/syntax.d/coffeescript.ini
+archive/specific/editor/syntax.d/cpp.ini
+archive/specific/editor/syntax.d/csharp.ini
+archive/specific/editor/syntax.d/css.ini
+archive/specific/editor/syntax.d/d.ini
+archive/specific/editor/syntax.d/dart.ini
+archive/specific/editor/syntax.d/elixir.ini
+archive/specific/editor/syntax.d/fish.ini
+archive/specific/editor/syntax.d/gitignore.ini
+archive/specific/editor/syntax.d/go.ini
+archive/specific/editor/syntax.d/groovy.ini
+archive/specific/editor/syntax.d/haskell.ini
+archive/specific/editor/syntax.d/html.ini
+archive/specific/editor/syntax.d/ini.ini
+archive/specific/editor/syntax.d/java.ini
+archive/specific/editor/syntax.d/javascript.ini
+archive/specific/editor/syntax.d/json.ini
+archive/specific/editor/syntax.d/julia.ini
+archive/specific/editor/syntax.d/kotlin.ini
+archive/specific/editor/syntax.d/lrc.ini
+archive/specific/editor/syntax.d/lua.ini
+archive/specific/editor/syntax.d/markdown.ini
+archive/specific/editor/syntax.d/matlab.ini
+archive/specific/editor/syntax.d/nim.ini
+archive/specific/editor/syntax.d/nix.ini
+archive/specific/editor/syntax.d/nosql.ini
+archive/specific/editor/syntax.d/nushell.ini
+archive/specific/editor/syntax.d/ocaml.ini
+archive/specific/editor/syntax.d/perl.ini
+archive/specific/editor/syntax.d/php.ini
+archive/specific/editor/syntax.d/powershell.ini
+archive/specific/editor/syntax.d/processing.ini
+archive/specific/editor/syntax.d/prql.ini
+archive/specific/editor/syntax.d/python.ini
+archive/specific/editor/syntax.d/r.ini
+archive/specific/editor/syntax.d/racket.ini
+archive/specific/editor/syntax.d/raku.ini
+archive/specific/editor/syntax.d/rss.ini
+archive/specific/editor/syntax.d/ruby.ini
+archive/specific/editor/syntax.d/rust.ini
+archive/specific/editor/syntax.d/scala.ini
+archive/specific/editor/syntax.d/sql.ini
+archive/specific/editor/syntax.d/swift.ini
+archive/specific/editor/syntax.d/toml.ini
+archive/specific/editor/syntax.d/typescript.ini
+archive/specific/editor/syntax.d/v.ini
+archive/specific/editor/syntax.d/xml.ini
+archive/specific/editor/syntax.d/yaml.ini
+archive/specific/editor/syntax.d/zig.ini
+archive/specific/editor/syntax.d/zsh.ini
+archive/specific/editor/tests/cli.rs
+archive/specific/editor/tests/filename_ranker.py
+archive/specific/install.sh
+archive/specific/shell/specific.sh
+archive/specific/tests/build-runner.bats
+archive/specific/tests/editor-pty.py
+archive/specific/tests/helpers/fake-delegate
+archive/specific/tests/helpers/fake-editor
+archive/specific/tests/helpers/fake-opencode
+archive/specific/tests/markdown-pty.py
+archive/specific/tests/plan-runner.bats
+archive/specific/tests/shell-integration.bats
+backend/Cargo.lock
+backend/Cargo.toml
+backend/src/chat.rs
+backend/src/completion.rs
+backend/src/execution.rs
+backend/src/main.rs
+backend/src/recovery.rs
+backend/src/remote-alias.bash
+backend/src/remote-build.bash
+backend/src/remote-build.sh
+backend/src/remote-recover.bash
+backend/src/remote-supervisor.bash
+backend/src/remote.rs
+backend/src/remote_tests.rs
+backend/src/tests.rs
+backend/tests/ai_config.rs
+backend_.md
+backend_.md.out
+backend_.out
+build.sh
+docs/FEATURES.md
+docs/REVIEW.md
+docs/SECURITY.md
+docs/workspace.gif
+docs/workspace.png
+fix_shell
+fix_shell.out
+frontend/bun.lock
+frontend/e2e/execution.spec.ts
+frontend/e2e/workspace.spec.ts
+frontend/index.html
+frontend/package.json
+frontend/playwright.config.ts
+frontend/src/chat.tsx
+frontend/src/completion-marker.test.ts
+frontend/src/completion-marker.ts
+frontend/src/completions.test.ts
+frontend/src/completions.ts
+frontend/src/editor.tsx
+frontend/src/main.tsx
+frontend/src/style.css
+frontend/src/tabs.test.ts
+frontend/src/tabs.ts
+frontend/tsconfig.json
+frontend/vite.config.ts
+ops.sh
+remote-build.sh
+run.sh
+run_
+run_.out
+scripts/build-projects.bash
+scripts/ssh-config.bash
+themes
+themes.out
+[0m→ [0mRead .gitignore 
+> build · gpt-6-astra
+`dev` has one unpushed commit with the implementation changes. I’m reviewing it and running the project checks before pushing.
+[0m→ [0mRead frontend/playwright.config.ts 
+[0m→ [0mRead backend/src/remote-build.bash [90m[limit=140][0m
+[0m→ [0mRead ghost_chat 
+[0m→ [0mRead ins 
+[0m→ [0mRead frontend/package.json 
+[0m→ [0mRead remote_dir 
+[0m→ [0mRead README.md [90m[offset=242, limit=26][0m
+[0m$ [0mgit diff --check origin/dev...HEAD
+(no output)
+> build · gpt-6-astra
+[0m→ [0mRead backend/src/remote-alias.bash 
+[0m$ [0mbash -n build.sh run.sh ops.sh remote-build.sh scripts/ssh-config.bash scripts/build-projects.bash
+(no output)
+[0m→ [0mRead backend/src/completion.rs [90m[limit=170][0m
+[0m$ [0mbun run typecheck && bun run test && bun run build
+$ tsc --noEmit
+$ vitest run src
+
+ RUN  v3.2.7 /home/emmanuel/spec/frontend
+
+ ✓ src/tabs.test.ts (5 tests) 9ms
+ ✓ src/completions.test.ts (3 tests) 10ms
+ ✓ src/completion-marker.test.ts (5 tests) 16ms
+
+ Test Files  3 passed (3)
+      Tests  13 passed (13)
+   Start at  06:16:30
+   Duration  355ms (transform 192ms, setup 0ms, collect 227ms, tests 35ms, environment 2ms, prepare 265ms)
+
+$ bun typecheck && vite build
+$ tsc --noEmit
+vite v7.3.6 building client environment for production...
+transforming...
+✓ 33 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.44 kB │ gzip:  0.29 kB
+dist/assets/index-D-b1-Mz9.css   13.65 kB │ gzip:  3.54 kB
+dist/assets/index-BUrzBkDo.js   247.47 kB │ gzip: 78.75 kB
+✓ built in 2.35s
+[0m$ [0mcargo fmt --check && cargo test --locked && cargo clippy --all-targets --locked -- -D warnings && cargo build --locked
+Finished `test` profile [unoptimized + debuginfo] target(s) in 1.24s
+     Running unittests src/main.rs (target/debug/deps/spec-dadceb4c741d5e20)
+
+running 53 tests
+test completion::tests::azure_urls_and_defaults ... ok
+test completion::tests::chat_auth_and_missing_configuration ... ok
+test completion::tests::chat_truncates_utf8_context_and_discloses_existing_log_truncation ... ok
+test completion::tests::chat_shares_concurrency_limit_and_overrides_inline_timeout ... ok
+test completion::tests::chat_uses_displayed_context_preserves_multiline_answers_and_never_mutates_state ... ok
+test completion::tests::configuration_is_optional_but_never_partial_or_insecure ... ok
+test completion::tests::disabled_completion_and_configuration_use_existing_auth ... ok
+test completion::tests::normalization_keeps_only_a_short_inline_clause ... ok
+test completion::tests::chat_provider_failures_empty_refusal_incomplete_and_oversized_answers_are_sanitized ... ok
+test completion::tests::provider_payloads_and_normalized_suffix_are_integrated ... ok
+test completion::tests::provider_errors_are_bounded_redacted_and_do_not_follow_redirects ... ok
+test completion::tests::timeout_and_connection_failure_are_sanitized ... ok
+test completion::tests::refusal_incomplete_and_fenced_outputs_offer_nothing ... ok
+test completion::tests::validation_empty_prefix_and_concurrency_do_not_call_provider ... ok
+test completion::tests::chat_validation_rejects_invalid_fields_sequences_and_byte_bounds_before_provider ... ok
+test remote_tests::cancellation_survives_blocked_attachment_output ... ok
+test remote_tests::disconnected_completion_retains_private_bounded_log_and_reaps_leftover_children ... ok
+test remote_tests::early_explicit_cancel_is_not_eof_or_snapshot_data ... ok
+test remote_tests::invalid_spec_names_cannot_launch_or_recover_even_through_direct_scripts ... ok
+test completion::tests::chat_accepts_maximum_fields_and_answer_bytes ... ok
+test remote_tests::recovery_rejects_missing_malformed_and_oversized_ssh_responses ... ok
+test remote_tests::recovery_is_nonlaunching_bounded_and_requires_known_status ... ok
+test remote_tests::recovery_rejects_remote_symlinks_nonregular_files_and_public_storage ... ok
+test remote_tests::remote_alias_reports_missing_instruction_runtime_before_launch ... ok
+test remote_tests::remote_configuration_rejects_options_and_relative_paths ... ok
+test remote_tests::remote_alias_completion_instructions_are_scoped_merged_and_private ... ok
+test remote_tests::named_logs_preserve_and_quote_original_filenames_and_recover_without_metadata ... ok
+test remote_tests::remote_key_validation_distinguishes_missing_and_non_file_paths ... ok
+test remote_tests::retention_prunes_only_old_finished_sessions_and_rejects_unsafe_parent ... ok
+test remote_tests::ssh_is_noninteractive_with_host_verification_and_no_forwarding ... ok
+test remote_tests::remote_function_is_supported_and_missing_spec_is_reported ... ok
+test remote_tests::truncated_upload_never_starts_build_and_removes_snapshot ... ok
+test tests::all_api_routes_require_authentication ... ok
+test remote_tests::stable_remote_id_refuses_duplicate_launch_even_after_completion ... ok
+test tests::build_size_limit_does_not_limit_saving ... ok
+test tests::changed_remote_identity_never_contacts_ssh_or_loses_cached_output ... ok
+test remote_tests::remote_engine_path_and_auto_settings_reach_children_without_login_profiles ... ok
+test tests::encoded_traversal_is_rejected ... ok
+test tests::execution_is_disabled_by_default ... ok
+test tests::externally_changed_files_are_not_overwritten ... ok
+test tests::latest_is_null_without_a_run_and_tracks_newest_while_old_ids_remain_readable ... ok
+test tests::local_run_storage_rejects_unsafe_paths_permissions_and_oversized_records ... ok
+test tests::output_buffers_are_bounded ... ok
+test tests::build_exit_status_and_snapshot_cleanup ... ok
+test tests::output_log_reads_disk_without_replacing_cached_or_attached_output ... ok
+test tests::checkpoint_failures_are_visible_and_retryable_and_output_is_bounded ... ok
+test tests::save_list_reload_and_conflict_preserve_content ... ok
+test tests::storage_failure_prevents_ssh_spawn_and_does_not_modify_spec ... ok
+test tests::symlinks_and_nonregular_files_are_never_read_or_overwritten ... ok
+test tests::unsafe_names_and_content_are_rejected ... ok
+test tests::run_streams_snapshot_and_can_be_cancelled ... ok
+test tests::restart_recovers_running_and_disconnected_completed_runs_without_relaunch ... ok
+test remote_tests::detached_builds_survive_eof_hup_and_attachment_kill_then_watchdog_cleans_descendants ... ok
+
+test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.39s
+
+     Running tests/ai_config.rs (target/debug/deps/ai_config-fe2dcf77439d1b14)
+
+running 4 tests
+test empty_file_disables_both_features ... ok
+test explicit_file_and_exported_overrides_enable_both_features ... ok
+test repository_dotenv_enables_both_features_from_backend_directory ... ok
+test missing_partial_and_malformed_files_fail_without_exposing_keys ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.73s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.20s
+> build · gpt-6-astra
+[0m$ [0mbun run test:e2e
+$ playwright test
+
+Running 33 tests using 1 worker
+
+  ✓   1 e2e/execution.spec.ts:118:0 › enabled execution: confirmation, saved snapshot, per-file polling, completion and cancellation (4.0s)
+  ✓   2 e2e/execution.spec.ts:200:0 › enabled execution: empty specs are rejected and nonzero exits show failure (1.4s)
+  ✓   3 e2e/execution.spec.ts:234:0 › slash-marked lines reach the build unchanged with completion instructions (1.3s)
+  ✓   4 e2e/execution.spec.ts:252:0 › output recovery failures leave editing available and stale recovery cannot replace a new run (1.6s)
+  ✓   5 e2e/execution.spec.ts:283:0 › unavailable recovered runs keep polling without permitting duplicate builds (3.6s)
+  ✓   6 e2e/execution.spec.ts:301:0 › load nohup output reads the spec-named file and reports missing output without launching (1.7s)
+  ✓   7 e2e/execution.spec.ts:336:0 › slow nohup loading is not discarded by live output polling (2.5s)
+  ✓   8 e2e/execution.spec.ts:360:0 › closing the browser does not cancel an admitted build (1.7s)
+  ✓   9 e2e/execution.spec.ts:379:0 › startup restores live and completed output after server restart without relaunch (3.3s)
+  ✓  10 e2e/workspace.spec.ts:56:0 › real API: history, independent tabs, dirty protection, split panes and reload (1.4s)
+  ✓  11 e2e/workspace.spec.ts:102:0 › rainbow theme supports keyboard focus, reduced motion and narrow screens (611ms)
+  ✓  12 e2e/workspace.spec.ts:128:0 › stale writes return conflicts without losing the browser buffer (1.1s)
+  ✓  13 e2e/workspace.spec.ts:156:0 › token fragments are removed and manual connections reject invalid tokens and survive reload (609ms)
+  ✓  14 e2e/workspace.spec.ts:185:0 › filenames, empty files, filtered navigation, keyboard saves and accepted dirty discard (1.4s)
+  ✓  15 e2e/workspace.spec.ts:242:0 › edits during a real in-flight save retain the later buffer and save again successfully (630ms)
+  ✓  16 e2e/workspace.spec.ts:290:2 › spec line completion shortcut › bare slash marks and reopens only the current line, preserving indentation, caret and native undo (776ms)
+  ✓  17 e2e/workspace.spec.ts:334:2 › spec line completion shortcut › Alt+slash inserts a literal slash with native undo while other modified keys and IME stay native (569ms)
+  ✓  18 e2e/workspace.spec.ts:357:2 › spec line completion shortcut › slash types normally in fenced code, including delimiters, and toggles again after a matching closer (887ms)
+  ✓  19 e2e/workspace.spec.ts:398:2 › trailing completions › debounces trailing text for 500ms, accepts one clause with native undo, and dismisses until typing (734ms)
+  ✓  20 e2e/workspace.spec.ts:452:2 › trailing completions › accepts unpunctuated parts once and resumes only after another edit (618ms)
+  ✓  21 e2e/workspace.spec.ts:479:2 › trailing completions › completes opened CRLF files without changing saved content before acceptance (722ms)
+  ✓  22 e2e/workspace.spec.ts:512:2 › trailing completions › ignores responses from before edits, caret movement, and a tab switch (934ms)
+  ✓  23 e2e/workspace.spec.ts:558:2 › trailing completions › suppresses selections and IME, trails only line ends, and bounds Unicode context (625ms)
+  ✓  24 e2e/workspace.spec.ts:607:2 › trailing completions › turning completions off removes the ghost and suppresses requests across tabs (765ms)
+  ✓  25 e2e/workspace.spec.ts:640:2 › trailing completions › unconfigured completion is disabled and Tab retains normal focus navigation (617ms)
+  ✓  26 e2e/workspace.spec.ts:664:2 › trailing completions › mobile ghost is one clipped visual line and Accept part preserves the buffer until clicked (679ms)
+  ✓  27 e2e/workspace.spec.ts:700:2 › trailing completions › wrapped and scrolled ghost aligns with text and remains outside saved content (903ms)
+  ✓  28 e2e/workspace.spec.ts:742:2 › trailing completions › provider errors and empty suggestions keep editing and Tab usable, then retry on typing (576ms)
+  ✓  29 e2e/workspace.spec.ts:824:2 › session chat popup › separate authenticated popup polls its pinned dirty spec, refreshes logs and isolates run history (4.1s)
+  ✓  30 e2e/workspace.spec.ts:898:2 › session chat popup › failed log and provider requests retain the question and retry without duplicating history (1.1s)
+  ✓  31 e2e/workspace.spec.ts:942:2 › session chat popup › missing chat configuration leaves context readable and Ask disabled (667ms)
+  ✓  32 e2e/workspace.spec.ts:956:2 › session chat popup › workspace reload reconnects the existing popup to live drafts (3.9s)
+  ✓  33 e2e/workspace.spec.ts:974:2 › session chat popup › closed opener and standalone reload use saved context without execution and fit mobile (4.4s)
+
+  33 passed (51.7s)
+> build · gpt-6-astra
+[0m$ [0mpython3 - <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+root = Path.cwd()
+with tempfile.TemporaryDirectory(prefix='spec-review-', dir='/tmp/opencode') as tmp:
+    home = Path(tmp)
+    project = home / "project with 'quotes"
+    project.mkdir()
+    for name in ['a.md', 'b.txt', 'c.spec', 'plain', '.hidden.md', 'ignored.out', 'ignored.json']:
+        (project / name).write_text('fixture')
+    (project / 'linked.md').symlink_to(project / 'a.md')
+    (project / 'nested.md').mkdir()
+    (home / '.bash_aliases').write_text('spec() { printf "fixture: %s\\n" "$2"; [[ "$2" != */b.txt ]]; }\n')
+    env = dict(os.environ, HOME=str(home))
+    script = root / 'scripts/build-projects.bash'
+    check = subprocess.run(['bash', str(script), str(project), '--check'], env=env, text=True, capture_output=True)
+    assert check.returncode == 0, check.stderr
+    assert 'Found 4 spec(s)' in check.stdout, check.stdout
+    assert not (project / '.spec-runs').exists()
+    run = subprocess.run(['bash', str(script), str(project)], env=env, text=True, capture_output=True)
+    assert run.returncode == 1, run.stdout + run.stderr
+    assert 'Built 4 spec(s); 1 failed.' in run.stdout, run.stdout
+    assert len(list((project / '.spec-runs').glob('batch-*/*.out'))) == 4
+    fake_ssh = home / 'ssh'
+    fake_ssh.write_text('#!/usr/bin/env bash\nexec bash -c "${!#}"\n')
+    fake_ssh.chmod(0o700)
+    env.update(SPEC_SSH_TARGET='user@fixture', SPEC_SSH_BINARY=str(fake_ssh), SPEC_SSH_KEY='', SPEC_SSH_WORKSPACE=str(project))
+    launcher = subprocess.run([str(root / 'remote-build.sh'), '--check'], env=env, text=True, capture_output=True)
+    assert launcher.returncode == 0, launcher.stdout + launcher.stderr
+    assert 'Found 4 spec(s)' in launcher.stdout, launcher.stdout
+print('Launcher checks passed: input filtering, failure continuation, per-spec logs, and quoted remote paths.')
+PY
+Launcher checks passed: input filtering, failure continuation, per-spec logs, and quoted remote paths.
+> build · gpt-6-astra
+Review found no blocking issues. All 103 tests passed, along with formatting, lint, build, and launcher checks. The changes are already committed as `1328b0c`; I’m pushing that commit now.
+[0m$ [0mgit push origin dev
+remote: Permission to AI10xDev/spec.git denied to AI10x.
+fatal: unable to access 'https://github.com/AI10xDev/spec.git/': The requested URL returned error: 403
+> build · gpt-6-astra
+Reviewed `1328b0c`; no blocking issues found. All 103 tests and build/lint checks passed.
+
+Changes are already committed. Push failed: GitHub returned **403**, denying user `AI10x` access to `AI10xDev/spec`.
+
+Authenticate with write access, then run `git push origin dev`.

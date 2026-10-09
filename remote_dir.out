@@ -1,0 +1,244 @@
+[0m
+> build · gpt-6-astra
+[0m→ [0mRead . 
+> build · gpt-6-astra
+[0m→ [0mRead README.md [90m[limit=180][0m
+[0m→ [0mRead remote-build.sh 
+[0m→ [0mRead remote_dir 
+[0m✱ [0mGlob "**/AGENTS.md" [90min /home/emmanuel · 0 matches[0m
+> build · gpt-6-astra
+[0m→ [0mRead scripts/ssh-config.bash 
+[0m→ [0mRead scripts/build-projects.bash 
+[0m✱ [0mGrep "projects|mkdir.*workspace" [90min . · 6 matches[0m
+[0m$ [0mgit status --short
+M README.md
+ M backend/src/remote.rs
+ M backend/src/remote_tests.rs
+ M ops.sh
+ M run.sh
+?? build.sh
+?? ins
+?? ins.out
+?? remote-build.sh
+?? remote_dir
+?? remote_dir.out
+?? scripts/
+[0m→ [0mRead remote_dir.out [90m[limit=100][0m
+> build · gpt-6-astra
+The launcher currently uses remote `~/projects`. I’ll change it to `~/project`, keep automatic directory creation, and check the remote connection.
+[0m% [0mPatch 3 files 
+> build · gpt-6-astra
+[0m$ [0mbash -n scripts/ssh-config.bash remote-build.sh scripts/build-projects.bash ops.sh run.sh
+(no output)
+[0m$ [0m./remote-build.sh --check
+Remote workspace: opencode@20.227.39.101:/home/opencode/project
+No specs found in /home/opencode/project. Add .md, .txt, .spec, or extensionless files and rerun.
+> build · gpt-6-astra
+Updated remote builds to use `~/project`, creating it if missing.
+
+Verified SSH and `/home/opencode/project`. It’s empty, so no specs were built. Shell syntax checks passed.
+[0m
+> build · gpt-6-astra
+[0m→ [0mRead . 
+> build · gpt-6-astra
+[0m→ [0mRead run.sh 
+[0m✱ [0mGlob "**/AGENTS.md" [90min /home/emmanuel · 0 matches[0m
+[0m→ [0mRead remote-build.sh 
+[0m✱ [0mGrep "SPEC_SSH|Remote execution is disabled|project" [90min . · 74 matches[0m
+[0m$ [0mgit status --short
+M README.md
+ M backend/src/remote.rs
+ M backend/src/remote_tests.rs
+ M ops.sh
+ M run.sh
+?? build.sh
+?? ins
+?? ins.out
+?? remote-build.sh
+?? remote_dir
+?? remote_dir.out
+?? scripts/
+> build · gpt-6-astra
+[0m→ [0mRead ops.sh 
+[0m→ [0mRead README.md [90m[offset=35, limit=80][0m
+[0m→ [0mRead scripts 
+[0m→ [0mRead scripts/ssh-config.bash 
+[0m→ [0mRead build.sh 
+[0m$ [0mgit diff -- run.sh ops.sh
+diff --git a/ops.sh b/ops.sh
+old mode 100644
+new mode 100755
+index 45e15c4..c70c983
+--- a/ops.sh
++++ b/ops.sh
+@@ -1 +1,11 @@
+-SPEC_SSH_TARGET="opencode@4.197.157.17" SPEC_SSH_KEY="$HOME/.ssh/opencode-dev-aue_ed25519" SPEC_SSH_WORKSPACE="/home/opencode/spec" SPEC_WORKSPACE="$HOME/specs" ./run.sh
++#!/usr/bin/env bash
++set -euo pipefail
++
++root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++
++source "$root/scripts/ssh-config.bash"
++spec_configure_remote
++spec_prepare_remote
++export SPEC_WORKSPACE="${SPEC_WORKSPACE:-$HOME/specs}"
++
++exec "$root/run.sh"
+diff --git a/run.sh b/run.sh
+index baaa256..a6595f6 100755
+--- a/run.sh
++++ b/run.sh
+@@ -3,16 +3,9 @@ set -euo pipefail
+ 
+ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ 
+-if ! command -v cargo >/dev/null 2>&1; then
+-  printf 'Rust/Cargo is required to run spec.\n' >&2
+-  exit 1
+-fi
+-if ! command -v bun >/dev/null 2>&1; then
+-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+-    printf 'Install Bun or Node.js (22.12+) with npm to build the frontend.\n' >&2
+-    exit 1
+-  fi
+-fi
++# Resolve relative/literal ~/ key paths before changing directories.
++source "$root/scripts/ssh-config.bash"
++spec_normalize_key
+ 
+ cd -- "$root/backend"
+ export SPEC_WORKSPACE="${SPEC_WORKSPACE:-$root/workspace}"
+@@ -27,17 +20,6 @@ if (( (8#$mode & 0022) != 0 )); then
+   exit 1
+ fi
+ 
+-(
+-  cd -- "$root/frontend"
+-  if command -v bun >/dev/null 2>&1; then
+-    bun install --frozen-lockfile
+-    bun run build
+-  else
+-    printf 'Bun is unavailable; building with Node/npm (bun.lock is not used).\n'
+-    npm install --no-save --package-lock=false --no-audit --no-fund
+-    npm run typecheck
+-    npm exec --no -- vite build
+-  fi
+-)
++"$root/build.sh"
+ 
+ exec cargo run --release --locked
+> build · gpt-6-astra
+`run.sh` currently skips the SSH setup that `ops.sh` performs. I’ll make `run.sh` load the remote host settings and create remote `~/project` if needed before starting the server.
+[0m→ [0mRead remote_dir [90m[limit=100][0m
+[0m→ [0mRead frontend/package.json 
+[0m→ [0mRead backend/src/remote.rs [90m[offset=1, limit=110][0m
+[0m→ [0mRead backend/Cargo.toml 
+[0m$ [0mfor file in "$HOME/ip" "$HOME/Downloads/Spec_man.pem" "$HOME/.ssh/opencode-dev-aue_ed25519"; do if [[ -r "$file" ]]; then printf 'Readable: %s\n' "$file"; else printf 'Missing/unreadable: %s\n' "$file"; fi; done
+Readable: /home/emmanuel/ip
+Readable: /home/emmanuel/Downloads/Spec_man.pem
+Missing/unreadable: /home/emmanuel/.ssh/opencode-dev-aue_ed25519
+> build · gpt-6-astra
+[0m% [0mPatch 3 files 
+> build · gpt-6-astra
+[0m$ [0mbash -n run.sh ops.sh remote-build.sh scripts/ssh-config.bash scripts/build-projects.bash
+(no output)
+[0m✱ [0mGrep "SPEC_BIND|SPEC_PORT|token|execution_enabled|remote_enabled|/api" [90min backend/src/main.rs · 17 matches[0m
+[0m$ [0mbash -euo pipefail <<'LOCAL'
+source ./scripts/ssh-config.bash
+spec_configure_remote
+spec_prepare_remote
+printf 'Remote workspace: %s:%s\n' "$SPEC_SSH_TARGET" "$SPEC_SSH_WORKSPACE"
+"${spec_ssh[@]}" "bash -s -- $(spec_shell_quote "$SPEC_SSH_WORKSPACE")" <<'REMOTE'
+set -euo pipefail
+cd -- "$1"
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
+shopt -s expand_aliases
+if [[ -f "$HOME/.bash_aliases" ]]; then source "$HOME/.bash_aliases"; fi
+if type spec >/dev/null 2>&1; then
+  printf 'Remote spec command available (%s); build directory ready.\n' "$(type -t spec)"
+else
+  printf 'Remote spec command is missing from ~/.bash_aliases and PATH.\n' >&2
+  exit 1
+fi
+REMOTE
+LOCAL
+Remote workspace: opencode@20.227.39.101:/home/opencode/project
+Remote spec command available (function); build directory ready.
+> build · gpt-6-astra
+[0m→ [0mRead backend/src/main.rs [90m[offset=580, limit=88][0m
+> build · gpt-6-astra
+SSH works, `/home/opencode/project` is ready, and the remote `spec` command is available. I’m checking that the updated `run.sh` starts the web server with execution enabled.
+[0m$ [0mpython3 - <<'PY'
+import json, os, re, selectors, signal, subprocess, tempfile, time, urllib.request
+
+with tempfile.TemporaryDirectory(prefix='spec-launch-', dir='/tmp/opencode') as workspace:
+    env = dict(os.environ, SPEC_WORKSPACE=workspace, SPEC_PORT='0')
+    process = subprocess.Popen(['/home/emmanuel/spec/run.sh'], cwd='/tmp/opencode', env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    output = b''
+    deadline = time.monotonic() + 180
+    try:
+        while time.monotonic() < deadline:
+            for key, _ in selector.select(timeout=1):
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    raise RuntimeError('Launcher exited before startup:\n' + output.decode(errors='replace'))
+                output += chunk
+            match = re.search(rb'Spec: (http://127\.0\.0\.1:\d+)/#token=([^\s]+)', output)
+            if match:
+                base, token = (value.decode() for value in match.groups())
+                request = urllib.request.Request(base + '/api/config', headers={'Authorization': 'Bearer ' + token})
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    config = json.load(response)
+                assert config['execution'] is True, config
+                with urllib.request.urlopen(base, timeout=5) as response:
+                    assert response.status == 200
+                print('PASS: run.sh built the app, started from another directory, served the UI, and /api/config reports execution=true.')
+                break
+        else:
+            raise RuntimeError('Startup timed out:\n' + output.decode(errors='replace'))
+    finally:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        selector.close()
+PY
+PASS: run.sh built the app, started from another directory, served the UI, and /api/config reports execution=true.
+> build · gpt-6-astra
+[0m$ [0mgit diff --check
+(no output)
+[0m→ [0mRead README.md [90m[offset=204, limit=22][0m
+[0m$ [0mgit status --short
+M README.md
+ M backend/src/remote.rs
+ M backend/src/remote_tests.rs
+ M ops.sh
+ M run.sh
+?? build.sh
+?? ins
+?? ins.out
+?? remote-build.sh
+?? remote_dir
+?? remote_dir.out
+?? scripts/
+> build · gpt-6-astra
+[0m% [0mPatch 1 file 
+> build · gpt-6-astra
+Fixed `run.sh` to configure SSH automatically and create remote `~/project` if missing.
+
+Verified:
+- SSH connects successfully.
+- Remote `spec` is available.
+- Web server reports execution enabled.
+
+Restart using:
+```bash
+./run.sh
+```
+
+Builds will run in `/home/opencode/project`.

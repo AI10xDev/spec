@@ -1,0 +1,6 @@
+#can you the load remote host spec build inside dir `project` (iff not, mkdir)
+#seeing the error `Remote execution is disabled.
+
+Set SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.
+
+Editing and saving work without a model or credentials.` - on exec `run.sh`
