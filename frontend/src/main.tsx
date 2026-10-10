@@ -7,6 +7,7 @@ import { Chat } from "./chat"
 import "./style.css"
 
 type Entry = { name: string; modified: number; bytes: number }
+type Repository = { connected: boolean; dirty: boolean; directory: string | null; model: string }
 const chatName = new URLSearchParams(location.search).get("chat")
 
 function App() {
@@ -22,6 +23,8 @@ function App() {
   const [execution, setExecution] = useState(false)
   const [completion, setCompletion] = useState(false)
   const [chat, setChat] = useState(false)
+  const [realtime, setRealtime] = useState(false)
+  const [azureRealtime, setAzureRealtime] = useState(false)
   const [complete, setComplete] = useState(true)
   const [files, setFiles] = useState<Entry[]>([])
   const [tabs, setTabs] = useState<Tab[]>([])
@@ -32,6 +35,8 @@ function App() {
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
   const [busy, setBusy] = useState(false)
+  const [repository, setRepository] = useState<Repository | null>(null)
+  const [repositoryError, setRepositoryError] = useState("")
   const [outputs, setOutputs] = useState<Record<string, Output>>({})
   const [loadingOutput, setLoadingOutput] = useState<{ id?: string } | null>(null)
   const [follow, setFollow] = useState(true)
@@ -39,6 +44,7 @@ function App() {
   const chatWindows = useRef(new Map<Window, string>())
   const tab = tabs.find((item) => item.name === active)
   const output = outputs[active]
+  const pendingRuns = Object.values(outputs).filter((item) => item.recoverable).map((item) => item.id).join(",")
 
   async function api<T>(path: string, body?: unknown, method = "POST"): Promise<T> {
     const response = await fetch(`/api${path}`, {
@@ -51,7 +57,7 @@ function App() {
       const message = (() => {
         try { return (JSON.parse(text) as { error?: string }).error ?? text } catch { return text }
       })()
-      throw new Error(message || `HTTP ${response.status}`)
+      throw Object.assign(new Error(message || `HTTP ${response.status}`), { status: response.status })
     }
     return response.json() as Promise<T>
   }
@@ -68,10 +74,12 @@ function App() {
     event?.preventDefault()
     setError("")
     sessionStorage.setItem("spec-token", token)
-    const config = await api<{ execution: boolean; completion: boolean; chat: boolean }>("/config")
+    const config = await api<{ execution: boolean; completion: boolean; chat: boolean; realtime: boolean; azureRealtime: boolean }>("/config")
     setExecution(config.execution)
     setCompletion(config.completion)
     setChat(config.chat)
+    setRealtime(config.realtime)
+    setAzureRealtime(config.azureRealtime)
     if (chatName) { setConnected(true); return }
     const entries = await api<Entry[]>("/files")
     setFiles(entries)
@@ -126,28 +134,52 @@ function App() {
 
   useEffect(() => {
     // Let an explicit disk read finish without a poll invalidating its result.
-    if (!output?.recoverable || loadingOutput?.id === output.id) return
     let cancelled = false
-    let timer: ReturnType<typeof setTimeout>
-    async function poll() {
+    const timers: ReturnType<typeof setTimeout>[] = []
+    async function poll(output: Output) {
       try {
-        const next = await api<Output>(`/runs/${output!.id}`)
+        const next = await api<Output>(`/runs/${output.id}`)
         if (cancelled) return
         setOutputs((items) => items[next.name]?.id === next.id ? { ...items, [next.name]: next } : items)
-        if (next.recoverable) timer = setTimeout(poll, next.status === "running" ? 650 : 2500)
+        if (next.recoverable) timers.push(setTimeout(() => void poll(next), next.status === "running" ? 650 : 2500))
       } catch (error) {
         if (cancelled) return
         fail(error)
-        timer = setTimeout(poll, 2500)
+        timers.push(setTimeout(() => void poll(output), 2500))
       }
     }
-    void poll()
-    return () => { cancelled = true; clearTimeout(timer) }
-  }, [output?.id, output?.recoverable, loadingOutput, token])
+    // A background tab must not leave repository saving blocked by stale status.
+    for (const item of Object.values(outputs)) {
+      if (item.recoverable && loadingOutput?.id !== item.id) void poll(item)
+    }
+    return () => { cancelled = true; timers.forEach(clearTimeout) }
+  }, [pendingRuns, loadingOutput, token])
 
   useEffect(() => {
     if (follow && log.current) log.current.scrollTop = log.current.scrollHeight
   }, [output?.output, follow])
+
+  useEffect(() => {
+    if (!connected || !execution || chatName || busy) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout>
+    async function poll() {
+      try {
+        const next = await api<Repository>("/repository")
+        if (cancelled) return
+        setRepository(next)
+        setRepositoryError("")
+      } catch (error) {
+        if (cancelled) return
+        // Never offer a save based on stale repository state after a failed probe.
+        setRepository(null)
+        setRepositoryError(`Repository status unavailable: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      if (!cancelled) timer = setTimeout(poll, 5000)
+    }
+    void poll()
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [connected, execution, busy, output?.id, output?.status, token])
 
   async function recoverOutput(name: string, fromLog = false) {
     const previous = outputs[name]
@@ -195,7 +227,7 @@ function App() {
     if (active === item.name) setActive(remaining.at(-1)?.name ?? "")
   }
 
-  async function save(run = false) {
+  async function save(mode: "file" | "build" | "repository" = "file") {
     if (!tab || busy) return
     setBusy(true)
     setError("")
@@ -204,9 +236,10 @@ function App() {
       setTabs((items) => savedTab(items, document))
       setNotice(`Saved ${document.name}`)
       await refresh()
-      if (!run) return
-      const job = await api<{ id: string }>("/runs", { name: document.name, revision: document.revision })
+      if (mode === "file") return
+      const job = await api<{ id: string }>(mode === "repository" ? "/repository/save" : "/runs", { name: document.name, revision: document.revision })
       setOutputs((items) => ({ ...items, [document.name]: { ...job, name: document.name, output: "Starting…", status: "running", truncated: false, recoverable: true } }))
+      if (mode === "repository") setNotice(`Repository save submitted to ${repository?.model ?? "azure/gpt-6-sol"}. Check Output & logs for the result.`)
     } catch (error) { fail(error) } finally { setBusy(false) }
   }
 
@@ -245,7 +278,7 @@ function App() {
     {error && <p role="alert" className="error">{error}</p>}
   </main>
 
-  if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} />
+  if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} realtime={realtime} azureRealtime={azureRealtime} />
 
   return <div className="app">
     <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ workspace</span></div><div className="connection"><i /> Local · Rust + TypeScript</div></header>
@@ -284,8 +317,14 @@ function App() {
               setTabs((items) => items.map((item) => item.name === active ? { ...item, content } : item))
             }} /> : <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
             <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || output?.recoverable} onClick={() => {
-              if (window.confirm("Send this saved spec over SSH and run remote spec build? Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.")) void save(true)
-            }}>Save & run ↗</button></div></footer>
+              if (window.confirm("Send this saved spec over SSH and run remote spec build? Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.")) void save("build")
+             }}>Save & run ↗</button></div></footer>
+            {execution && <div className="repository-controls">
+              <span>{repositoryError || (repository?.connected ? `${repository.directory} / ${repository.dirty ? "Uncommitted changes" : "No uncommitted changes"}` : repository ? "No repository connected in the remote directory." : "Checking remote repository...")}</span>
+              {repository?.connected && repository.dirty && <button disabled={!tab?.content.trim() || busy || !!pendingRuns} title={`Use ${repository.model} with the existing repository workflow`} onClick={() => {
+                if (window.confirm(`Save edited repository changes in ${repository.directory} using ${repository.model}? This saves the current spec as context, then runs the existing repository workflow with automatic tool approval. It authorizes focused commits, but no push, and can execute tools and incur provider costs. Wait for harness completion in Output & logs and review its reported result.`)) void save("repository")
+              }}>Save repo changes</button>}
+            </div>}
           </section>
           <section className="output-pane" aria-label="Output and logs pane">
             <div className="pane-heading"><div><span className="eyebrow">02 / OUTPUT</span><h2>Output & logs</h2></div><span className="badge">{output?.status ?? "Idle"}</span></div>
@@ -293,7 +332,7 @@ function App() {
             <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{tab?.revision && <button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button>}{output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}</div>
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
             <pre ref={log} className="output" aria-label="Run output">{output?.output ?? (execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
-            <footer className="output-footer">Available output only. No hidden model reasoning is requested.</footer>
+            <footer className="output-footer">{output && <span>Harness: {output.status}{output.recoverable ? " (completion not confirmed)" : ""}. CLI success alone does not verify saved changes.<br /></span>}Available output only. No hidden model reasoning is requested.</footer>
           </section>
         </div>
         <div className="statusbar"><span role="status">{notice || "Ready"}</span><span id="editor-shortcuts">/ toggle completed (outside fenced code); Alt+/ type /</span><span>⌘ / Ctrl + S to save · 2 MiB file limit</span></div>

@@ -4,12 +4,17 @@ use http_body_util::BodyExt;
 use std::os::unix::fs::symlink;
 use tower::ServiceExt;
 
+#[path = "repository_tests.rs"]
+mod repository_tests;
+
 pub(super) fn app(root: &FsPath) -> App {
     App {
         root: root.to_owned(),
         token: "test-token".into(),
         remote: None,
         completion: None,
+        realtime: None,
+        azure_realtime: None,
         files: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(Vec::new())),
         recovered: Arc::new(Mutex::new(false)),
@@ -79,7 +84,11 @@ async fn all_api_routes_require_authentication() {
         ("PUT", "/api/files/a.md"),
         ("GET", "/api/config"),
         ("POST", "/api/completions"),
+        ("POST", "/api/realtime"),
+        ("POST", "/api/realtime/azure"),
         ("POST", "/api/runs"),
+        ("GET", "/api/repository"),
+        ("POST", "/api/repository/save"),
         ("GET", "/api/runs/id"),
         ("POST", "/api/runs/id/cancel"),
     ] {
@@ -304,6 +313,7 @@ fn output_buffers_are_bounded() {
         stop,
         remote_identity: "0".repeat(64),
         recover: true,
+        repository_save: false,
         attached: true,
         dirty: false,
         persistence_error: None,
@@ -799,6 +809,7 @@ fn persisted_job(id: &str, identity: String, recover: bool) -> Job {
         truncated: false,
         remote_identity: identity,
         recover,
+        repository_save: false,
         stop: detached_control(),
         attached: false,
         dirty: false,

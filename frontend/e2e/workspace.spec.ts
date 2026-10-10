@@ -15,7 +15,7 @@ test.beforeAll(async () => {
   directory = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "spec-e2e-"))
   server = spawn(path.resolve("../backend/target/debug/spec"), [], {
     cwd: path.resolve("../backend"),
-    env: { ...process.env, SPEC_WORKSPACE: directory, SPEC_PORT: "0", SPEC_UI_DIR: path.resolve("dist"), SPEC_COMMAND: undefined, SPEC_SSH_TARGET: undefined, SPEC_SSH_WORKSPACE: undefined, SPEC_SSH_KEY: undefined, SPEC_SSH_BINARY: undefined, SPEC_AI_ENV_FILE: "/dev/null", AZURE_OPENAI_ENDPOINT: undefined, AZURE_OPENAI_API_KEY: undefined, DEPLOYMENT_NAME: undefined, AZURE_OPENAI_API_VERSION: undefined },
+    env: { ...process.env, SPEC_WORKSPACE: directory, SPEC_PORT: "0", SPEC_UI_DIR: path.resolve("dist"), SPEC_COMMAND: undefined, SPEC_SSH_TARGET: undefined, SPEC_SSH_WORKSPACE: undefined, SPEC_SSH_KEY: undefined, SPEC_SSH_BINARY: undefined, SPEC_AI_ENV_FILE: "/dev/null", AZURE_OPENAI_ENDPOINT: undefined, AZURE_OPENAI_API_KEY: undefined, DEPLOYMENT_NAME: undefined, AZURE_OPENAI_API_VERSION: undefined, OPENAI_API_KEY: undefined, OPENAI_REALTIME_MODEL: undefined, AZURE_OPENAI_REALTIME_ENDPOINT: undefined, AZURE_OPENAI_REALTIME_API_KEY: undefined, AZURE_OPENAI_REALTIME_DEPLOYMENT: undefined },
     stdio: ["ignore", "pipe", "pipe"],
   })
   url = await new Promise<string>((resolve, reject) => {
@@ -278,6 +278,135 @@ test("edits during a real in-flight save retain the later buffer and save again 
   await expect(page.getByRole("alert")).toBeHidden()
   await expect(editor).toHaveValue(edited)
   expect(await readFile(path.join(directory, "inflight.md"), "utf8")).toBe(edited)
+})
+
+test.describe("repository save", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route("**/api/config", (route) => route.fulfill({ json: { execution: true, completion: false } }))
+    await page.route("**/api/repository", (route) => route.fulfill({ json: { connected: true, dirty: true, directory: "/remote/existing-repo", model: "azure/gpt-6-sol" } }))
+    await page.route("**/api/files/*/run", (route) => route.fulfill({ json: null }))
+    await page.route("**/api/runs", (route) => { throw new Error(`Repository save must not call ${route.request().url()}`) })
+  })
+
+  test("offers save only for a connected dirty repository and fails closed on status errors", async ({ page }) => {
+    let state = { connected: false, dirty: false, directory: null as string | null, model: "azure/gpt-6-sol" }
+    let failed = false
+    await page.route("**/api/repository", (route) => route.fulfill(failed ? { status: 502, json: { error: "SSH unavailable" } } : { json: state }))
+    await page.clock.install()
+    await page.clock.pauseAt(new Date(Date.now() + 1000))
+    await page.goto(url)
+    const save = page.getByRole("button", { name: "Save repo changes", exact: true })
+    await expect(page.locator(".repository-controls")).toContainText("No repository connected")
+    await expect(save).toBeHidden()
+    state = { ...state, connected: true, directory: "/remote/existing-repo" }
+    await page.clock.runFor(5000)
+    await expect(page.locator(".repository-controls")).toContainText("No uncommitted changes")
+    await expect(save).toBeHidden()
+    state.dirty = true
+    await page.clock.runFor(5000)
+    await expect(save).toBeVisible()
+    await expect(save).toBeDisabled()
+    await page.getByRole("textbox", { name: "New filename" }).fill("repo-gating.md")
+    await page.getByRole("button", { name: "Create file" }).click()
+    await page.getByRole("textbox", { name: "Edit repo-gating.md" }).fill("Existing repository workflow context")
+    await expect(save).toBeEnabled()
+    await page.setViewportSize({ width: 320, height: 740 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+    failed = true
+    await page.clock.runFor(5000)
+    await expect(page.locator(".repository-controls")).toContainText("SSH unavailable")
+    await expect(save).toBeHidden()
+    failed = false
+    await page.clock.runFor(5000)
+    await expect(save).toBeEnabled()
+    state.dirty = false
+    await page.clock.runFor(5000)
+    await expect(save).toBeHidden()
+  })
+
+  test("confirms the model and workflow, submits saved revision once, and tracks harness completion", async ({ page }) => {
+    let submissions = 0
+    let finish = false
+    let repositoryDirty = true
+    const job = { id: "repo-job", name: "repo-save.md", status: "running", output: "Validating repository changes...", truncated: false, recoverable: true }
+    await page.route("**/api/repository", (route) => route.fulfill({ json: { connected: true, dirty: repositoryDirty, directory: "/remote/existing-repo", model: "azure/gpt-6-sol" } }))
+    await page.route("**/api/repository/save", async (route) => {
+      submissions++
+      expect(route.request().method()).toBe("POST")
+      const input = route.request().postDataJSON()
+      expect(input.name).toBe("repo-save.md")
+      expect(input.revision).toBeTruthy()
+      expect(await readFile(path.join(directory, input.name), "utf8")).toBe("Do not rebuild; save existing edited changes.")
+      await route.fulfill({ json: { id: job.id } })
+    })
+    await page.route("**/api/runs/repo-job", (route) => route.fulfill({ json: finish ? { ...job, status: "completed", output: "Validation passed. Focused commit created.\n[completed]", recoverable: false } : job }))
+    await page.goto(url)
+    await page.getByRole("textbox", { name: "New filename" }).fill(job.name)
+    await page.getByRole("button", { name: "Create file" }).click()
+    await page.getByRole("textbox", { name: "Edit repo-save.md" }).fill("Do not rebuild; save existing edited changes.")
+    const save = page.getByRole("button", { name: "Save repo changes", exact: true })
+    page.once("dialog", async (dialog) => {
+      expect(dialog.message()).toContain("azure/gpt-6-sol")
+      expect(dialog.message()).toContain("/remote/existing-repo")
+      expect(dialog.message()).toContain("focused commits, but no push")
+      await dialog.dismiss()
+    })
+    await save.click()
+    expect(submissions).toBe(0)
+    page.once("dialog", (dialog) => dialog.accept())
+    await save.click()
+    await expect(page.getByRole("status")).toContainText("Repository save submitted to azure/gpt-6-sol")
+    await expect(save).toBeDisabled()
+    await expect(page.getByLabel("Run output")).toContainText("Validating repository changes")
+    await expect(page.locator(".output-footer")).toContainText("completion not confirmed")
+    expect(submissions).toBe(1)
+    repositoryDirty = false
+    finish = true
+    await expect(page.getByLabel("Run output")).toContainText("Focused commit created")
+    await expect(page.locator(".output-footer")).toContainText("Harness: completed")
+    await expect(page.locator(".output-footer")).toContainText("CLI success alone does not verify saved changes")
+    await expect(save).toBeHidden()
+    expect(submissions).toBe(1)
+  })
+
+  test("server rejection leaves the spec intact and does not claim repository success", async ({ page }) => {
+    await page.route("**/api/repository/save", (route) => route.fulfill({ status: 409, json: { error: "A run is active or its remote status is unresolved for this repository." } }))
+    await page.goto(url)
+    await page.getByRole("textbox", { name: "New filename" }).fill("repo-conflict.md")
+    await page.getByRole("button", { name: "Create file" }).click()
+    const editor = page.getByRole("textbox", { name: "Edit repo-conflict.md" })
+    await editor.fill("Preserve this spec")
+    page.once("dialog", (dialog) => dialog.accept())
+    await page.getByRole("button", { name: "Save repo changes", exact: true }).click()
+    await expect(page.getByRole("alert")).toContainText("remote status is unresolved")
+    await expect(editor).toHaveValue("Preserve this spec")
+    await expect(page.getByRole("status")).toHaveText("Saved repo-conflict.md")
+    await expect(page.getByLabel("Run output")).not.toContainText("Starting")
+  })
+
+  test("completion of an inactive tab's harness unblocks repository saving", async ({ page }) => {
+    let finished = false
+    const job = { id: "background-job", name: "repo-prior.md", status: "running", output: "Working...", recoverable: true, truncated: false }
+    await page.route("**/api/files/repo-prior.md/run", (route) => route.fulfill({ json: job }))
+    await page.route("**/api/runs/background-job", (route) => route.fulfill({ json: finished ? { ...job, status: "completed", recoverable: false } : job }))
+    await page.goto(url)
+    await page.getByRole("textbox", { name: "New filename" }).fill(job.name)
+    await page.getByRole("button", { name: "Create file" }).click()
+    await page.getByRole("textbox", { name: "Edit repo-prior.md" }).fill("Prior harness")
+    await page.getByRole("button", { name: "Save", exact: true }).click()
+    await expect(page.getByRole("status")).toHaveText("Saved repo-prior.md")
+    await page.reload()
+    await expect(page.getByLabel("Run output")).toContainText("Working")
+    await page.getByRole("textbox", { name: "New filename" }).fill("repo-next.md")
+    await page.getByRole("button", { name: "Create file" }).click()
+    await page.getByRole("textbox", { name: "Edit repo-next.md" }).fill("Save edits after the other harness finishes")
+    await page.getByRole("button", { name: "Close repo-prior.md" }).click()
+    const save = page.getByRole("button", { name: "Save repo changes", exact: true })
+    await expect(save).toBeDisabled()
+    finished = true
+    await expect(save).toBeEnabled()
+    await expect(page.getByRole("textbox", { name: "Edit repo-next.md" })).toBeVisible()
+  })
 })
 
 test.describe("spec line completion shortcut", () => {
@@ -893,6 +1022,84 @@ test.describe("session chat popup", () => {
     await expect(page.getByRole("textbox", { name: "Edit chat-other.md" })).toHaveValue("Other file must not leak")
     expect(await readFile(path.join(directory, name), "utf8")).toBe(saved)
     expect(context.pages()).toHaveLength(2)
+  })
+
+  test("Enter sends, Shift+Enter adds a line, and IME/repeat/empty input do not submit", async ({ page }) => {
+    const opened = page.waitForEvent("popup")
+    await page.getByRole("button", { name: "Open session chat" }).click()
+    const chat = await opened
+    const question = chat.getByRole("textbox", { name: "Your question" })
+    await question.press("Enter")
+    await question.fill("First line")
+    await question.press("Shift+Enter")
+    await question.pressSequentially("Second line")
+    await expect(question).toHaveValue("First line\nSecond line")
+    await question.dispatchEvent("keydown", { key: "Enter", isComposing: true })
+    await question.dispatchEvent("keydown", { key: "Enter", keyCode: 229 })
+    await question.dispatchEvent("keydown", { key: "Enter", repeat: true })
+    expect(requests).toHaveLength(0)
+    await question.press("Enter")
+    await expect(question).toHaveValue("")
+    expect(requests).toHaveLength(1)
+    expect(requests[0].messages).toEqual([{ role: "user", content: "First line\nSecond line" }])
+  })
+
+  test("Agent.md can be created and edited in chat without overwriting concurrent changes", async ({ page, context }) => {
+    const opened = page.waitForEvent("popup")
+    await page.getByRole("button", { name: "Open session chat" }).click()
+    const chat = await opened
+    await chat.getByRole("button", { name: "Edit Agent.md", exact: true }).click()
+    const panel = chat.getByRole("region", { name: "Agent.md editor" })
+    const editor = panel.getByRole("textbox", { name: "Agent.md content" })
+    await expect(panel).toContainText("does not exist yet")
+    await editor.fill("# Agent instructions")
+    await editor.press("Enter")
+    await editor.pressSequentially("Run tests before proposing changes.")
+    expect(requests).toHaveLength(0)
+    await panel.getByRole("button", { name: "Save Agent.md", exact: true }).click()
+    await expect(panel.getByRole("status")).toHaveText("Saved Agent.md in the workspace.")
+    expect(await readFile(path.join(directory, "Agent.md"), "utf8")).toBe("# Agent instructions\nRun tests before proposing changes.")
+    await chat.reload()
+    await chat.getByRole("button", { name: "Edit Agent.md", exact: true }).click()
+    await expect(editor).toHaveValue("# Agent instructions\nRun tests before proposing changes.")
+    await editor.fill("Revised instructions")
+    await panel.getByRole("button", { name: "Save Agent.md", exact: true }).click()
+    await expect(panel.getByRole("status")).toHaveText("Saved Agent.md in the workspace.")
+    const headers = { Authorization: `Bearer ${new URLSearchParams(new URL(url).hash.slice(1)).get("token")}` }
+    const endpoint = new URL("/api/files/Agent.md", url).href
+    const current = await (await context.request.get(endpoint, { headers })).json()
+    await context.request.put(endpoint, { headers, data: { content: "Concurrent workspace edit", revision: current.revision } })
+    await editor.fill("Keep my unsaved draft")
+    await panel.getByRole("button", { name: "Save Agent.md", exact: true }).click()
+    await expect(panel.getByRole("alert")).toContainText("File changed on disk")
+    await expect(editor).toHaveValue("Keep my unsaved draft")
+    expect(await readFile(path.join(directory, "Agent.md"), "utf8")).toBe("Concurrent workspace edit")
+    chat.once("dialog", (dialog) => dialog.dismiss())
+    await panel.getByRole("button", { name: "Reload Agent.md" }).click()
+    await expect(editor).toHaveValue("Keep my unsaved draft")
+    await chat.getByRole("button", { name: /Hide Agent.md/ }).click()
+    await chat.getByRole("button", { name: /Edit Agent.md/ }).click()
+    await expect(editor).toHaveValue("Keep my unsaved draft")
+    await chat.setViewportSize({ width: 320, height: 740 })
+    expect(await chat.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+    await panel.getByRole("button", { name: "Save Agent.md", exact: true }).scrollIntoViewIfNeeded()
+    await expect(panel.getByRole("button", { name: "Save Agent.md", exact: true })).toBeInViewport()
+    chat.once("dialog", (dialog) => dialog.accept())
+    await panel.getByRole("button", { name: "Reload Agent.md" }).click()
+    await expect(editor).toHaveValue("Concurrent workspace edit")
+    expect(await readFile(path.join(directory, name), "utf8")).toBe(saved)
+  })
+
+  test("Agent.md load failures cannot be mistaken for a new file", async ({ page, context }) => {
+    await context.route("**/api/files/Agent.md", (route) => route.fulfill({ status: 503, json: { error: "Disk unavailable" } }))
+    const opened = page.waitForEvent("popup")
+    await page.getByRole("button", { name: "Open session chat" }).click()
+    const chat = await opened
+    await chat.getByRole("button", { name: "Edit Agent.md", exact: true }).click()
+    const panel = chat.getByRole("region", { name: "Agent.md editor" })
+    await expect(panel.getByRole("alert")).toHaveText("Disk unavailable")
+    await expect(panel.getByRole("button", { name: "Save Agent.md", exact: true })).toBeDisabled()
+    await expect(panel.getByRole("textbox")).toHaveCount(0)
   })
 
   test("failed log and provider requests retain the question and retry without duplicating history", async ({ page }) => {

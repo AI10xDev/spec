@@ -29,17 +29,22 @@ use tokio::{
 use tower_http::services::ServeDir;
 use uuid::Uuid;
 
+mod azure_realtime;
 mod chat;
 mod completion;
+mod realtime;
 mod recovery;
 mod remote;
+use azure_realtime::AzureRealtime;
 use completion::Completion;
+use realtime::Realtime;
 use remote::Remote;
 
 const MAX_FILE: usize = 2 * 1024 * 1024;
 // The existing spec launcher forwards the prompt as one Linux exec argument.
 const MAX_BUILD_SPEC: usize = 120 * 1024;
 const MAX_OUTPUT: usize = 256 * 1024;
+const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 #[derive(Clone)]
 struct App {
@@ -47,6 +52,8 @@ struct App {
     token: String,
     remote: Option<Remote>,
     completion: Option<Completion>,
+    realtime: Option<Realtime>,
+    azure_realtime: Option<AzureRealtime>,
     files: Arc<Mutex<()>>,
     jobs: Arc<Mutex<Vec<Job>>>,
     recovered: Arc<Mutex<bool>>,
@@ -62,6 +69,8 @@ struct Job {
     truncated: bool,
     remote_identity: String,
     recover: bool,
+    #[serde(default)]
+    repository_save: bool,
     #[serde(skip, default = "detached_control")]
     stop: watch::Sender<RunControl>,
     #[serde(skip)]
@@ -306,7 +315,37 @@ async fn drain(app: App, id: String, mut stream: impl AsyncRead + Unpin) {
 }
 
 async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<serde_json::Value>> {
-    let remote = app.remote.as_ref().ok_or_else(|| invalid("Remote execution is disabled. Set SPEC_SSH_TARGET and SPEC_SSH_WORKSPACE on the local Rust server, then restart it."))?;
+    start_run(app, input, false).await
+}
+
+async fn repository(State(app): State<App>) -> Result<Json<remote::RepositoryStatus>> {
+    let status = match &app.remote {
+        Some(remote) => remote
+            .repository_status()
+            .await
+            .map_err(|error| Error(StatusCode::BAD_GATEWAY, error))?,
+        None => remote::RepositoryStatus {
+            connected: false,
+            dirty: false,
+            directory: None,
+            model: "azure/gpt-6-sol",
+        },
+    };
+    Ok(Json(status))
+}
+
+async fn repository_save(
+    State(app): State<App>,
+    Json(input): Json<Run>,
+) -> Result<Json<serde_json::Value>> {
+    start_run(app, input, true).await
+}
+
+async fn start_run(app: App, input: Run, repository_save: bool) -> Result<Json<serde_json::Value>> {
+    let remote = app.remote.as_ref().ok_or_else(|| Error(
+        if repository_save { StatusCode::FORBIDDEN } else { StatusCode::BAD_REQUEST },
+        "Remote execution is disabled. Set SPEC_SSH_TARGET and SPEC_SSH_WORKSPACE on the local Rust server, then restart it.".into(),
+    ))?;
     let document = read(&app.root, &input.name)?;
     if document.revision != input.revision {
         return Err(Error(
@@ -335,6 +374,31 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
     for id in pending {
         recovery::refresh(&app, &id, false).await?;
     }
+    // A changed SSH configuration cannot prove that an old harness finished.
+    if app
+        .jobs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|job| job.recover && (repository_save || job.repository_save))
+    {
+        return Err(Error(
+            StatusCode::CONFLICT,
+            "A run is active or its remote status is unresolved for this repository. Load its output before retrying.".into(),
+        ));
+    }
+    if repository_save {
+        let status = remote
+            .repository_status()
+            .await
+            .map_err(|error| Error(StatusCode::BAD_GATEWAY, error))?;
+        if !status.connected || !status.dirty {
+            return Err(Error(
+                StatusCode::CONFLICT,
+                "Repository save requires a connected Git worktree with unsaved changes".into(),
+            ));
+        }
+    }
     let id = Uuid::new_v4().to_string();
     let (stop, mut stopped) = watch::channel(RunControl::Running);
     {
@@ -360,6 +424,7 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
             stop,
             remote_identity: remote.identity(),
             recover: true,
+            repository_save,
             attached: true,
             dirty: false,
             persistence_error: None,
@@ -375,9 +440,13 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
         }
         jobs.push(job);
     }
-    // Only the fixed remote spec-build adapter is exposed by this API.
-    let child = remote
-        .command(document.content.len(), &id, &input.name)
+    // Both operations use the same fixed adapter and durable output/status protocol.
+    let mut command = if repository_save {
+        remote.repository_command(document.content.len(), &id, &input.name)
+    } else {
+        remote.command(document.content.len(), &id, &input.name)
+    };
+    let child = command
         .current_dir(&app.root)
         .process_group(0)
         .stdin(Stdio::piped())
@@ -407,7 +476,11 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
         append(
             &app,
             &id,
-            b"[started] remote spec build over SSH: running the saved snapshot with automatic tool approval requested. Output and logs only.\n",
+            if repository_save {
+                b"[started] remote repository save over SSH: azure/gpt-6-sol with the saved snapshot as context and the existing repository workflow. Output and logs only.\n"
+            } else {
+                b"[started] remote spec build over SSH: running the saved snapshot with automatic tool approval requested. Output and logs only.\n"
+            },
         );
         // EOF only detaches. Stop sends a distinct control byte after the entire
         // snapshot, so an early Stop cannot be mistaken for snapshot contents.
@@ -587,10 +660,20 @@ fn router(app: App) -> Router {
                     "execution": app.remote.is_some(),
                     "completion": app.completion.is_some(),
                     "chat": app.completion.is_some(),
+                    "realtime": app.realtime.is_some(),
+                    "azureRealtime": app.azure_realtime.is_some(),
                 }))
             }),
         )
         .route("/api/files", get(list))
+        .route(
+            "/api/realtime",
+            post(realtime::call).layer(DefaultBodyLimit::max(realtime::MAX_BODY)),
+        )
+        .route(
+            "/api/realtime/azure",
+            post(azure_realtime::call).layer(DefaultBodyLimit::max(realtime::MAX_BODY)),
+        )
         .route(
             "/api/chat",
             post(chat::chat).layer(DefaultBodyLimit::max(chat::MAX_BODY)),
@@ -604,6 +687,8 @@ fn router(app: App) -> Router {
         .route("/api/files/{name}/run", get(latest_output))
         .route("/api/files/{name}/run/log", get(output_log))
         .route("/api/runs", post(start))
+        .route("/api/repository", get(repository))
+        .route("/api/repository/save", post(repository_save))
         .route("/api/runs/{id}", get(output))
         .route("/api/runs/{id}/cancel", post(cancel))
         .layer(DefaultBodyLimit::max(MAX_FILE * 6 + 1024))
@@ -635,11 +720,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .map_err(|(_, error)| format!("Workspace is already served: {error}"))?;
     let remote = Remote::from_env()?;
     let completion = Completion::from_env()?;
+    let realtime = Realtime::from_env()?;
+    let azure_realtime = AzureRealtime::from_env()?;
     let app = App {
         root,
         token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
         remote,
         completion,
+        realtime,
+        azure_realtime,
         files: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(Vec::new())),
         recovered: Arc::new(Mutex::new(false)),
@@ -668,16 +757,23 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         );
     }
     let ui = std::env::var("SPEC_UI_DIR").unwrap_or_else(|_| "../frontend/dist".into());
-    let server = router(app.clone()).fallback_service(ServeDir::new(ui))
-        .layer(middleware::from_fn(|request: Request, next: Next| async move {
-            let mut response = next.run(request).await;
-            for (key, value) in [
-                ("x-content-type-options", "nosniff"),
-                ("referrer-policy", "no-referrer"),
-                ("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
-            ] { response.headers_mut().insert(header::HeaderName::from_static(key), value.parse().unwrap()); }
-            response
-        }));
+    let server = router(app.clone())
+        .fallback_service(ServeDir::new(ui))
+        .layer(middleware::from_fn(
+            |request: Request, next: Next| async move {
+                let mut response = next.run(request).await;
+                for (key, value) in [
+                    ("x-content-type-options", "nosniff"),
+                    ("referrer-policy", "no-referrer"),
+                    ("content-security-policy", CSP),
+                ] {
+                    response
+                        .headers_mut()
+                        .insert(header::HeaderName::from_static(key), value.parse().unwrap());
+                }
+                response
+            },
+        ));
     axum::serve(listener, server)
         .with_graceful_shutdown(async move {
             let mut term =

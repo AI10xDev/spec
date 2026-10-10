@@ -2,6 +2,7 @@
 set -eu
 umask 077
 directory=$1
+registry_record=${6:-}
 pid=
 logger=
 result=125
@@ -24,17 +25,19 @@ cleanup() {
         wait "$logger" 2>/dev/null || true
     fi
     rm -f -- "$directory/snapshot.md" "$directory/pipe" "$directory/ready" "$directory/cancel"
-    printf '%s\n' "$result" > "$directory/status.tmp"
-    mv -- "$directory/status.tmp" "$directory/status"
+    printf '%s\n' "$result" > "$directory/status.tmp" &&
+        mv -T -- "$directory/status.tmp" "$directory/status" || return
+    [[ -z $registry_record ]] || rm -f -- "$registry_record"
 }
 trap cleanup EXIT
 trap '' HUP
 trap 'exit 125' INT TERM
 mkfifo "$directory/pipe"
 # Keep the first 8 MiB, then drain without retaining more or breaking the build pipe.
-setsid bash --noprofile --norc -c 'stdbuf -o0 head -c 8388608; cat >/dev/null' < "$directory/pipe" > "$directory/$3" &
+# Only the supervisor retains the repository lock, never escaped build descendants.
+setsid bash --noprofile --norc -c 'stdbuf -o0 head -c 8388608; cat >/dev/null' 9<&- < "$directory/pipe" > "$directory/$3" &
 logger=$!
-setsid bash --noprofile --norc -c "$2" -- "$directory/snapshot.md" "$directory/ready" </dev/null > "$directory/pipe" 2>&1 &
+setsid bash --noprofile --norc -c "$2" -- "$directory/snapshot.md" "$directory/ready" "${4:-build}" "${5:-}" 9<&- </dev/null > "$directory/pipe" 2>&1 &
 pid=$!
 SECONDS=0
 # setsid must establish the group before cancellation can kill it.

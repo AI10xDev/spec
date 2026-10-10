@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(config.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(
             response_json(config).await,
-            json!({"execution": false, "completion": false, "chat": false})
+            json!({"execution": false, "completion": false, "chat": false, "realtime": false, "azureRealtime": false})
         );
         let response = request(
             state.clone(),
@@ -622,6 +622,7 @@ mod tests {
                 response_json(request(mock.state.clone(), "GET", "/api/config", Value::Null).await)
                     .await;
             assert_eq!(config["completion"], true);
+            assert_eq!(config["realtime"], false);
             let prefix = "First line\nFinish this \"sentence\"";
             let response = request(
                 mock.state.clone(),
@@ -887,6 +888,7 @@ mod tests {
                 truncated: false,
                 remote_identity: "unused".into(),
                 recover: true,
+                repository_save: false,
                 stop,
                 attached: true,
                 dirty: true,

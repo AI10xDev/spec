@@ -83,6 +83,11 @@ async function startServer(execution = true) {
       AZURE_OPENAI_API_KEY: undefined,
       DEPLOYMENT_NAME: undefined,
       AZURE_OPENAI_API_VERSION: undefined,
+      OPENAI_API_KEY: undefined,
+      OPENAI_REALTIME_MODEL: undefined,
+      AZURE_OPENAI_REALTIME_ENDPOINT: undefined,
+      AZURE_OPENAI_REALTIME_API_KEY: undefined,
+      AZURE_OPENAI_REALTIME_DEPLOYMENT: undefined,
     },
     stdio: ["ignore", "pipe", "ignore"],
   })

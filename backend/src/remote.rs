@@ -3,6 +3,14 @@ use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Stdio, time:
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+#[derive(serde::Serialize)]
+pub struct RepositoryStatus {
+    pub connected: bool,
+    pub dirty: bool,
+    pub directory: Option<String>,
+    pub model: &'static str,
+}
+
 #[derive(Clone)]
 pub struct Remote {
     pub binary: PathBuf,
@@ -138,8 +146,16 @@ impl Remote {
     }
 
     pub fn command(&self, bytes: usize, id: &str, name: &str) -> Command {
+        self.build_command(bytes, id, name, "build")
+    }
+
+    pub fn repository_command(&self, bytes: usize, id: &str, name: &str) -> Command {
+        self.build_command(bytes, id, name, "repository-save")
+    }
+
+    fn build_command(&self, bytes: usize, id: &str, name: &str, mode: &str) -> Command {
         self.ssh(format!(
-            "bash -c {} -- {} {} {} {} {} {}",
+            "bash -c {} -- {} {} {} {} {} {} {} {}",
             quote(include_str!("remote-build.bash")),
             quote(&self.directory),
             bytes,
@@ -147,7 +163,74 @@ impl Remote {
             quote(include_str!("remote-supervisor.bash")),
             quote(id),
             quote(name),
+            quote(mode),
+            quote(include_str!("remote-repository.bash")),
         ))
+    }
+
+    pub async fn repository_status(&self) -> Result<RepositoryStatus, String> {
+        let mut child = self
+            .ssh(format!(
+                "timeout --kill-after=1s 10s bash --noprofile --norc -c {} -- {}",
+                quote(include_str!("remote-repository.bash")),
+                quote(&self.directory),
+            ))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let pid = child.id().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let mut stdout = stdout.take(16385);
+            let mut stderr = stderr.take(4097);
+            let (a, b) = tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err));
+            a.map_err(|e| e.to_string())?;
+            b.map_err(|e| e.to_string())?;
+            if out.len() > 16384 || err.len() > 4096 {
+                return Err("remote repository response exceeded limit".into());
+            }
+            let exit = child.wait().await.map_err(|e| e.to_string())?;
+            if !exit.success() {
+                return Err(format!(
+                    "remote repository status {exit}: {}",
+                    String::from_utf8_lossy(&err).trim()
+                ));
+            }
+            let text = std::str::from_utf8(&out).map_err(|_| "invalid repository response")?;
+            let parts: Vec<_> = text.split('\0').collect();
+            if parts.len() != 3 || !parts[2].is_empty() {
+                return Err("invalid repository response".into());
+            }
+            let (connected, dirty) = match parts[0] {
+                "SPEC-REPOSITORY-1 0 0" if parts[1].is_empty() => (false, false),
+                "SPEC-REPOSITORY-1 1 0" if parts[1].starts_with('/') => (true, false),
+                "SPEC-REPOSITORY-1 1 1" if parts[1].starts_with('/') => (true, true),
+                _ => return Err("invalid repository response".into()),
+            };
+            Ok(RepositoryStatus {
+                connected,
+                dirty,
+                directory: connected.then(|| parts[1].to_owned()),
+                model: "azure/gpt-6-sol",
+            })
+        })
+        .await
+        .unwrap_or_else(|_| Err("remote repository status timed out".to_owned()));
+        if result.is_err() {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+            let _ = child.kill().await;
+        }
+        result
     }
 
     pub async fn snapshot(

@@ -7,7 +7,8 @@
     "dev": "vite --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "build": "bun typecheck && vite build",
-    "test": "vitest run src",
+    "test": "node test-output.mjs",
+    "test:unit": "vitest run src",
     "test:e2e": "playwright test"
   },
   "dependencies": { "react": "^19.2.0", "react-dom": "^19.2.0" },

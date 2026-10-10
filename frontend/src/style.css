@@ -94,6 +94,9 @@ h2 { margin: 8px 0 0; font-size: 17px; font-weight: 500; overflow-wrap: anywhere
 .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--border); padding: 12px; font-size: 10px; color: var(--muted); }
 .toolbar div { display: flex; flex-wrap: wrap; gap: 6px; }
 .toolbar button { font-size: 11px; padding: 7px 9px; }
+.repository-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
+.repository-controls span { flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere; }
+.repository-controls button { font-size: 11px; }
 .output-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 12px 24px; color: var(--muted); font-size: 11px; }
 .output-controls label { display: flex; align-items: center; gap: 6px; }
 input[type=checkbox] { accent-color: var(--primary); }
@@ -128,6 +131,16 @@ input[type=checkbox] { accent-color: var(--primary); }
 .chat-composer > div { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .chat-composer span { font-size: 11px; color: var(--muted); margin-right: auto; }
 .chat-space > .hint, .chat-space > .error { margin: 0; }
+.chat-extensions { flex-shrink: 0; max-height: 45vh; overflow: auto; border-top: 1px solid var(--border); padding: 8px 24px; }
+.chat-tools { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.mic-button { display: inline-flex; align-items: center; gap: 8px; }
+.mic-button[aria-expanded=true] { border-color: var(--accent); color: var(--accent); }
+.agent-editor, .realtime-panel { padding: 12px 0; font-size: 12px; line-height: 1.7; }
+.agent-editor h2, .realtime-panel h2 { margin: 0 0 8px; font-size: 16px; font-weight: 500; }
+.agent-editor p, .realtime-panel p { overflow-wrap: anywhere; }
+.agent-editor label { display: block; margin: 12px 0 6px; }
+.agent-editor textarea { display: block; width: 100%; min-height: 150px; resize: vertical; padding: 12px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--surface); font: 12px/1.7 ui-monospace, monospace; }
+.realtime-panel .chat-messages { max-height: 240px; min-height: 0; padding: 12px 0; }
 @media (max-width: 780px) { .app.chat-app { height: 100dvh; } .chat-context { max-height: 25vh; } .chat-messages { padding: 16px; min-height: 100px; } .chat-composer { padding: 12px 16px; } .chat-app .brand-caption { display: none; } }
 .statusbar { display: flex; justify-content: space-between; gap: 10px; background: var(--surface); border-top: 1px solid var(--border); padding: 7px 18px; font-size: 10px; color: var(--muted); }
 .empty-editor { flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column; padding: 30px; text-align: center; }

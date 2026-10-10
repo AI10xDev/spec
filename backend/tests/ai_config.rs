@@ -42,7 +42,13 @@ async fn assert_config(mut command: Command, enabled: bool) {
     let config: Value = response.json().await.unwrap();
     assert_eq!(
         config,
-        json!({"execution": false, "completion": enabled, "chat": enabled})
+        json!({
+            "execution": false,
+            "completion": enabled,
+            "chat": enabled,
+            "realtime": false,
+            "azureRealtime": false,
+        })
     );
     child.kill().await.unwrap();
 }

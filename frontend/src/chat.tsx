@@ -1,8 +1,10 @@
 import { useEffect, useEffectEvent, useRef, useState } from "react"
 import type { Document, Output, Tab } from "./tabs"
 import { dirty } from "./tabs"
+import { AgentEditor } from "./agent-editor"
+import { Realtime } from "./realtime"
 
-type Api = <T>(path: string, body?: unknown) => Promise<T>
+type Api = <T>(path: string, body?: unknown, method?: string) => Promise<T>
 type Context = { spec: string; unsaved: boolean; source: string; output: Output | null; updated: string }
 type Message = { role: "user" | "assistant"; content: string }
 
@@ -25,7 +27,7 @@ async function editorBuffer(name: string): Promise<Tab | null> {
   })
 }
 
-export function Chat({ name, api, available, execution }: { name: string; api: Api; available: boolean; execution: boolean }) {
+export function Chat({ name, api, available, execution, realtime, azureRealtime }: { name: string; api: Api; available: boolean; execution: boolean; realtime: boolean; azureRealtime: boolean }) {
   const [context, setContext] = useState<Context | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [question, setQuestion] = useState("")
@@ -38,6 +40,7 @@ export function Chat({ name, api, available, execution }: { name: string; api: A
   const conversationRun = useRef<string | null>(null)
   const sending = useRef(false)
   const controller = useRef<HTMLDivElement>(null)
+  const stopVoice = useRef<(() => void) | null>(null)
 
   async function refresh(fromLog: boolean): Promise<Context> {
     const tab = await editorBuffer(name)
@@ -120,7 +123,7 @@ export function Chat({ name, api, available, execution }: { name: string; api: A
   return <div className="app chat-app">
     <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ session chat</span></div><a href="/" target="_blank" rel="opener">Open workspace</a></header>
     <main className="chat-space">
-      <div className="pane-heading"><div><span className="eyebrow">A SEPARATE SPACE / READ ONLY</span><h1>{name}</h1></div><span className="badge">{context?.output?.status ?? "Spec only"}</span></div>
+      <div className="pane-heading"><div><span className="eyebrow">A SEPARATE SPACE / SESSION CHAT</span><h1>{name}</h1></div><span className="badge">{context?.output?.status ?? "Spec only"}</span></div>
       <section className="chat-context" aria-label="Chat context">
         <p>Current session output first. Written spec next. Earlier conversation last.</p>
         <dl><div><dt>Session</dt><dd>{context?.output?.id ?? "No associated run output"}</dd></div><div><dt>Spec</dt><dd>{context ? `${context.source}${context.unsaved ? " / unsaved" : " / saved"}` : "Loading context..."}</dd></div></dl>
@@ -132,17 +135,34 @@ export function Chat({ name, api, available, execution }: { name: string; api: A
       <div ref={controller} className="chat-messages" role="log" aria-label="Conversation" aria-live="polite">
         {answerContext && <details className="chat-answer-context"><summary>Inspect last answer input</summary><p>Session: {answerContext.output?.id ?? "Spec only"}{answerContext.output ? ` / ${answerContext.output.status}` : ""}. Checked at {answerContext.updated}. {answerContext.source}{answerContext.unsaved ? " / unsaved" : " / saved"}.</p><p>Snapshot before provider context limits. Later polling does not change this evidence.</p><h2>Written spec</h2><pre>{answerContext.spec}</pre><h2>Nohup output</h2><pre>{answerContext.output?.output ?? "No output supplied."}</pre></details>}
         {answerContext && (context?.output?.id ?? null) !== conversationRun.current && <p className="hint">The current session has changed; your next question will start a new conversation.</p>}
-        {!messages.length && <div className="chat-empty"><h2>Ask about what is happening.</h2><p>Explain a log line, check progress against the spec, or explore a general question.</p><p>Questions send the current spec and available output to the configured model provider. Chat cannot edit files or run commands.</p></div>}
+        {!messages.length && <div className="chat-empty"><h2>Ask about what is happening.</h2><p>Explain a log line, check progress against the spec, or explore a general question.</p><p>Questions send the current spec and available output to the configured model provider. AI answers cannot edit files or run commands. Use the Agent.md editor below to write and save your own instructions.</p></div>}
         {messages.map((message, index) => <article className={`chat-message ${message.role}`} key={index}><h2>{message.role === "user" ? "You" : "Spec assistant"}</h2><div>{message.content}</div></article>)}
         {busy && <p role="status">Refreshing context and asking the model...</p>}
+      </div>
+      <div className="chat-extensions">
+        <AgentEditor api={api} />
+        {(["openai", "azure"] as const).map((provider) => <Realtime key={`${name}:${provider}`} provider={provider} api={api} available={provider === "azure" ? azureRealtime : realtime} onStart={(stop) => {
+          stopVoice.current?.()
+          stopVoice.current = stop
+        }} context={async () => {
+          const next = await refresh(true)
+          setContext(next)
+          const output = next.output
+          return { name, spec: next.spec, output: output ? { id: output.id, status: output.status, output: output.output, truncated: output.truncated } : null }
+        }} />)}
       </div>
       {notice && <p className="hint" role="status">{notice}</p>}
       {truncated && <p className="hint">The last answer used partial context: up to the first 64 KiB of spec and last 64 KiB of available output.</p>}
       {(error || contextError) && <p className="error" role="alert">{error || contextError}</p>}
       <form className="chat-composer" onSubmit={(event) => void ask(event)}>
         <label htmlFor="question">Your question</label>
-        <textarea id="question" value={question} onChange={(event) => setQuestion(event.target.value)} disabled={busy || !available} placeholder="What does this output mean for my spec?" rows={3} />
-        <div><span>Read-only answers. Verify important claims.</span><button type="button" disabled={busy || !messages.length} onClick={() => { setMessages([]); setTruncated(false); setNotice(""); setAnswerContext(null) }}>Clear chat</button><button className="primary" disabled={busy || !available || !question.trim()}>Ask</button></div>
+        <textarea id="question" value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
+            event.preventDefault()
+            if (!event.repeat) event.currentTarget.form?.requestSubmit()
+          }
+        }} disabled={busy || !available} placeholder="What does this output mean for my spec?" rows={3} />
+        <div><span>Enter to send. Shift+Enter for a new line. Verify AI answers.</span><button type="button" disabled={busy || !messages.length} onClick={() => { setMessages([]); setTruncated(false); setNotice(""); setAnswerContext(null) }}>Clear chat</button><button className="primary" disabled={busy || !available || !question.trim()}>Ask</button></div>
       </form>
     </main>
   </div>

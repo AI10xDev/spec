@@ -1,6 +1,9 @@
 # Source only the trusted remote alias file, not an interactive shell/terminal.
 # Separate lines ensure aliases defined by the source are expanded at invocation.
 : > "$2" # Signal that setsid established the build process group.
+spec_build_mode=${3:-build}
+[[ $spec_build_mode == build || $spec_build_mode == repository-save ]] || exit 125
+spec_build_workspace=$PWD
 shopt -s expand_aliases
 # SSH/noninteractive shells often omit user-installed engines and Bun. Set up
 # their conventional locations without loading interactive/login startup files.
@@ -42,7 +45,35 @@ try {
         throw new Error("OPENCODE_CONFIG_CONTENT instructions must be a string array.");
     }
     const instructionPath = process.argv[1];
-    fs.writeFileSync(instructionPath, `Spec completion marker convention for this build invocation:
+    const repositorySave = process.argv[2] === "repository-save";
+    if (repositorySave) {
+        const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+        for (const key of ["agent", "mode"]) {
+            if (config[key] !== undefined && !object(config[key])) {
+                throw new Error(key + " must be an object; refusing to discard existing config.");
+            }
+            if (config[key]?.build !== undefined && !object(config[key].build)) {
+                throw new Error(key + ".build must be an object; refusing to discard existing config.");
+            }
+        }
+        config.model = "azure/gpt-6-sol";
+        config.agent = {...(config.agent ?? {}), build: {...(config.agent?.build ?? {}), model: config.model}};
+        // Legacy file-based mode settings merge over agent settings upstream.
+        config.mode = {...(config.mode ?? {}), build: {...(config.mode?.build ?? {}), model: config.model}};
+    }
+    fs.writeFileSync(instructionPath, repositorySave ? `Repository-save invocation, not a spec implementation run:
+
+Read the saved spec snapshot unchanged as context only. Do not rebuild or implement
+pending specs. Inspect the existing repository status and diffs, and follow existing
+Agent.md / AGENTS.md instructions and the repository save/commit workflow.
+Validate the edited changes appropriately. The repository-save button explicitly
+authorizes saving the edited changes with focused commit(s). Inspect git status,
+git diff (including staged changes), and git log before committing. Do not include
+secrets, session artifacts (.spec-runs/, .spec-output/, .spec.lock), or unrelated
+edits. Do not push, amend, reset, change git config, or bypass hooks. Preserve
+unrelated edits. Report blockers and outcomes honestly, including validation or
+commit failures; do not claim changes were saved unless commits succeeded.
+` : `Spec completion marker convention for this build invocation:
 
 Read the saved spec snapshot unchanged. Outside code blocks, a leading single hash
 followed by a space ("# "), after optional indentation, marks that spec line as
@@ -65,10 +96,15 @@ Implement only pending requirements; retain completed requirements as context.
     console.error("[remote] Cannot prepare spec build instructions: " + error.message);
     process.exit(125);
 }
-' "$spec_build_instructions"); then
+' "$spec_build_instructions" "$spec_build_mode"); then
     exit 125
 fi
 export OPENCODE_CONFIG_CONTENT="$spec_build_config"
+if [[ $spec_build_mode == repository-save ]]; then
+    [[ -n ${4:-} ]] || exit 125
+    cd -- "$spec_build_workspace" || exit 125
+    timeout --kill-after=1s 10s bash --noprofile --norc -c "$4" -- "$spec_build_workspace" require-dirty || exit 125
+fi
 spec build "$1"
 result=$?
 if [[ "$result" -eq 127 ]]; then

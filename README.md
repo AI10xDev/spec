@@ -20,6 +20,7 @@ This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/A
 - **Completed spec lines:** press `/` to toggle the current line's `# ` completion marker; Alt+/ inserts a literal slash. The build agent is instructed to retain completed lines as context and implement only pending requirements.
 - **Trailing completions:** optional Azure-powered ghost text for the current sentence part; Tab or **Accept part** inserts it, Escape dismisses it.
 - **Optional Save & run:** explicit confirmation, immutable saved-spec input, live output polling, follow toggle, cancellation, concurrency limits, and a 15-minute timeout.
+- **Save repo changes:** shown only when the configured remote directory belongs to a Git worktree with uncommitted changes. Uses `azure/gpt-6-sol` with the existing repository workflow and the saved spec as context.
 - **Recoverable output:** reopening a saved spec restores its latest build output after browser or server restart, without rerunning the build.
 - **Separate session chat:** ask about the current nohup output, written spec, or general topics in a dedicated browser window, without adding chat to the editor/output panes.
 - **Local API protection:** loopback binding, a random access token, no permissive CORS, constrained filenames, and symlink rejection.
@@ -113,6 +114,14 @@ To trace the installed local `spec` command, check `type spec` in your interacti
 
 Open the full localhost URL printed by the **local** Rust server, including its token. **Save & run** first saves locally, then sends just that immutable spec snapshot over SSH. Other local project files are **not synced**. The remote build works in `SPEC_SSH_WORKSPACE`; its file changes remain remote. Prepare that remote checkout separately. `SPEC_WORKSPACE` is the local editor directory and is independent of the remote build directory.
 
+#### Save edited repository changes
+
+**Save repo changes** appears only for a connected, dirty Git worktree in `SPEC_SSH_WORKSPACE` (the remote build directory, not the local editor directory). Status refreshes every five seconds; probe errors hide the button. Staged, unstaged, and untracked files count, but `.spec-runs/`, `.spec-output/`, and `.spec.lock` do not. Select a nonempty spec as context to enable the button.
+
+After explicit confirmation, the UI saves the active spec locally and submits its revision to `POST /api/repository/save`. The backend rechecks the repository and unfinished harnesses, then uses the existing SSH `spec build` launcher with `azure/gpt-6-sol` and repository-save instructions instead of implementing pending spec requirements. Existing provider settings, instructions, and repository workflow are preserved. The model is instructed to validate and make focused commits, excluding secrets, session artifacts, and unrelated edits; pushing, amending, resetting, and bypassing hooks are not authorized. The remote launcher must honor the supplied OpenCode configuration.
+
+An active or unresolved harness blocks repository saves, including runs for other specs. The remote supervisor also excludes overlapping launches and refuses saves when a prior session lacks a valid terminal `status`. Inspect that session rather than assuming missing status means success. Output, cancellation, and recovery use the same **Output & logs**, **Stop run**, and **Load nohup output** controls. Logs are per-session `<spec filename>.out`, not a shared `nohup.out`. A `completed` harness means CLI exit success only: inspect its reported commit and validation results to confirm the changes were saved. No repository commits or provider calls happen merely by checking status.
+
 #### Remote shell requirements
 
 The remote machine needs Linux, Bash, `setsid`, GNU coreutils (including `stdbuf`), findutils, and a configured `spec` build alias/function (or shell launcher on PATH) with its engine/provider credentials. It does **not** need this Rust web server or Bun/Vite for the web UI.
@@ -196,13 +205,19 @@ Accepting a part waits for your next edit before requesting another suggestion, 
 
 ### Session chat
 
-Click **Open session chat** near the output controls to open a separate browser window (allow popups for this site). Chat uses the same server-side Azure configuration as trailing completions; disabling inline suggestions does not disable chat. No model call is made until you click **Ask**.
+Click **Open session chat** near the output controls to open a separate browser window (allow popups for this site). Text chat uses the same server-side Azure configuration as trailing completions; disabling inline suggestions does not disable chat. Click **Ask** or press **Enter** to send; **Shift+Enter** inserts a new line.
 
 The window stays bound to its chosen filename, even when you select another editor tab. While the source workspace remains open, it uses that file's live buffer, including unsaved edits. If the source closes or is unavailable, it explicitly falls back to the saved file; drafts and conversation are not persisted. The current written spec is never presented as the immutable input to an older build.
 
 Before each question, chat reloads the file's latest associated nohup output without launching or cancelling a build. Failed reads block the question rather than silently using stale logs. Context priority is qualitative: current session output/status as execution evidence, written spec as intent, then prior conversation for continuity. A new run clears earlier conversation on the next question. Without a run, spec and general questions still work.
 
-Questions send up to the first **64 KiB of spec**, the last **64 KiB of available output**, and four prior question/answer pairs to Azure through the authenticated API. Truncation is disclosed; remote log retention limits still apply. Questions are capped at 8 KiB, answers at 16 KiB, and provider requests at 60 seconds, sharing the four-request concurrency limit with inline completions. Chat is read-only, has no tools, and renders answers as plain text. Keep sensitive information out of submitted specs/logs and verify important claims.
+Questions send up to the first **64 KiB of spec**, the last **64 KiB of available output**, and four prior question/answer pairs to Azure through the authenticated API. Truncation is disclosed; remote log retention limits still apply. Questions are capped at 8 KiB, answers at 16 KiB, and provider requests at 60 seconds, sharing the four-request concurrency limit with inline completions. AI answers are read-only, have no tools, and render as plain text. Keep sensitive information out of submitted specs/logs and verify important claims.
+
+**Edit Agent.md** opens an inline editor for creating and saving that workspace file, with revision checks to prevent overwriting concurrent edits. See [chat editing](docs/chat-editing.md) for draft and reload behavior. Saving does not automatically install instructions into remote builds or AI conversations.
+
+The separate **OpenAI voice conversation** mic button opens **OpenAI Realtime** voice input and audio responses. Set server-side `OPENAI_API_KEY` (optionally `OPENAI_REALTIME_MODEL`, default `gpt-realtime`), restart, and reload. Voice is independent of Azure text chat and requires microphone permission on HTTPS or localhost. See [voice setup and privacy](docs/realtime.md).
+
+The **Azure OpenAI mic** button opens a separate **Azure OpenAI Realtime** panel for voice input and audio responses, preserving the OpenAI button. Select **Start Azure voice conversation** and allow microphone access. Starting either provider stops the other voice session in that chat window. Set all three server-side variables `AZURE_OPENAI_REALTIME_ENDPOINT="https://your-resource.openai.azure.com"`, `AZURE_OPENAI_REALTIME_API_KEY`, and `AZURE_OPENAI_REALTIME_DEPLOYMENT`, then restart and reload. The endpoint accepts only a canonical public Azure HTTPS resource origin, optionally ending in `/`, not an `/openai/v1` URL. Partial or invalid configuration fails startup; there is no fallback to OpenAI or Azure text credentials. The authenticated `POST /api/realtime/azure` endpoint and `azureRealtime` capability are independent of OpenAI. Azure uses GA client-secret minting followed by raw-SDP negotiation, keeping both credentials backend-side. Spec/log snapshots and microphone audio go to the selected provider and incur its charges. See [Azure setup, protocol, and privacy](docs/realtime.md#azure-setup).
 
 ### Frontend development
 
@@ -233,6 +248,11 @@ These are the Rust server's defaults when launched directly. `run.sh` supplies t
 | `DEPLOYMENT_NAME` | `gpt-5.5` | Azure completion deployment name |
 | `AZURE_OPENAI_API_VERSION` | unset | Required only for legacy Azure resource-root endpoints |
 | `SPEC_AI_ENV_FILE` | nearest `.env` in current/ancestor directories | Optional path to the server-side dotenv file shared by chat and ghost text; explicit files must exist |
+| `OPENAI_API_KEY` | unset | Server-side OpenAI Realtime key; enables `/api/realtime` independently of Azure |
+| `OPENAI_REALTIME_MODEL` | `gpt-realtime` | OpenAI Realtime model |
+| `AZURE_OPENAI_REALTIME_ENDPOINT` | unset | Azure Realtime canonical HTTPS resource origin `https://RESOURCE.openai.azure.com`; all three Azure Realtime variables required together |
+| `AZURE_OPENAI_REALTIME_API_KEY` | unset | Independent server-side Azure Realtime resource key |
+| `AZURE_OPENAI_REALTIME_DEPLOYMENT` | unset | Explicit Azure Realtime deployment name; no text/OpenAI fallback |
 
 There are no credentials bundled in this repository and no automatic service installation. The existing `spec` shell alias is not modified. Run the new binary explicitly from `backend/target/release/spec` if the old shell function shadows its name.
 
@@ -250,13 +270,15 @@ cargo build --locked
 cd ../frontend
 bun install --frozen-lockfile
 bun typecheck
-bun run test
+bun run test:unit
 bun run build
 bunx playwright install chromium
 bun run test:e2e
 ```
 
 Browser tests start isolated real Rust servers and temporary workspaces. They cover authentication, saved files, tabs, conflicts/downloads, in-flight saves, desktop/mobile layouts, and remote-build streaming/completion/cancellation/failure using a local SSH stand-in and the actual fixed remote scripts. They never use your specs or invoke a model. Screenshots are written under `frontend/test-results/`, not over the documentation image. See [validation results](docs/REVIEW.md#validation).
+
+For a timed output smoke test, run `bun run test` from `frontend/`. It prints integers 1 through 100, starting immediately and waiting 1000 milliseconds between lines, then exits successfully (about 99 seconds total). Use `bun run test:unit` for the automated unit suite.
 
 ## Repository layout and scope
 

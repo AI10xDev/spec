@@ -94,7 +94,7 @@ fn ssh_is_noninteractive_with_host_verification_and_no_forwarding() {
 }
 
 #[tokio::test]
-async fn truncated_upload_never_starts_build_and_removes_snapshot() {
+async fn truncated_upload_never_starts_build_and_persists_rejection() {
     let root = tempfile::tempdir().unwrap();
     let runner = root.path().join("unused");
     let remote = tests::remote_fixture(root.path(), &runner);
@@ -128,7 +128,18 @@ async fn truncated_upload_never_starts_build_and_removes_snapshot() {
         fs::read_dir(root.path().join(".spec-runs"))
             .unwrap()
             .count(),
-        0
+        1
+    );
+    let directory = fs::read_dir(root.path().join(".spec-runs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(!directory.join("snapshot.md").exists());
+    assert_eq!(
+        fs::read_to_string(directory.join("status")).unwrap(),
+        "125\n"
     );
 }
 
