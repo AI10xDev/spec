@@ -7,6 +7,9 @@ use tower::ServiceExt;
 #[path = "repository_tests.rs"]
 mod repository_tests;
 
+#[path = "continuation_tests.rs"]
+mod continuation_tests;
+
 pub(super) fn app(root: &FsPath) -> App {
     App {
         root: root.to_owned(),
@@ -91,6 +94,7 @@ async fn all_api_routes_require_authentication() {
         ("POST", "/api/repository/save"),
         ("GET", "/api/runs/id"),
         ("POST", "/api/runs/id/cancel"),
+        ("POST", "/api/runs/id/continue"),
     ] {
         let response = router(app(root.path()))
             .oneshot(

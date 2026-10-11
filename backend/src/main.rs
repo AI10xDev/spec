@@ -118,6 +118,14 @@ struct Run {
     revision: String,
 }
 
+enum RunInput {
+    Build(Run),
+    RepositorySave(Run),
+    Continue(String),
+}
+
+const CONTINUE_RECOMMENDED: &str = "Use the recommended option from your last response and continue the build session. Implement it now; do not stop at a plan. If no recommended option was provided, explain what input is needed rather than guessing.";
+
 #[derive(Serialize, Deserialize)]
 struct Output {
     id: String,
@@ -126,6 +134,7 @@ struct Output {
     output: String,
     truncated: bool,
     recoverable: bool,
+    continuable: bool,
 }
 
 struct Error(StatusCode, String);
@@ -315,7 +324,14 @@ async fn drain(app: App, id: String, mut stream: impl AsyncRead + Unpin) {
 }
 
 async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<serde_json::Value>> {
-    start_run(app, input, false).await
+    start_run(app, RunInput::Build(input)).await
+}
+
+async fn continue_recommended(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    start_run(app, RunInput::Continue(id)).await
 }
 
 async fn repository(State(app): State<App>) -> Result<Json<remote::RepositoryStatus>> {
@@ -338,29 +354,15 @@ async fn repository_save(
     State(app): State<App>,
     Json(input): Json<Run>,
 ) -> Result<Json<serde_json::Value>> {
-    start_run(app, input, true).await
+    start_run(app, RunInput::RepositorySave(input)).await
 }
 
-async fn start_run(app: App, input: Run, repository_save: bool) -> Result<Json<serde_json::Value>> {
+async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>> {
+    let repository_save = matches!(&input, RunInput::RepositorySave(_));
     let remote = app.remote.as_ref().ok_or_else(|| Error(
         if repository_save { StatusCode::FORBIDDEN } else { StatusCode::BAD_REQUEST },
         "Remote execution is disabled. Set SPEC_SSH_TARGET and SPEC_SSH_WORKSPACE on the local Rust server, then restart it.".into(),
     ))?;
-    let document = read(&app.root, &input.name)?;
-    if document.revision != input.revision {
-        return Err(Error(
-            StatusCode::CONFLICT,
-            "Save your current revision before running".into(),
-        ));
-    }
-    if document.content.trim().is_empty() {
-        return Err(invalid("Cannot run an empty spec"));
-    }
-    if document.content.len() > MAX_BUILD_SPEC {
-        return Err(invalid(
-            "spec build supports snapshots up to 120 KiB; larger files can still be edited and saved",
-        ));
-    }
     let _recovery_guard = app.recovery_gate.lock().await;
     recovery::initialize(&app)?;
     let pending: Vec<_> = app
@@ -374,6 +376,61 @@ async fn start_run(app: App, input: Run, repository_save: bool) -> Result<Json<s
     for id in pending {
         recovery::refresh(&app, &id, false).await?;
     }
+    let parent_id = match &input {
+        RunInput::Continue(id) => Some(id.clone()),
+        _ => None,
+    };
+    let (name, content, session_id) = match input {
+        RunInput::Build(input) | RunInput::RepositorySave(input) => {
+            let document = read(&app.root, &input.name)?;
+            if document.revision != input.revision {
+                return Err(Error(
+                    StatusCode::CONFLICT,
+                    "Save your current revision before running".into(),
+                ));
+            }
+            if document.content.trim().is_empty() {
+                return Err(invalid("Cannot run an empty spec"));
+            }
+            if document.content.len() > MAX_BUILD_SPEC {
+                return Err(invalid(
+                    "spec build supports snapshots up to 120 KiB; larger files can still be edited and saved",
+                ));
+            }
+            (document.name, document.content, None)
+        }
+        RunInput::Continue(id) => {
+            recovery::restore(&app, &id)?;
+            let name = {
+                let jobs = app.jobs.lock().unwrap();
+                let job = jobs.iter().find(|job| job.id == id).unwrap();
+                if job.recover || job.attached || job.status != "completed" || job.repository_save {
+                    return Err(Error(StatusCode::CONFLICT, "Only a completed build can be continued. Wait for completion or load its output before retrying.".into()));
+                }
+                if job.remote_identity != remote.identity() {
+                    return Err(Error(
+                        StatusCode::CONFLICT,
+                        "Remote configuration does not match the saved run".into(),
+                    ));
+                }
+                job.name.clone()
+            };
+            // The latest pointer is advanced before launch under this same gate.
+            // Retrying an old button/request cannot submit another continuation.
+            if recovery::latest(&app, &name)?.as_deref() != Some(&id) {
+                return Err(Error(
+                    StatusCode::CONFLICT,
+                    "This run is no longer the latest build. Load its output before continuing."
+                        .into(),
+                ));
+            }
+            let session = remote
+                .session_id(&id, &name)
+                .await
+                .map_err(|error| Error(StatusCode::BAD_GATEWAY, error))?;
+            (name, CONTINUE_RECOMMENDED.to_owned(), Some(session))
+        }
+    };
     // A changed SSH configuration cannot prove that an old harness finished.
     if app
         .jobs
@@ -404,7 +461,7 @@ async fn start_run(app: App, input: Run, repository_save: bool) -> Result<Json<s
     {
         let mut jobs = app.jobs.lock().unwrap();
         if jobs.iter().filter(|job| job.recover).count() >= 4
-            || jobs.iter().any(|job| job.name == input.name && job.recover)
+            || jobs.iter().any(|job| job.name == name && job.recover)
         {
             return Err(Error(
                 StatusCode::CONFLICT,
@@ -417,7 +474,7 @@ async fn start_run(app: App, input: Run, repository_save: bool) -> Result<Json<s
         }
         let mut job = Job {
             id: id.clone(),
-            name: input.name.clone(),
+            name: name.clone(),
             status: "running".into(),
             output: VecDeque::new(),
             truncated: false,
@@ -441,10 +498,12 @@ async fn start_run(app: App, input: Run, repository_save: bool) -> Result<Json<s
         jobs.push(job);
     }
     // Both operations use the same fixed adapter and durable output/status protocol.
-    let mut command = if repository_save {
-        remote.repository_command(document.content.len(), &id, &input.name)
+    let mut command = if let Some(session) = &session_id {
+        remote.continuation_command(content.len(), &id, &name, session)
+    } else if repository_save {
+        remote.repository_command(content.len(), &id, &name)
     } else {
-        remote.command(document.content.len(), &id, &input.name)
+        remote.command(content.len(), &id, &name)
     };
     let child = command
         .current_dir(&app.root)
@@ -463,6 +522,10 @@ async fn start_run(app: App, input: Run, repository_save: bool) -> Result<Json<s
             job.recover = false;
             job.attached = false;
             recovery::persist(&app, job)?;
+            // No SSH process started, so the original session is safe to retry.
+            if let Some(parent_id) = &parent_id {
+                recovery::set_latest(&app, &recovery::load(&app, parent_id)?)?;
+            }
             return Err(error.into());
         }
     };
@@ -476,7 +539,9 @@ async fn start_run(app: App, input: Run, repository_save: bool) -> Result<Json<s
         append(
             &app,
             &id,
-            if repository_save {
+            if session_id.is_some() {
+                b"[started] Submitting the recommended option and continuing the same build session with automatic tool approval.\n"
+            } else if repository_save {
                 b"[started] remote repository save over SSH: azure/gpt-6-sol with the saved snapshot as context and the existing repository workflow. Output and logs only.\n"
             } else {
                 b"[started] remote spec build over SSH: running the saved snapshot with automatic tool approval requested. Output and logs only.\n"
@@ -486,7 +551,7 @@ async fn start_run(app: App, input: Run, repository_save: bool) -> Result<Json<s
         // snapshot, so an early Stop cannot be mistaken for snapshot contents.
         let mut control = stopped.clone();
         let mut upload = tokio::spawn(async move {
-            stdin.write_all(document.content.as_bytes()).await?;
+            stdin.write_all(content.as_bytes()).await?;
             let _ = control.changed().await;
             if *control.borrow() == RunControl::Cancel {
                 stdin.write_all(b"C").await?;
@@ -578,6 +643,7 @@ async fn output(State(app): State<App>, Path(id): Path<String>) -> Result<Json<O
             .into_owned(),
         truncated: job.truncated,
         recoverable: job.recover,
+        continuable: !job.repository_save,
     }))
 }
 
@@ -623,6 +689,7 @@ async fn output_log(
         status,
         output: String::from_utf8_lossy(&bytes).into_owned(),
         truncated,
+        continuable: !job.repository_save,
     })))
 }
 
@@ -691,6 +758,7 @@ fn router(app: App) -> Router {
         .route("/api/repository/save", post(repository_save))
         .route("/api/runs/{id}", get(output))
         .route("/api/runs/{id}/cancel", post(cancel))
+        .route("/api/runs/{id}/continue", post(continue_recommended))
         .layer(DefaultBodyLimit::max(MAX_FILE * 6 + 1024))
         .route_layer(middleware::from_fn_with_state(app.clone(), authenticate))
         .with_state(app)

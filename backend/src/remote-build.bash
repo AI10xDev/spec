@@ -1,4 +1,4 @@
-# SSH attachment: workspace, bytes, alias, supervisor, UUID, name, mode, repository probe.
+# SSH attachment: workspace, bytes, alias, supervisor, UUID, name, mode, repository probe, session ID.
 # Only an explicit C byte after the snapshot cancels; EOF/signals detach.
 set -eu
 umask 077
@@ -10,8 +10,19 @@ name=$6
 [[ -n $name && $name != .* && $name != *[/\\:]* && ! $name =~ [[:cntrl:]] && ${#name} -le 180 ]] || exit 125
 log="$name.out"
 mode=${7:-build}
-[[ $mode == build || $mode == repository-save ]] || exit 125
+[[ $mode == build || $mode == repository-save || $mode == continue ]] || exit 125
 repository_probe=${8:-}
+session_id=${9:-}
+if [[ $mode == continue ]]; then
+    [[ $session_id =~ ^ses_[A-Za-z0-9]+$ && ${#session_id} -le 127 ]] || {
+        printf '%s\n' '[remote] Invalid or missing continuation session ID.' >&2
+        exit 125
+    }
+    # Continuations are builds for repository locking and supervisor lifecycle.
+    mode=build
+else
+    [[ -z $session_id ]] || exit 125
+fi
 mkdir -p .spec-runs
 [[ ! -L .spec-runs && -O .spec-runs && $(stat -c %a .spec-runs) == 700 ]] || {
     echo '[remote] .spec-runs must be an owned, private (0700) directory' >&2
@@ -44,6 +55,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 125' HUP INT TERM
 : > "$directory/$log"
+[[ -z $session_id ]] || printf '%s\n' "$session_id" > "$directory/session-id"
 reject() {
     printf '[remote] %s\n' "$1" >> "$directory/$log"
     printf '[remote] %s\n' "$1" >&2

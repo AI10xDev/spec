@@ -126,7 +126,7 @@ An active or unresolved harness blocks repository saves, including runs for othe
 
 The remote machine needs Linux, Bash, `setsid`, GNU coreutils (including `stdbuf`), findutils, and a configured `spec` build alias/function (or shell launcher on PATH) with its engine/provider credentials. It does **not** need this Rust web server or Bun/Vite for the web UI.
 
-The adapter explicitly sources the trusted remote **`~/.bash_aliases`** in noninteractive Bash with alias expansion enabled, then invokes only:
+The adapter explicitly sources the trusted remote **`~/.bash_aliases`** in noninteractive Bash with alias expansion enabled. For a new build it invokes:
 
 ```sh
 export SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1
@@ -169,7 +169,17 @@ Completed run directories older than seven days are pruned on the next launch in
 
 Keep `.spec-runs/` out of remote version control and artifact uploads, for example by adding it to that checkout's `.git/info/exclude`. Private filesystem permissions do not prevent a same-user tool from reading or committing session files.
 
-Run records and latest-run associations persist privately in the local workspace's `.spec-output/` directory. After restarting the server, connect using its newly printed token and open the spec from **Saved files** to restore its latest output and status. Live or unresolved sessions resume polling; **Recover output** retries a failed lookup without launching a build or replacing the editor buffer. Recovery requires the same remote configuration for unfinished sessions; cached finished output remains available without SSH. **Stop run** explicitly cancels a recovered session. Unresolved sessions count toward concurrency limits and block another run for the same file. This recovers logs/status, not interactive session steering or replay. Local records have no automatic disk pruning; protect them like specs because they can contain sensitive runtime output.
+Run records and latest-run associations persist privately in the local workspace's `.spec-output/` directory. After restarting the server, connect using its newly printed token and open the spec from **Saved files** to restore its latest output and status. Live or unresolved sessions resume polling; **Recover output** retries a failed lookup without launching a build or replacing the editor buffer. Recovery requires the same remote configuration for unfinished sessions; cached finished output remains available without SSH. **Stop run** explicitly cancels a recovered session. Unresolved sessions count toward concurrency limits and block another run for the same file. Recovery itself only retrieves logs/status; continuation is a separate explicit action described below. Local records have no automatic disk pruning; protect them like specs because they can contain sensitive runtime output.
+
+#### Continue a completed build
+
+**Use recommended & continue** sends a fixed follow-up asking the engine to implement its last recommended option. It immediately resumes the same engine session with automatic tool approval requested; it can modify remote files, execute tools, access the network, and incur provider costs. It does not save or upload editor changes. The button is enabled only for a completed, confirmed build, not a repository save, failed run, or active run. The backend additionally requires that run to be the latest for its spec and match the current remote configuration.
+
+Continuation requires remote `opencode-source` in `~/.bash_aliases` or on PATH. It invokes `opencode-source run --dir "$workspace" --session "$session_id" --agent build "$prompt"`, not `spec build`. This launcher must use the same engine session storage and configuration as the original build. An installation whose `spec` launcher uses only `opencode` needs a compatible `opencode-source` launcher before using continuation; the adapter does not automatically select another engine.
+
+New builds install a temporary OpenCode plugin to capture the first root session ID in a private `session-id` file. The remote engine must honor the supplemental plugin configuration. Builds without that metadata, including older runs, cannot be continued; start a new build instead. Each continuation creates a separate harness/log directory while retaining the engine session ID and prior logs.
+
+Duplicate requests for an older run are rejected once its continuation is submitted. Missing session metadata and local SSH spawn failures leave the original run retryable. After SSH starts, failures (including remote launcher/configuration rejection) do not restore the old run's retry eligibility: the adapter cannot safely assume the engine did not execute. Inspect the logs and remote session before starting a new build; there is no automatic retry or failed-run continuation.
 
 Builds are capped at **120 KiB** because some existing launchers forward the prompt as one Linux process argument. Editing/saving support 2 MiB. Remote launchers using Bash command substitution may strip trailing newlines and must use an end-of-options separator when passing prompts to their engine.
 

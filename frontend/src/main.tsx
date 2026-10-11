@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { dirty, openTab, savedTab } from "./tabs"
-import type { Document, Output, Tab } from "./tabs"
+import type { Document, Output as RunOutput, Tab } from "./tabs"
 import { Editor } from "./editor"
 import { Chat } from "./chat"
 import "./style.css"
 
 type Entry = { name: string; modified: number; bytes: number }
 type Repository = { connected: boolean; dirty: boolean; directory: string | null; model: string }
+type Output = RunOutput & { continuable: boolean }
 const chatName = new URLSearchParams(location.search).get("chat")
 
 function App() {
@@ -35,6 +36,7 @@ function App() {
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
   const [busy, setBusy] = useState(false)
+  const submitting = useRef(false)
   const [repository, setRepository] = useState<Repository | null>(null)
   const [repositoryError, setRepositoryError] = useState("")
   const [outputs, setOutputs] = useState<Record<string, Output>>({})
@@ -228,7 +230,8 @@ function App() {
   }
 
   async function save(mode: "file" | "build" | "repository" = "file") {
-    if (!tab || busy) return
+    if (!tab || busy || submitting.current) return
+    submitting.current = true
     setBusy(true)
     setError("")
     try {
@@ -238,9 +241,24 @@ function App() {
       await refresh()
       if (mode === "file") return
       const job = await api<{ id: string }>(mode === "repository" ? "/repository/save" : "/runs", { name: document.name, revision: document.revision })
-      setOutputs((items) => ({ ...items, [document.name]: { ...job, name: document.name, output: "Starting…", status: "running", truncated: false, recoverable: true } }))
+      setOutputs((items) => ({ ...items, [document.name]: { ...job, name: document.name, output: "Starting…", status: "running", truncated: false, recoverable: true, continuable: mode !== "repository" } }))
       if (mode === "repository") setNotice(`Repository save submitted to ${repository?.model ?? "azure/gpt-6-sol"}. Check Output & logs for the result.`)
-    } catch (error) { fail(error) } finally { setBusy(false) }
+    } catch (error) { fail(error) } finally { submitting.current = false; setBusy(false) }
+  }
+
+  async function continueRun() {
+    if (busy || submitting.current || !execution || !output || output.status !== "completed" || output.recoverable || output.continuable !== true) return
+    const { id, name } = output
+    submitting.current = true
+    setBusy(true)
+    setError("")
+    setNotice(`Submitting recommendation for ${name}...`)
+    try {
+      const job = await api<{ id: string }>(`/runs/${id}/continue`, {})
+      setOutputs((items) => ({ ...items, [name]: { ...job, name, output: "Starting...", status: "running", truncated: false, recoverable: true, continuable: true } }))
+      setFollow(true)
+      setNotice(`Recommended choice submitted to the same session for ${name}. Check Output & logs for the result.`)
+    } catch (error) { setNotice(""); fail(error) } finally { submitting.current = false; setBusy(false) }
   }
 
   function download() {
@@ -329,7 +347,7 @@ function App() {
           <section className="output-pane" aria-label="Output and logs pane">
             <div className="pane-heading"><div><span className="eyebrow">02 / OUTPUT</span><h2>Output & logs</h2></div><span className="badge">{output?.status ?? "Idle"}</span></div>
             {tab && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>Spec + current nohup output in a separate window</span></div>}
-            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{tab?.revision && <button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button>}{output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}</div>
+            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{tab?.revision && <button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button>}{output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && <button disabled={busy || !execution || output.status !== "completed" || output.recoverable || output.continuable !== true} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
             <pre ref={log} className="output" aria-label="Run output">{output?.output ?? (execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
             <footer className="output-footer">{output && <span>Harness: {output.status}{output.recoverable ? " (completion not confirmed)" : ""}. CLI success alone does not verify saved changes.<br /></span>}Available output only. No hidden model reasoning is requested.</footer>

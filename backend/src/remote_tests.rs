@@ -1144,8 +1144,10 @@ fixture_build() {{
 const fs = require("node:fs");
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
 const path = config.instructions[config.instructions.length - 1];
+const plugin = require("node:url").fileURLToPath(config.plugin[config.plugin.length - 1]);
 process.stdout.write(JSON.stringify({{
-    args: process.argv.slice(1), config, path,
+    args: process.argv.slice(1), config, path, plugin,
+    pluginMode: fs.statSync(plugin).mode & 0o777,
     instructions: fs.readFileSync(path, "utf8"),
     mode: fs.statSync(path).mode & 0o777,
     snapshot: fs.readFileSync(process.argv[2], "utf8"),
@@ -1185,7 +1187,7 @@ process.stdout.write(JSON.stringify({{
             assert_eq!(
                 fs::read_dir(&run).unwrap().count(),
                 2,
-                "instruction file leaked"
+                "instruction or plugin file leaked"
             );
             if let Some(error) = error {
                 assert!(String::from_utf8_lossy(&output.stderr).contains(error));
@@ -1202,6 +1204,11 @@ process.stdout.write(JSON.stringify({{
             assert!(path.is_absolute());
             assert_eq!(path.parent().unwrap(), run);
             assert!(!path.exists());
+            let plugin = PathBuf::from(observed["plugin"].as_str().unwrap());
+            assert_eq!(observed["pluginMode"], 0o600);
+            assert!(plugin.is_absolute());
+            assert_eq!(plugin.parent().unwrap(), run);
+            assert!(!plugin.exists(), "capture plugin leaked after build");
             let mut expected: serde_json::Value =
                 serde_json::from_str(content.unwrap_or("{}")).unwrap();
             let mut instructions = expected["instructions"]
@@ -1210,6 +1217,16 @@ process.stdout.write(JSON.stringify({{
                 .unwrap_or_default();
             instructions.push(serde_json::json!(path));
             expected["instructions"] = serde_json::json!(instructions);
+            let mut plugins = expected["plugin"].as_array().cloned().unwrap_or_default();
+            plugins.push(
+                observed["config"]["plugin"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .clone(),
+            );
+            expected["plugin"] = serde_json::json!(plugins);
             assert_eq!(observed["config"], expected);
             let text = observed["instructions"].as_str().unwrap();
             for rule in [

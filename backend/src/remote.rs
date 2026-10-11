@@ -3,6 +3,10 @@ use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Stdio, time:
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+#[cfg(test)]
+#[path = "continuation_remote_tests.rs"]
+mod continuation_remote_tests;
+
 #[derive(serde::Serialize)]
 pub struct RepositoryStatus {
     pub connected: bool,
@@ -146,16 +150,33 @@ impl Remote {
     }
 
     pub fn command(&self, bytes: usize, id: &str, name: &str) -> Command {
-        self.build_command(bytes, id, name, "build")
+        self.build_command(bytes, id, name, "build", "")
     }
 
     pub fn repository_command(&self, bytes: usize, id: &str, name: &str) -> Command {
-        self.build_command(bytes, id, name, "repository-save")
+        self.build_command(bytes, id, name, "repository-save", "")
     }
 
-    fn build_command(&self, bytes: usize, id: &str, name: &str, mode: &str) -> Command {
+    pub fn continuation_command(
+        &self,
+        bytes: usize,
+        id: &str,
+        name: &str,
+        session_id: &str,
+    ) -> Command {
+        self.build_command(bytes, id, name, "continue", session_id)
+    }
+
+    fn build_command(
+        &self,
+        bytes: usize,
+        id: &str,
+        name: &str,
+        mode: &str,
+        session_id: &str,
+    ) -> Command {
         self.ssh(format!(
-            "bash -c {} -- {} {} {} {} {} {} {} {}",
+            "bash -c {} -- {} {} {} {} {} {} {} {} {}",
             quote(include_str!("remote-build.bash")),
             quote(&self.directory),
             bytes,
@@ -165,7 +186,84 @@ impl Remote {
             quote(name),
             quote(mode),
             quote(include_str!("remote-repository.bash")),
+            quote(session_id),
         ))
+    }
+
+    pub async fn session_id(&self, id: &str, name: &str) -> Result<String, String> {
+        let mut child = self
+            .ssh(format!(
+                "timeout --kill-after=1s 10s bash --noprofile --norc -c {} -- {} {} {}",
+                quote(include_str!("remote-session.bash")),
+                quote(&self.directory),
+                quote(id),
+                quote(name),
+            ))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let pid = child.id().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            // Abort on either limit without waiting for the other pipe to close.
+            let (out, err) = tokio::try_join!(
+                async {
+                    let mut out = Vec::new();
+                    stdout
+                        .take(129)
+                        .read_to_end(&mut out)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if out.len() > 128 {
+                        return Err("remote session response exceeded limit".to_owned());
+                    }
+                    Ok(out)
+                },
+                async {
+                    let mut err = Vec::new();
+                    stderr
+                        .take(4097)
+                        .read_to_end(&mut err)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if err.len() > 4096 {
+                        return Err("remote session response exceeded limit".to_owned());
+                    }
+                    Ok(err)
+                }
+            )?;
+            let exit = child.wait().await.map_err(|e| e.to_string())?;
+            if !exit.success() {
+                return Err(format!(
+                    "remote session lookup {exit}: {}",
+                    String::from_utf8_lossy(&err).trim()
+                ));
+            }
+            let text = std::str::from_utf8(&out).map_err(|_| "invalid remote session ID")?;
+            let session = text.strip_suffix('\n').ok_or("invalid remote session ID")?;
+            let suffix = session
+                .strip_prefix("ses_")
+                .ok_or("invalid remote session ID")?;
+            if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                return Err("invalid remote session ID".into());
+            }
+            Ok(session.to_owned())
+        })
+        .await
+        .unwrap_or_else(|_| Err("remote session lookup timed out".to_owned()));
+        if result.is_err() {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+            let _ = child.kill().await;
+        }
+        result
     }
 
     pub async fn repository_status(&self) -> Result<RepositoryStatus, String> {
