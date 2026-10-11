@@ -39,13 +39,19 @@ application token; the concurrency limit is not a billing quota or rate limit.
 
 ### Azure Setup
 
-Set all three variables in the Rust server's environment and restart:
+Set all three variables in the repository-root `.env` (or the file selected by
+`SPEC_AI_ENV_FILE`) and restart the Rust server:
 
 ```sh
-export AZURE_OPENAI_REALTIME_ENDPOINT="https://YOUR-RESOURCE.openai.azure.com"
-export AZURE_OPENAI_REALTIME_API_KEY="YOUR-AZURE-REALTIME-KEY"
-export AZURE_OPENAI_REALTIME_DEPLOYMENT="YOUR-REALTIME-DEPLOYMENT"
+AZURE_OPENAI_REALTIME_ENDPOINT="https://YOUR-RESOURCE.openai.azure.com"
+AZURE_OPENAI_REALTIME_API_KEY="YOUR-AZURE-REALTIME-KEY"
+AZURE_OPENAI_REALTIME_DEPLOYMENT="YOUR-REALTIME-DEPLOYMENT"
 ```
+
+Without an explicit file, the server discovers the nearest `.env` in its current
+or ancestor directories. Exported environment variables override file values.
+These dedicated voice settings do not replace or modify text-chat settings;
+leave the existing text endpoint, key, and deployment unchanged.
 
 Replace placeholders with the resource's actual lowercase hostname and a deployed
 Realtime model's deployment name, not the text-chat deployment. The endpoint must

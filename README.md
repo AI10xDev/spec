@@ -257,12 +257,16 @@ These are the Rust server's defaults when launched directly. `run.sh` supplies t
 | `AZURE_OPENAI_API_KEY` | unset | Server-side Azure completion key; required with the endpoint |
 | `DEPLOYMENT_NAME` | `gpt-5.5` | Azure completion deployment name |
 | `AZURE_OPENAI_API_VERSION` | unset | Required only for legacy Azure resource-root endpoints |
-| `SPEC_AI_ENV_FILE` | nearest `.env` in current/ancestor directories | Optional path to the server-side dotenv file shared by chat and ghost text; explicit files must exist |
+| `SPEC_AI_ENV_FILE` | nearest `.env` in current/ancestor directories | Optional path to the server-side dotenv file shared by chat, ghost text, and Azure Realtime voice; explicit files must exist |
 | `OPENAI_API_KEY` | unset | Server-side OpenAI Realtime key; enables `/api/realtime` independently of Azure |
 | `OPENAI_REALTIME_MODEL` | `gpt-realtime` | OpenAI Realtime model |
 | `AZURE_OPENAI_REALTIME_ENDPOINT` | unset | Azure Realtime canonical HTTPS resource origin `https://RESOURCE.openai.azure.com`; all three Azure Realtime variables required together |
 | `AZURE_OPENAI_REALTIME_API_KEY` | unset | Independent server-side Azure Realtime resource key |
 | `AZURE_OPENAI_REALTIME_DEPLOYMENT` | unset | Explicit Azure Realtime deployment name; no text/OpenAI fallback |
+
+Azure Realtime's three dedicated variables can be set in the same `.env` as text
+chat without changing text settings. Exported environment variables take
+precedence. Restart the server after changing configuration.
 
 There are no credentials bundled in this repository and no automatic service installation. The existing `spec` shell alias is not modified. Run the new binary explicitly from `backend/target/release/spec` if the old shell function shadows its name.
 

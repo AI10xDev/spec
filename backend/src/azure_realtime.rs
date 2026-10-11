@@ -27,9 +27,10 @@ pub struct AzureRealtime {
 
 impl AzureRealtime {
     pub fn from_env() -> std::result::Result<Option<Self>, &'static str> {
+        let settings = crate::ai_settings::from_env()?;
         let get = |name| match std::env::var(name) {
             Ok(value) => Ok(Some(value)),
-            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotPresent) => Ok(settings.get(name).cloned()),
             Err(_) => Err("Azure Realtime configuration must be valid UTF-8"),
         };
         Self::configured(

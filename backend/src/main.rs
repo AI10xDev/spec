@@ -29,6 +29,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use uuid::Uuid;
 
+mod ai_settings;
 mod azure_realtime;
 mod chat;
 mod completion;
