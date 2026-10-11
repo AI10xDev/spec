@@ -39,8 +39,8 @@ application token; the concurrency limit is not a billing quota or rate limit.
 
 ### Azure Setup
 
-Set all three variables in the repository-root `.env` (or the file selected by
-`SPEC_AI_ENV_FILE`) and restart the Rust server:
+Set all three variables in the **local Rust server's environment** or a private
+server-side dotenv file, then restart the server and reload the browser:
 
 ```sh
 AZURE_OPENAI_REALTIME_ENDPOINT="https://YOUR-RESOURCE.openai.azure.com"
@@ -48,10 +48,30 @@ AZURE_OPENAI_REALTIME_API_KEY="YOUR-AZURE-REALTIME-KEY"
 AZURE_OPENAI_REALTIME_DEPLOYMENT="YOUR-REALTIME-DEPLOYMENT"
 ```
 
-Without an explicit file, the server discovers the nearest `.env` in its current
-or ancestor directories. Exported environment variables override file values.
+To use an existing private voice-only dotenv file without changing text settings,
+launch from the repository root on the end user's machine:
+
+```sh
+SPEC_AZURE_REALTIME_ENV_FILE="$HOME/.config/spec/azure-voice.env" ./run.sh --local
+```
+
+Use your actual existing file path; omit `--local` if you also want remote builds.
+This exports the selector to the server without sourcing the file or changing
+`SPEC_AI_ENV_FILE` or any text variables. Export `SPEC_AZURE_REALTIME_ENV_FILE` in
+the launch environment, not inside a dotenv file. An absolute path is recommended
+because `run.sh` starts the server from `backend/`.
+
+An explicit `SPEC_AZURE_REALTIME_ENV_FILE` replaces the shared file for Azure voice
+only; its missing values are not filled from the shared file. If unset, Azure
+voice uses `SPEC_AI_ENV_FILE`, or the nearest `.env` in the server's current or
+ancestor directories. Process `AZURE_OPENAI_REALTIME_*` exports override file
+values, including empty exports. Unset an unwanted export to use the file value.
 These dedicated voice settings do not replace or modify text-chat settings;
 leave the existing text endpoint, key, and deployment unchanged.
+
+Browser and remote build environments are not automatically transferred to the
+local Rust server. Configure the machine and process actually running that server;
+never put secrets in the browser, frontend environment variables, or source code.
 
 Replace placeholders with the resource's actual lowercase hostname and a deployed
 Realtime model's deployment name, not the text-chat deployment. The endpoint must
@@ -63,7 +83,11 @@ allowlist. The key is nonempty printable ASCII without whitespace, at most 4096
 bytes; the deployment is 1-128 ASCII letters/digits/`-_.`, excluding `.` and `..`.
 
 All three absent disables Azure voice. Partial, empty, invalid, or non-UTF-8
-configuration fails startup without printing values. There is no default Azure
+Azure voice configuration, including an unreadable or malformed explicit voice
+file, disables Azure voice only and emits a sanitized stderr warning without
+printing values; it does not abort the text server. Shared text configuration
+errors still fail startup. Fix the local voice settings, restart the server, and
+reload the browser. There is no default Azure
 deployment and no fallback to `OPENAI_API_KEY`, `OPENAI_REALTIME_MODEL`,
 `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `DEPLOYMENT_NAME`, or text API
 version settings. OpenAI voice, Azure voice, and Azure text can be configured

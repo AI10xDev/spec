@@ -240,6 +240,7 @@ export function Realtime({ api, available, provider, onStart, context }: Props) 
       <h2 id={`${id}-heading`}>{service} Realtime voice conversation</h2>
       <p className="hint" id={`${id}-privacy`}>Starting sends a snapshot of this file's name, current spec and available output to {service}. Your microphone transmits audio to {service} while connected, including while assistant audio plays. Stop or close this panel to turn it off. Context is refreshed only when starting a new voice session; text chat stays separate. Starting either provider stops the other voice session.</p>
       {!available && <p className="hint">{service} Realtime voice is not configured on the server. Text chat is independent.</p>}
+      {!available && azure && <p className="hint">Set <code>AZURE_OPENAI_REALTIME_ENDPOINT</code>, <code>AZURE_OPENAI_REALTIME_API_KEY</code>, and <code>AZURE_OPENAI_REALTIME_DEPLOYMENT</code> in the local Rust server's environment, or export <code>SPEC_AZURE_REALTIME_ENV_FILE</code> pointing to an existing private voice-only dotenv file (absolute path recommended). Leave text-chat settings unchanged. Restart the server and reload this page. Browser and remote build environments are not automatically transferred to the local server. Never put secrets in the browser.</p>}
       {unsupported && <p className="hint">{unsupported}</p>}
       <p role="status" aria-live="polite">{status}</p>
       {error && <p className="error" role="alert">{error}</p>}

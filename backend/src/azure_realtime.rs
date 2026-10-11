@@ -27,7 +27,14 @@ pub struct AzureRealtime {
 
 impl AzureRealtime {
     pub fn from_env() -> std::result::Result<Option<Self>, &'static str> {
-        let settings = crate::ai_settings::from_env()?;
+        // A voice-only file must not replace the settings used by text chat.
+        let settings = match std::env::var_os("SPEC_AZURE_REALTIME_ENV_FILE") {
+            Some(path) => dotenvy::from_path_iter(path)
+                .map_err(|_| "Could not read SPEC_AZURE_REALTIME_ENV_FILE")?
+                .collect::<std::result::Result<std::collections::HashMap<String, String>, _>>()
+                .map_err(|_| "Invalid Azure Realtime settings file; check dotenv syntax")?,
+            None => crate::ai_settings::from_env()?,
+        };
         let get = |name| match std::env::var(name) {
             Ok(value) => Ok(Some(value)),
             Err(std::env::VarError::NotPresent) => Ok(settings.get(name).cloned()),

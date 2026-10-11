@@ -141,6 +141,7 @@ test.beforeAll(async () => {
       SPEC_COMMAND: undefined, SPEC_SSH_TARGET: undefined, SPEC_SSH_WORKSPACE: undefined,
       SPEC_SSH_KEY: undefined, SPEC_SSH_BINARY: undefined, SPEC_OPENCODE: undefined,
       SPEC_SSH_DIR: undefined, SPEC_SSH_IDENTITY: undefined, SPEC_AI_ENV_FILE: "/dev/null",
+      SPEC_AZURE_REALTIME_ENV_FILE: undefined,
       AZURE_OPENAI_ENDPOINT: undefined, AZURE_OPENAI_API_KEY: undefined,
       DEPLOYMENT_NAME: undefined, AZURE_OPENAI_API_VERSION: undefined,
       OPENAI_API_KEY: undefined, OPENAI_REALTIME_MODEL: undefined,
@@ -511,12 +512,32 @@ test("Azure mic works independently, sends fresh context to its authenticated ro
   await expectReleased(chat)
 })
 
-test("unconfigured Azure mic leaves OpenAI voice available", async ({ page, context }) => {
+test("unconfigured Azure mic explains local setup without disabling text chat or OpenAI voice at 320px", async ({ page, context }) => {
   await context.route("**/api/config", (route) => route.fulfill({ json: { execution: true, completion: false, chat: true, realtime: true, azureRealtime: false } }))
   const chat = await openChat(page)
   await chat.getByRole("button", { name: "Open Azure OpenAI Realtime voice conversation (mic button)", exact: true }).click()
   await expect(chat.getByRole("button", { name: "Start Azure voice conversation", exact: true })).toBeDisabled()
-  await expect(chat.getByText("Azure OpenAI Realtime voice is not configured on the server. Text chat is independent.")).toBeVisible()
+  await expect(chat.getByText("Azure OpenAI Realtime voice is not configured on the server. Text chat is independent.", { exact: true })).toBeVisible()
+  const panel = chat.getByRole("region", { name: "Azure OpenAI Realtime voice conversation", exact: true })
+  await expect(panel.locator("code")).toHaveText([
+    "AZURE_OPENAI_REALTIME_ENDPOINT", "AZURE_OPENAI_REALTIME_API_KEY",
+    "AZURE_OPENAI_REALTIME_DEPLOYMENT", "SPEC_AZURE_REALTIME_ENV_FILE",
+  ])
+  await expect(panel).toContainText("local Rust server's environment")
+  await expect(panel).toContainText("export SPEC_AZURE_REALTIME_ENV_FILE pointing to an existing private voice-only dotenv file (absolute path recommended)")
+  await expect(panel).toContainText("Leave text-chat settings unchanged. Restart the server and reload this page.")
+  await expect(panel).toContainText("Browser and remote build environments are not automatically transferred to the local server.")
+  await expect(panel).toContainText("Never put secrets in the browser.")
+  await chat.setViewportSize({ width: 320, height: 740 })
+  expect(await chat.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  expect(await panel.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  await expect(chat.getByRole("textbox", { name: "Your question" })).toBeEnabled()
+  await chat.getByRole("textbox", { name: "Your question" }).fill("Can text still work without Azure voice?")
+  await expect(chat.getByRole("button", { name: "Ask", exact: true })).toBeEnabled()
+  await chat.getByRole("button", { name: "Ask", exact: true }).click()
+  await expect(chat.getByRole("log", { name: "Conversation", exact: true })).toContainText("Independent text answer")
+  expect(await chat.evaluate(() => window.__realtimeTest.permissions)).toBe(0)
+  expect(requests).toEqual([])
   await start(chat)
   expect(requests).toHaveLength(1)
   await chat.getByRole("button", { name: "Stop voice conversation", exact: true }).click()

@@ -1,6 +1,9 @@
 use serde_json::{Value, json};
 use std::{path::Path, process::Stdio, time::Duration};
-use tokio::{io::AsyncBufReadExt, process::Command};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt},
+    process::Command,
+};
 
 const SETTINGS: &str = "export AZURE_OPENAI_ENDPOINT='https://azure.test/openai/v1'\nAZURE_OPENAI_API_KEY=mock-secret\nDEPLOYMENT_NAME=test-model\n";
 const VOICE_SETTINGS: &str = "AZURE_OPENAI_REALTIME_ENDPOINT=https://voice.openai.azure.com\nAZURE_OPENAI_REALTIME_API_KEY=mock-voice-secret\nAZURE_OPENAI_REALTIME_DEPLOYMENT=voice-model\n";
@@ -18,7 +21,7 @@ fn server(directory: &Path) -> Command {
     command
 }
 
-async fn assert_config(mut command: Command, enabled: bool, voice_enabled: bool) {
+async fn assert_config(mut command: Command, enabled: bool, voice_enabled: bool) -> String {
     let mut child = command.spawn().unwrap();
     let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
     let address = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
@@ -52,6 +55,17 @@ async fn assert_config(mut command: Command, enabled: bool, voice_enabled: bool)
         })
     );
     child.kill().await.unwrap();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .await
+        .unwrap();
+    assert!(!stderr.contains("mock-secret"));
+    assert!(!stderr.contains("mock-voice-secret"));
+    stderr
 }
 
 #[tokio::test]
@@ -125,24 +139,98 @@ async fn explicit_voice_file_respects_exported_overrides() {
 #[tokio::test]
 async fn empty_export_does_not_fall_back_to_voice_file() {
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join(".env"), VOICE_SETTINGS).unwrap();
-    let output = tokio::time::timeout(
-        Duration::from_secs(10),
-        server(root.path())
-            .env("AZURE_OPENAI_REALTIME_API_KEY", "")
-            .output(),
+    std::fs::write(
+        root.path().join(".env"),
+        format!("{SETTINGS}{VOICE_SETTINGS}"),
     )
-    .await
-    .unwrap()
     .unwrap();
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    let mut command = server(root.path());
+    command.env("AZURE_OPENAI_REALTIME_API_KEY", "");
+    let stderr = assert_config(command, true, false).await;
     assert!(stderr.contains("AZURE_OPENAI_REALTIME_API_KEY must be nonempty"));
-    assert!(!stderr.contains("mock-voice-secret"));
 }
 
 #[tokio::test]
-async fn missing_partial_and_malformed_files_fail_without_exposing_keys() {
+async fn voice_only_file_does_not_replace_text_settings() {
+    for text_enabled in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let text = if text_enabled { SETTINGS } else { "" };
+        std::fs::write(root.path().join(".env"), text).unwrap();
+        let file = root.path().join("voice.env");
+        // Text values in this file are ignored, even when invalid.
+        std::fs::write(
+            &file,
+            format!("{VOICE_SETTINGS}AZURE_OPENAI_ENDPOINT=invalid\nAZURE_OPENAI_API_KEY=\n"),
+        )
+        .unwrap();
+        let mut command = server(root.path());
+        command.env("SPEC_AZURE_REALTIME_ENV_FILE", &file);
+        assert_config(command, text_enabled, true).await;
+    }
+}
+
+#[tokio::test]
+async fn voice_only_file_replaces_shared_voice_settings_and_exports_win() {
+    let root = tempfile::tempdir().unwrap();
+    let shared = root.path().join("ai.env");
+    std::fs::write(&shared, format!("{SETTINGS}{VOICE_SETTINGS}")).unwrap();
+    let voice = root.path().join("voice.env");
+    std::fs::write(&voice, "").unwrap();
+    let mut command = server(root.path());
+    command
+        .env("SPEC_AI_ENV_FILE", &shared)
+        .env("SPEC_AZURE_REALTIME_ENV_FILE", &voice);
+    assert_config(command, true, false).await;
+
+    std::fs::write(&voice, "AZURE_OPENAI_REALTIME_ENDPOINT=invalid\nAZURE_OPENAI_REALTIME_API_KEY=\nAZURE_OPENAI_REALTIME_DEPLOYMENT=\n").unwrap();
+    let mut command = server(root.path());
+    command
+        .env("SPEC_AI_ENV_FILE", &shared)
+        .env("SPEC_AZURE_REALTIME_ENV_FILE", &voice)
+        .env(
+            "AZURE_OPENAI_REALTIME_ENDPOINT",
+            "https://voice.openai.azure.com",
+        )
+        .env("AZURE_OPENAI_REALTIME_API_KEY", "mock-voice-secret")
+        .env("AZURE_OPENAI_REALTIME_DEPLOYMENT", "voice-model");
+    assert_config(command, true, true).await;
+}
+
+#[tokio::test]
+async fn invalid_voice_configuration_keeps_text_available_without_exposing_keys() {
+    for (settings, expected) in [
+        (None, "Could not read SPEC_AZURE_REALTIME_ENV_FILE"),
+        (
+            Some("AZURE_OPENAI_REALTIME_API_KEY='mock-voice-secret\n"),
+            "Invalid Azure Realtime settings file",
+        ),
+        (
+            Some("AZURE_OPENAI_REALTIME_API_KEY=mock-voice-secret\n"),
+            "Set AZURE_OPENAI_REALTIME_ENDPOINT",
+        ),
+        (
+            Some(
+                "AZURE_OPENAI_REALTIME_ENDPOINT=https://voice.openai.azure.com/openai/v1\nAZURE_OPENAI_REALTIME_API_KEY=mock-voice-secret\nAZURE_OPENAI_REALTIME_DEPLOYMENT=voice-model\n",
+            ),
+            "AZURE_OPENAI_REALTIME_ENDPOINT must be a canonical HTTPS resource origin",
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".env"), SETTINGS).unwrap();
+        let file = root.path().join("voice.env");
+        if let Some(settings) = settings {
+            std::fs::write(&file, settings).unwrap();
+        }
+        let mut command = server(root.path());
+        command.env("SPEC_AZURE_REALTIME_ENV_FILE", &file);
+        let stderr = assert_config(command, true, false).await;
+        assert!(stderr.contains("Azure Realtime voice disabled:"));
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+}
+
+#[tokio::test]
+async fn missing_partial_and_malformed_text_files_still_fail_without_exposing_keys() {
     for (settings, expected) in [
         (None, "Could not read SPEC_AI_ENV_FILE"),
         (
@@ -152,16 +240,6 @@ async fn missing_partial_and_malformed_files_fail_without_exposing_keys() {
         (
             Some("AZURE_OPENAI_API_KEY='mock-secret\n"),
             "Invalid AI settings file",
-        ),
-        (
-            Some("AZURE_OPENAI_REALTIME_API_KEY=mock-secret\n"),
-            "Set AZURE_OPENAI_REALTIME_ENDPOINT",
-        ),
-        (
-            Some(
-                "AZURE_OPENAI_REALTIME_ENDPOINT=https://voice.openai.azure.com/openai/v1\nAZURE_OPENAI_REALTIME_API_KEY=mock-secret\nAZURE_OPENAI_REALTIME_DEPLOYMENT=voice-model\n",
-            ),
-            "AZURE_OPENAI_REALTIME_ENDPOINT must be a canonical HTTPS resource origin",
         ),
     ] {
         let root = tempfile::tempdir().unwrap();

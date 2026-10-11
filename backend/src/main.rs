@@ -790,7 +790,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let remote = Remote::from_env()?;
     let completion = Completion::from_env()?;
     let realtime = Realtime::from_env()?;
-    let azure_realtime = AzureRealtime::from_env()?;
+    let azure_realtime = AzureRealtime::from_env().unwrap_or_else(|error| {
+        eprintln!("Azure Realtime voice disabled: {error}. Text chat configuration is unchanged.");
+        None
+    });
     let app = App {
         root,
         token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
@@ -818,6 +821,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     } else {
         println!(
             "AI chat and ghost text: disabled. Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env or the server environment; see .env.example. Then restart the server and reload."
+        );
+    }
+    if app.azure_realtime.is_some() {
+        println!("Azure Realtime voice: enabled");
+    } else {
+        println!(
+            "Azure Realtime voice: disabled. Set AZURE_OPENAI_REALTIME_ENDPOINT, AZURE_OPENAI_REALTIME_API_KEY, and AZURE_OPENAI_REALTIME_DEPLOYMENT in the local server environment, .env, or SPEC_AZURE_REALTIME_ENV_FILE. Then restart the server and reload."
         );
     }
     if app.remote.is_some() {
