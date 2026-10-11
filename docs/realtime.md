@@ -93,6 +93,42 @@ deployment and no fallback to `OPENAI_API_KEY`, `OPENAI_REALTIME_MODEL`,
 version settings. OpenAI voice, Azure voice, and Azure text can be configured
 independently or together. Capability booleans are not connectivity checks.
 
+### Azure CLI Launcher
+
+On the machine running the server, sign in with `az login` and select the intended
+subscription with `az account set --subscription YOUR-SUBSCRIPTION`. From the
+repository root, launch using an existing Realtime deployment:
+
+```sh
+bash scripts/azure-voice.bash RESOURCE_GROUP RESOURCE REALTIME_DEPLOYMENT ./run.sh --local
+```
+
+The launcher retrieves the resource's custom domain and key through Azure CLI,
+and exports only the three `AZURE_OPENAI_REALTIME_*` settings to the command it
+starts. It does not write credentials to disk, print the key, change text
+variables, rotate keys, or provision resources. The signed-in identity needs
+permission to read the resource and list its keys. Azure public-cloud resources
+with local API-key authentication enabled are required.
+
+All three existing local voice exports take precedence without calling Azure.
+Empty or partial exports are rejected rather than mixing credentials from
+different resources. With no voice exports, an existing
+`SPEC_AZURE_REALTIME_ENV_FILE` takes precedence and is read by the server as usual.
+An explicitly empty file selector is rejected; unset it or supply a file path.
+Otherwise the CLI-derived exports override voice values in the shared dotenv
+file. Text settings and `SPEC_AI_ENV_FILE` remain unchanged.
+
+Provider-side provisioning alone cannot update an already-running local server.
+Restart it through this launcher, reload the browser, and check authenticated
+`GET /api/config` for `azureRealtime: true`. Then test microphone audio; that
+capability flag checks configuration only, not provider connectivity. Realtime
+usage is billed by Azure.
+
+Launcher isolation tests (mock Azure CLI, no credentials or network required):
+`node --test scripts/azure-voice.test.cjs`.
+
+### Using Azure Voice
+
 In session chat, select the separate **Azure OpenAI mic** button, then **Start
 Azure voice conversation**. Its panel is labeled **Azure OpenAI Realtime voice
 conversation**. Starting is enabled by `azureRealtime` and uses
