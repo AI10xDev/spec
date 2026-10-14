@@ -871,6 +871,7 @@ mod tests {
                 remote_identity: "unused".into(),
                 recover: true,
                 repository_save: false,
+                optimization: false,
                 stop,
                 attached: true,
                 dirty: true,

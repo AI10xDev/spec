@@ -1,7 +1,8 @@
-# Detached owner of the snapshot, build group, bounded log, and final status.
+# Detached owner of the snapshot, build group, log, and final status.
 set -eu
 umask 077
 directory=$1
+mode=${4:-build}
 registry_record=${6:-}
 pid=
 logger=
@@ -9,6 +10,14 @@ result=125
 cleanup() {
     trap - EXIT INT TERM
     if [[ -n "$pid" ]]; then
+        if [[ $mode == optimize ]] && kill -0 "$pid" 2>/dev/null; then
+            # Let the optimizer flush its interrupted report before reaping the group.
+            kill -TERM -- "-$pid" 2>/dev/null || true
+            for ((attempt=0; attempt<50; attempt++)); do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 0.1
+            done
+        fi
         kill -KILL -- "-$pid" 2>/dev/null || true
         kill -KILL "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
@@ -33,9 +42,12 @@ trap cleanup EXIT
 trap '' HUP
 trap 'exit 125' INT TERM
 mkfifo "$directory/pipe"
-# Keep the first 8 MiB, then drain without retaining more or breaking the build pipe.
+# Builds keep the first 8 MiB, then drain without breaking the build pipe.
+# Optimization progress must keep streaming for the entire unbounded run.
 # Only the supervisor retains the repository lock, never escaped build descendants.
-setsid bash --noprofile --norc -c 'stdbuf -o0 head -c 8388608; cat >/dev/null' 9<&- < "$directory/pipe" > "$directory/$3" &
+log_command='stdbuf -o0 head -c 8388608; cat >/dev/null'
+[[ $mode != optimize ]] || log_command='cat'
+setsid bash --noprofile --norc -c "$log_command" 9<&- < "$directory/pipe" > "$directory/$3" &
 logger=$!
 setsid bash --noprofile --norc -c "$2" -- "$directory/snapshot.md" "$directory/ready" "${4:-build}" "${5:-}" 9<&- </dev/null > "$directory/pipe" 2>&1 &
 pid=$!
@@ -53,7 +65,7 @@ while kill -0 "$pid" 2>/dev/null; do
         result=130
         exit "$result"
     fi
-    if (( SECONDS >= 900 )); then
+    if [[ ${4:-build} != optimize ]] && (( SECONDS >= 900 )); then
         result=124
         exit "$result"
     fi

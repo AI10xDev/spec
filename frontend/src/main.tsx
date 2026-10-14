@@ -40,13 +40,16 @@ function App() {
   const [repository, setRepository] = useState<Repository | null>(null)
   const [repositoryError, setRepositoryError] = useState("")
   const [outputs, setOutputs] = useState<Record<string, Output>>({})
+  const [optimization, setOptimization] = useState<Output | null>(null)
+  const [outputView, setOutputView] = useState<"file" | "optimization">("file")
   const [loadingOutput, setLoadingOutput] = useState<{ id?: string } | null>(null)
   const [follow, setFollow] = useState(true)
   const log = useRef<HTMLPreElement>(null)
   const chatWindows = useRef(new Map<Window, string>())
   const tab = tabs.find((item) => item.name === active)
-  const output = outputs[active]
-  const pendingRuns = Object.values(outputs).filter((item) => item.recoverable).map((item) => item.id).join(",")
+  const fileOutput = outputs[active]
+  const output = outputView === "optimization" ? optimization : fileOutput
+  const pendingRuns = [...Object.values(outputs), ...(optimization ? [optimization] : [])].filter((item) => item.recoverable).map((item) => item.id).join(",")
 
   async function api<T>(path: string, body?: unknown, method = "POST"): Promise<T> {
     const response = await fetch(`/api${path}`, {
@@ -89,6 +92,12 @@ function App() {
     try { remembered = localStorage.getItem("spec-active-file") } catch { /* Browser persistence is optional. */ }
     if (remembered && entries.some((file) => file.name === remembered)) {
       await open(remembered).catch(fail)
+    }
+    try {
+      const latest = await recoverOptimization()
+      if (latest?.recoverable) setOutputView("optimization")
+    } catch (error) {
+      fail(`Could not recover optimization output: ${error instanceof Error ? error.message : String(error)}. Select Optimization to retry.`)
     }
     setConnected(true)
   }
@@ -138,22 +147,24 @@ function App() {
     // Let an explicit disk read finish without a poll invalidating its result.
     let cancelled = false
     const timers: ReturnType<typeof setTimeout>[] = []
-    async function poll(output: Output) {
+    async function poll(output: Output, optimizer = false) {
       try {
         const next = await api<Output>(`/runs/${output.id}`)
         if (cancelled) return
-        setOutputs((items) => items[next.name]?.id === next.id ? { ...items, [next.name]: next } : items)
-        if (next.recoverable) timers.push(setTimeout(() => void poll(next), next.status === "running" ? 650 : 2500))
+        if (optimizer) setOptimization((item) => item?.id === next.id ? next : item)
+        else setOutputs((items) => items[next.name]?.id === next.id ? { ...items, [next.name]: next } : items)
+        if (next.recoverable) timers.push(setTimeout(() => void poll(next, optimizer), next.status === "running" ? 650 : 2500))
       } catch (error) {
         if (cancelled) return
         fail(error)
-        timers.push(setTimeout(() => void poll(output), 2500))
+        timers.push(setTimeout(() => void poll(output, optimizer), 2500))
       }
     }
     // A background tab must not leave repository saving blocked by stale status.
     for (const item of Object.values(outputs)) {
       if (item.recoverable && loadingOutput?.id !== item.id) void poll(item)
     }
+    if (optimization?.recoverable) void poll(optimization, true)
     return () => { cancelled = true; timers.forEach(clearTimeout) }
   }, [pendingRuns, loadingOutput, token])
 
@@ -198,6 +209,13 @@ function App() {
     }
   }
 
+  async function recoverOptimization() {
+    const previous = optimization
+    const latest = await api<Output | null>("/optimize")
+    setOptimization((item) => item === previous ? latest : item)
+    return latest
+  }
+
   async function open(name: string) {
     setError("")
     if (!tabs.some((item) => item.name === name)) {
@@ -230,7 +248,7 @@ function App() {
   }
 
   async function save(mode: "file" | "build" | "repository" = "file") {
-    if (!tab || busy || submitting.current) return
+    if (!tab || busy || submitting.current || (mode !== "file" && optimization?.recoverable)) return
     submitting.current = true
     setBusy(true)
     setError("")
@@ -242,12 +260,13 @@ function App() {
       if (mode === "file") return
       const job = await api<{ id: string }>(mode === "repository" ? "/repository/save" : "/runs", { name: document.name, revision: document.revision })
       setOutputs((items) => ({ ...items, [document.name]: { ...job, name: document.name, output: "Starting…", status: "running", truncated: false, recoverable: true, continuable: mode !== "repository" } }))
+      setOutputView("file")
       if (mode === "repository") setNotice(`Repository save submitted to ${repository?.model ?? "azure/gpt-6-sol"}. Check Output & logs for the result.`)
     } catch (error) { fail(error) } finally { submitting.current = false; setBusy(false) }
   }
 
   async function continueRun() {
-    if (busy || submitting.current || !execution || !output || output.status !== "completed" || output.recoverable || output.continuable !== true) return
+    if (busy || submitting.current || !execution || outputView !== "file" || optimization?.recoverable || !output || output.status !== "completed" || output.recoverable || output.continuable !== true) return
     const { id, name } = output
     submitting.current = true
     setBusy(true)
@@ -258,6 +277,22 @@ function App() {
       setOutputs((items) => ({ ...items, [name]: { ...job, name, output: "Starting...", status: "running", truncated: false, recoverable: true, continuable: true } }))
       setFollow(true)
       setNotice(`Recommended choice submitted to the same session for ${name}. Check Output & logs for the result.`)
+    } catch (error) { setNotice(""); fail(error) } finally { submitting.current = false; setBusy(false) }
+  }
+
+  async function optimize() {
+    if (busy || submitting.current || !execution || pendingRuns) return
+    submitting.current = true
+    try {
+      if (!window.confirm("Run optimization using the trusted project's .optim commands? These commands can modify files, execute tools, access the network, and incur provider costs. The optimizer loops until convergence, with no automatic time or iteration cap. Use Stop run to stop it manually. This does not save or upload editor changes.")) return
+      setBusy(true)
+      setError("")
+      setNotice("Starting optimization...")
+      const job = await api<{ id: string }>("/optimize", {})
+      setOptimization({ ...job, name: "optimization", output: "Starting...", status: "running", truncated: false, recoverable: true, continuable: false })
+      setOutputView("optimization")
+      setFollow(true)
+      setNotice("Optimization started. Progress and gain reports appear in Output & logs. Use Stop run to stop manually.")
     } catch (error) { setNotice(""); fail(error) } finally { submitting.current = false; setBusy(false) }
   }
 
@@ -299,7 +334,7 @@ function App() {
   if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} realtime={realtime} azureRealtime={azureRealtime} />
 
   return <div className="app">
-    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ workspace</span></div><div className="connection"><i /> Local · Rust + TypeScript</div></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ workspace</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Optimization: {optimization.status}</span>}<button className="primary" disabled={!execution || busy || !!pendingRuns} onClick={() => void optimize()}>Optimize</button></div></header>
     <div className="workspace">
       <aside>
         <div className="sidebar-heading">YOUR WORKSPACE <button title="Refresh file list" aria-label="Refresh file list" onClick={() => void refresh().catch(fail)}>↻</button></div>
@@ -334,7 +369,7 @@ function App() {
             {tab ? <Editor key={tab.name} name={tab.name} value={tab.content} token={token} available={completion} enabled={complete} onEnabled={setComplete} onSave={() => void save()} onChange={(content) => {
               setTabs((items) => items.map((item) => item.name === active ? { ...item, content } : item))
             }} /> : <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
-            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || output?.recoverable} onClick={() => {
+            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || fileOutput?.recoverable || optimization?.recoverable} onClick={() => {
               if (window.confirm("Send this saved spec over SSH and run remote spec build? Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.")) void save("build")
              }}>Save & run ↗</button></div></footer>
             {execution && <div className="repository-controls">
@@ -346,10 +381,14 @@ function App() {
           </section>
           <section className="output-pane" aria-label="Output and logs pane">
             <div className="pane-heading"><div><span className="eyebrow">02 / OUTPUT</span><h2>Output & logs</h2></div><span className="badge">{output?.status ?? "Idle"}</span></div>
-            {tab && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>Spec + current nohup output in a separate window</span></div>}
-            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{tab?.revision && <button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button>}{output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && <button disabled={busy || !execution || output.status !== "completed" || output.recoverable || output.continuable !== true} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
+            <div className="output-selector" role="group" aria-label="Output view"><button aria-pressed={outputView === "file"} onClick={() => setOutputView("file")}>Current file{tab ? `: ${tab.name}` : " output"}</button><button aria-pressed={outputView === "optimization"} disabled={!optimization && !execution} onClick={() => {
+              setOutputView("optimization")
+              if (!optimization) { setError(""); void recoverOptimization().catch(fail) }
+            }}>Optimization</button></div>
+            {tab && outputView === "file" && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>Spec + current nohup output in a separate window</span></div>}
+            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button>}{output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={busy || !execution || !!optimization?.recoverable || output.status !== "completed" || output.recoverable || output.continuable !== true} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
-            <pre ref={log} className="output" aria-label="Run output">{output?.output ?? (execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
+            <pre ref={log} className="output" aria-label="Run output">{output?.output ?? (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery, or Optimize to start a new run using the project's .optim file." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
             <footer className="output-footer">{output && <span>Harness: {output.status}{output.recoverable ? " (completion not confirmed)" : ""}. CLI success alone does not verify saved changes.<br /></span>}Available output only. No hidden model reasoning is requested.</footer>
           </section>
         </div>

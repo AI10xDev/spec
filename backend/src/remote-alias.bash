@@ -2,7 +2,11 @@
 # Separate lines ensure aliases defined by the source are expanded at invocation.
 : > "$2" # Signal that setsid established the build process group.
 spec_build_mode=${3:-build}
-[[ $spec_build_mode == build || $spec_build_mode == repository-save ]] || exit 125
+[[ $spec_build_mode == build || $spec_build_mode == repository-save || $spec_build_mode == optimize ]] || exit 125
+if [[ $spec_build_mode == optimize ]]; then
+    export PATH="$HOME/.local/bin:$HOME/.bun/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
+    exec python3 -u "$1" "${1%/*}" "$PWD"
+fi
 spec_build_workspace=$PWD
 shopt -s expand_aliases
 # SSH/noninteractive shells often omit user-installed engines and Bun. Set up

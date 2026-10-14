@@ -93,21 +93,40 @@ pub(super) fn persist(app: &App, job: &Job) -> Result<()> {
     atomic(&directory, &format!("{}.json", job.id), &data)
 }
 
-fn latest_name(name: &str) -> String {
-    format!("latest-{:x}", Sha256::digest(name.as_bytes()))
+fn latest_name(name: &str, optimization: bool) -> String {
+    if optimization {
+        "latest-optimization".into()
+    } else {
+        // Preserve the pointer names of existing regular-file runs.
+        format!("latest-{:x}", Sha256::digest(name.as_bytes()))
+    }
 }
 
 pub(super) fn set_latest(app: &App, job: &Job) -> Result<()> {
     atomic(
         &directory(app, true)?,
-        &latest_name(&job.name),
+        &latest_name(&job.name, job.optimization),
         job.id.as_bytes(),
     )
 }
 
 pub(super) fn latest(app: &App, name: &str) -> Result<Option<String>> {
+    latest_run(app, name, false)
+}
+
+pub(super) fn latest_optimization(app: &App) -> Result<Option<String>> {
+    latest_run(app, "optimization", true)
+}
+
+fn latest_run(app: &App, name: &str, optimization: bool) -> Result<Option<String>> {
     validate(name)?;
-    let result = (|| bytes(&directory(app, false)?, &latest_name(name), 36))();
+    let result = (|| {
+        bytes(
+            &directory(app, false)?,
+            &latest_name(name, optimization),
+            36,
+        )
+    })();
     let data = match result {
         Ok(data) => data,
         Err(Error(StatusCode::NOT_FOUND, _)) => return Ok(None),
@@ -123,6 +142,9 @@ pub(super) fn latest(app: &App, name: &str) -> Result<Option<String>> {
     })?;
     if job.name != name {
         return Err(invalid("Latest run filename mismatch"));
+    }
+    if job.optimization != optimization {
+        return Err(invalid("Latest run kind mismatch"));
     }
     Ok(Some(id))
 }

@@ -72,6 +72,8 @@ struct Job {
     recover: bool,
     #[serde(default)]
     repository_save: bool,
+    #[serde(default)]
+    optimization: bool,
     #[serde(skip, default = "detached_control")]
     stop: watch::Sender<RunControl>,
     #[serde(skip)]
@@ -123,6 +125,7 @@ enum RunInput {
     Build(Run),
     RepositorySave(Run),
     Continue(String),
+    Optimize,
 }
 
 const CONTINUE_RECOMMENDED: &str = "Use the recommended option from your last response and continue the build session. Implement it now; do not stop at a plan. If no recommended option was provided, explain what input is needed rather than guessing.";
@@ -328,6 +331,18 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
     start_run(app, RunInput::Build(input)).await
 }
 
+async fn optimize(State(app): State<App>) -> Result<Json<serde_json::Value>> {
+    start_run(app, RunInput::Optimize).await
+}
+
+async fn latest_optimization(State(app): State<App>) -> Result<Json<Option<Output>>> {
+    let Some(id) = recovery::latest_optimization(&app)? else {
+        return Ok(Json(None));
+    };
+    let Json(output) = output(State(app), Path(id)).await?;
+    Ok(Json(Some(output)))
+}
+
 async fn continue_recommended(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -360,6 +375,7 @@ async fn repository_save(
 
 async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>> {
     let repository_save = matches!(&input, RunInput::RepositorySave(_));
+    let optimization = matches!(&input, RunInput::Optimize);
     let remote = app.remote.as_ref().ok_or_else(|| Error(
         if repository_save { StatusCode::FORBIDDEN } else { StatusCode::BAD_REQUEST },
         "Remote execution is disabled. Set SPEC_SSH_TARGET and SPEC_SSH_WORKSPACE on the local Rust server, then restart it.".into(),
@@ -382,6 +398,11 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         _ => None,
     };
     let (name, content, session_id) = match input {
+        RunInput::Optimize => (
+            "optimization".into(),
+            include_str!("optimize.py").into(),
+            None,
+        ),
         RunInput::Build(input) | RunInput::RepositorySave(input) => {
             let document = read(&app.root, &input.name)?;
             if document.revision != input.revision {
@@ -405,7 +426,12 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             let name = {
                 let jobs = app.jobs.lock().unwrap();
                 let job = jobs.iter().find(|job| job.id == id).unwrap();
-                if job.recover || job.attached || job.status != "completed" || job.repository_save {
+                if job.recover
+                    || job.attached
+                    || job.status != "completed"
+                    || job.repository_save
+                    || job.optimization
+                {
                     return Err(Error(StatusCode::CONFLICT, "Only a completed build can be continued. Wait for completion or load its output before retrying.".into()));
                 }
                 if job.remote_identity != remote.identity() {
@@ -433,13 +459,9 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         }
     };
     // A changed SSH configuration cannot prove that an old harness finished.
-    if app
-        .jobs
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|job| job.recover && (repository_save || job.repository_save))
-    {
+    if app.jobs.lock().unwrap().iter().any(|job| {
+        job.recover && (repository_save || optimization || job.repository_save || job.optimization)
+    }) {
         return Err(Error(
             StatusCode::CONFLICT,
             "A run is active or its remote status is unresolved for this repository. Load its output before retrying.".into(),
@@ -483,6 +505,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             remote_identity: remote.identity(),
             recover: true,
             repository_save,
+            optimization,
             attached: true,
             dirty: false,
             persistence_error: None,
@@ -503,6 +526,8 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         remote.continuation_command(content.len(), &id, &name, session)
     } else if repository_save {
         remote.repository_command(content.len(), &id, &name)
+    } else if optimization {
+        remote.optimization_command(content.len(), &id, &name)
     } else {
         remote.command(content.len(), &id, &name)
     };
@@ -544,6 +569,8 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
                 b"[started] Submitting the recommended option and continuing the same build session with automatic tool approval.\n"
             } else if repository_save {
                 b"[started] remote repository save over SSH: azure/gpt-6-sol with the saved snapshot as context and the existing repository workflow. Output and logs only.\n"
+            } else if optimization {
+                b"[started] Optimizing the latest detached build using its project's .optim objectives. No iteration or time limit; Stop run cancels. Progress and gain reports follow.\n"
             } else {
                 b"[started] remote spec build over SSH: running the saved snapshot with automatic tool approval requested. Output and logs only.\n"
             },
@@ -576,7 +603,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
                     Err(error) => format!("failed ({error})"),
                 },
                 _ = stopped.changed() => if *stopped.borrow() == RunControl::Cancel { "cancelled" } else { "detached" }.into(),
-                _ = tokio::time::sleep_until(deadline) => "detached (local timeout)".into(),
+                _ = tokio::time::sleep_until(deadline), if !optimization => "detached (local timeout)".into(),
                 _ = &mut upload => "detached (input closed)".into(),
                 _ = checkpoint.tick() => {
                     recovery::checkpoint(&app, &id);
@@ -591,7 +618,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
                 Ok(Ok(exit)) if exit.success() => status = "completed".into(),
                 _ => {
                     status = "detached (cancellation unconfirmed)".into();
-                    append(&app, &id, b"\n[warning] Cancellation was not confirmed; the build may still be running. Recover via the remote session directory; the 15-minute watchdog remains active.\n");
+                    append(&app, &id, b"\n[warning] Cancellation was not confirmed; remote work may still be running. Load its output and retry Stop run.\n");
                 }
             }
         }
@@ -644,7 +671,7 @@ async fn output(State(app): State<App>, Path(id): Path<String>) -> Result<Json<O
             .into_owned(),
         truncated: job.truncated,
         recoverable: job.recover,
-        continuable: !job.repository_save,
+        continuable: !job.repository_save && !job.optimization,
     }))
 }
 
@@ -690,7 +717,7 @@ async fn output_log(
         status,
         output: String::from_utf8_lossy(&bytes).into_owned(),
         truncated,
-        continuable: !job.repository_save,
+        continuable: !job.repository_save && !job.optimization,
     })))
 }
 
@@ -755,6 +782,7 @@ fn router(app: App) -> Router {
         .route("/api/files/{name}/run", get(latest_output))
         .route("/api/files/{name}/run/log", get(output_log))
         .route("/api/runs", post(start))
+        .route("/api/optimize", get(latest_optimization).post(optimize))
         .route("/api/repository", get(repository))
         .route("/api/repository/save", post(repository_save))
         .route("/api/runs/{id}", get(output))

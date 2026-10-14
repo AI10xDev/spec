@@ -10,6 +10,9 @@ mod repository_tests;
 #[path = "continuation_tests.rs"]
 mod continuation_tests;
 
+#[path = "optimization_tests.rs"]
+mod optimization_tests;
+
 pub(super) fn app(root: &FsPath) -> App {
     App {
         root: root.to_owned(),
@@ -90,6 +93,8 @@ async fn all_api_routes_require_authentication() {
         ("POST", "/api/realtime"),
         ("POST", "/api/realtime/azure"),
         ("POST", "/api/runs"),
+        ("GET", "/api/optimize"),
+        ("POST", "/api/optimize"),
         ("GET", "/api/repository"),
         ("POST", "/api/repository/save"),
         ("GET", "/api/runs/id"),
@@ -318,6 +323,7 @@ fn output_buffers_are_bounded() {
         remote_identity: "0".repeat(64),
         recover: true,
         repository_save: false,
+        optimization: false,
         attached: true,
         dirty: false,
         persistence_error: None,
@@ -814,6 +820,7 @@ fn persisted_job(id: &str, identity: String, recover: bool) -> Job {
         remote_identity: identity,
         recover,
         repository_save: false,
+        optimization: false,
         stop: detached_control(),
         attached: false,
         dirty: false,

@@ -10,7 +10,7 @@ name=$6
 [[ -n $name && $name != .* && $name != *[/\\:]* && ! $name =~ [[:cntrl:]] && ${#name} -le 180 ]] || exit 125
 log="$name.out"
 mode=${7:-build}
-[[ $mode == build || $mode == repository-save || $mode == continue ]] || exit 125
+[[ $mode == build || $mode == repository-save || $mode == continue || $mode == optimize ]] || exit 125
 repository_probe=${8:-}
 session_id=${9:-}
 if [[ $mode == continue ]]; then
@@ -73,6 +73,7 @@ completed() {
 # Match the probe's worktree scope, ignoring inherited Git overrides. A linked
 # worktree has its own Git directory/index; subdirectories and symlinks share it.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+unset SPEC_OPTIM_WORKSPACE_LOCK
 registry=
 if [[ $(git rev-parse --is-inside-work-tree 2>/dev/null) == true ]]; then
     git_directory=$(git rev-parse --absolute-git-dir)
@@ -86,8 +87,13 @@ fi
 # locking, while all workspaces in a Git worktree use the same private registry.
 exec 9< "${registry:-.spec-runs}"
 lock_mode=--shared
-[[ $mode != repository-save ]] || lock_mode=--exclusive
+[[ $mode == build ]] || lock_mode=--exclusive
 flock "$lock_mode" --nonblock 9 || reject 'Another harness is active for this repository; refusing to launch.'
+if [[ $mode == optimize ]]; then
+    # Children do not inherit fd 9; identify the supervisor's lock without reopening it.
+    SPEC_OPTIM_WORKSPACE_LOCK=$(stat -Lc '%d:%i' /proc/self/fd/9)
+    export SPEC_OPTIM_WORKSPACE_LOCK
+fi
 if [[ -n $registry ]]; then
     for record in "$registry"/run-*; do
         [[ -e $record || -L $record ]] || continue
@@ -95,7 +101,7 @@ if [[ -n $registry ]]; then
             $(stat -c %h -- "$record") == 1 && $(stat -c %s -- "$record") -le 16384 ]] && {
             IFS= read -r -d '' prior && [[ $prior == /* ]] && {
                 if IFS= read -r -d '' prior_mode; then
-                    [[ $prior_mode == build || $prior_mode == repository-save ]] &&
+                    [[ $prior_mode == build || $prior_mode == repository-save || $prior_mode == optimize ]] &&
                         ! IFS= read -r -d '' trailing && [[ -z $trailing ]]
                 else
                     # Old path-only records may represent a save, not just a build.
@@ -106,7 +112,7 @@ if [[ -n $registry ]]; then
             [[ $mode != build || $prior_mode != build ]] || continue
             if completed "$prior"; then
                 # Shared readers leave retirement to the owner or an exclusive save.
-                [[ $mode != repository-save ]] || rm -f -- "$record"
+                [[ $mode == build ]] || rm -f -- "$record"
                 continue
             fi
         fi
@@ -115,11 +121,11 @@ if [[ -n $registry ]]; then
         reject 'Prior harness completion is unresolved; refusing to launch.'
     done
 fi
-if [[ $mode == repository-save ]]; then
+if [[ $mode != build ]]; then
     # Retain the guard for pre-registry sessions in this workspace.
     for prior in "$PWD"/.spec-runs/run-*; do
         [[ $prior != "$directory" && ( -e $prior || -L $prior ) ]] || continue
-        completed "$prior" || reject 'Prior harness completion is unresolved; refusing repository save.'
+        completed "$prior" || reject 'Prior harness completion is unresolved; refusing exclusive run.'
     done
 fi
 if [[ -n $registry ]]; then
@@ -133,9 +139,11 @@ if [[ -n $registry ]]; then
         reject 'Duplicate worktree run ID; refusing to launch.'
     registry_record="$registry/run-$5"
 fi
-# Retain completed runs for seven days; never prune a running supervisor.
+# Retain ordinary completed runs for seven days; keep full optimization reports.
+# Never prune a running supervisor.
 find .spec-runs -mindepth 2 -maxdepth 2 -name status -type f -mmin +10080 -printf '%h\0' |
     while IFS= read -r -d '' expired; do
+        [[ ! -e "$expired/report.jsonl" ]] || continue
         [[ -z $registry || ( ! -e "$registry/${expired##*/}" && ! -L "$registry/${expired##*/}" ) ]] || continue
         rm -rf -- "$expired"
     done
@@ -147,6 +155,10 @@ if [[ $mode == repository-save ]]; then
 fi
 # Ignore HUP before fork, and redirect every SSH descriptor before detaching.
 # Ownership transfers before launch so an attachment signal cannot delete live input.
+if [[ $mode == build && -z $session_id ]]; then
+    # Record the actual launch identity, not a growing log's modification time.
+    printf '%s\0%s\0%s\0%s\0' "$PWD" build "$name" "$directory/$log" > "$directory/invocation"
+fi
 trap '' HUP
 launched=1
 setsid flock --exclusive --nonblock --close "$directory/lease" bash --noprofile --norc -c "$4" -- "$directory" "$3" "$log" "$mode" "$repository_probe" "$registry_record" </dev/null >/dev/null 2>&1 &

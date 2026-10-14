@@ -47,7 +47,8 @@ elif [[ $3 == cancel && $status == unknown ]]; then
 fi
 private_file "$log" || exit 125
 size=$(stat -c %s -- "$log")
-(( size <= 8388608 )) || exit 125
+# Optimizer logs are unbounded; ordinary builds retain their 8 MiB limit.
+(( size <= 8388608 )) || { [[ $log == ./optimization.out ]] && private_file report.jsonl; } || exit 125
 count=$size
 offset=0
 truncated=0

@@ -157,6 +157,10 @@ impl Remote {
         self.build_command(bytes, id, name, "repository-save", "")
     }
 
+    pub fn optimization_command(&self, bytes: usize, id: &str, name: &str) -> Command {
+        self.build_command(bytes, id, name, "optimize", "")
+    }
+
     pub fn continuation_command(
         &self,
         bytes: usize,

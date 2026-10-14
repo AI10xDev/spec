@@ -20,6 +20,7 @@ This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/A
 - **Completed spec lines:** press `/` to toggle the current line's `# ` completion marker; Alt+/ inserts a literal slash. The build agent is instructed to retain completed lines as context and implement only pending requirements.
 - **Trailing completions:** optional Azure-powered ghost text for the current sentence part; Tab or **Accept part** inserts it, Escape dismisses it.
 - **Optional Save & run:** explicit confirmation, immutable saved-spec input, live output polling, follow toggle, cancellation, concurrency limits, and a 15-minute timeout.
+- **Optimize:** recursively runs trusted project `.optim` commands until all measured objectives plateau, with gain reports, separate recoverable output, and manual cancellation. Requires Python 3.10+ on the remote host; unlike builds, optimization has no automatic iteration or runtime limit. See the [optimizer guide](OPTIMIZE.md) for configuration, convergence, and safety details.
 - **Save repo changes:** shown only when the configured remote directory belongs to a Git worktree with uncommitted changes. Uses `azure/gpt-6-sol` with the existing repository workflow and the saved spec as context.
 - **Recoverable output:** reopening a saved spec restores its latest build output after browser or server restart, without rerunning the build.
 - **Separate session chat:** ask about the current nohup output, written spec, or general topics in a dedicated browser window, without adding chat to the editor/output panes.
@@ -320,7 +321,7 @@ archive/       Original source collection and license notices (not executed or b
 workspace/     Local user files (created at runtime; gitignored)
 ```
 
-The **new runtime** is Rust + TypeScript, plus HTML/CSS. `archive/` intentionally preserves legacy languages for review/provenance. Persistent V2 session steering/recovery, Azure filename ranking, `/eval`, `/telle`, plan mode, and the terminal editor are **not ported into the web app**. This is a scoped web rewrite, not a feature-complete replacement for all original integrations.
+The **new runtime** is Rust + TypeScript, plus HTML/CSS, with a standard-library Python optimizer for optional remote optimization. `archive/` intentionally preserves legacy languages for review/provenance. Persistent V2 session steering/recovery, Azure filename ranking, `/eval`, `/telle`, plan mode, and the terminal editor are **not ported into the web app**. This is a scoped web rewrite, not a feature-complete replacement for all original integrations.
 
 The private repository is independently created rather than a GitHub fork-network entry. Its source ancestry and captured working-tree revisions are recorded in `archive/manifest.json`.
 

@@ -41,6 +41,8 @@ input { background: var(--surface-deep); border: 1px solid var(--border); color:
 .topbar { position: relative; height: 76px; flex-shrink: 0; background: var(--surface-deep); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding: 0 28px; }
 .connection { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 8px; }
 .connection i { width: 6px; height: 6px; background: var(--success); border-radius: 50%; }
+.topbar-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
+.topbar-actions .badge { overflow-wrap: anywhere; }
 .app { height: 100dvh; display: flex; flex-direction: column; }
 .workspace { flex: 1; min-height: 0; display: flex; }
 aside { width: 260px; flex-shrink: 0; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 22px 14px 14px; }
@@ -99,6 +101,9 @@ h2 { margin: 8px 0 0; font-size: 17px; font-weight: 500; overflow-wrap: anywhere
 .repository-controls button { font-size: 11px; }
 .output-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 12px 24px; color: var(--muted); font-size: 11px; }
 .output-controls label { display: flex; align-items: center; gap: 6px; }
+.output-selector { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 24px; border-bottom: 1px solid var(--border); }
+.output-selector button { min-width: 0; max-width: 100%; overflow-wrap: anywhere; font-size: 11px; }
+.output-selector button[aria-pressed=true] { background: var(--selected); border-color: var(--selected-border); color: var(--accent); }
 input[type=checkbox] { accent-color: var(--primary); }
 .output { flex: 1; min-height: 100px; margin: 0; padding: 18px 24px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.85 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--output-text); }
 .output-footer { padding: 17px 24px; border-top: 1px solid var(--border); font-size: 10px; color: var(--subtle); }
@@ -226,7 +231,8 @@ input::placeholder { color: var(--subtle); opacity: 1; }
 }
 @media (max-width: 780px) {
   .connect { margin: 8vh 16px; padding: 28px 22px; }
-  .topbar { padding: 0 18px; }
+  .topbar { padding: 12px 18px; height: auto; min-height: 76px; gap: 12px; }
+  .topbar .brand-caption { display: none; }
   .editor-pane { border-right: 0; }
 }
 @media (forced-colors: active) {

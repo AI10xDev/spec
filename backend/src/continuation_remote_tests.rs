@@ -265,7 +265,10 @@ opencode-source() {
         .map(|entry| entry.unwrap().file_name())
         .collect();
     names.sort();
-    assert_eq!(names, ["a.md.out", "lease", "session-id", "status"]);
+    assert_eq!(
+        names,
+        ["a.md.out", "invocation", "lease", "session-id", "status"]
+    );
     let session = remote.session_id(&id, "a.md").await.unwrap();
     assert_eq!(session, "ses_InitialRoot");
     let continuation = launch(

@@ -458,7 +458,7 @@ spec() {
     assert_eq!(fs::read_to_string(directory.join("status")).unwrap(), "7\n");
     assert!(root.path().join("wrote-all").exists());
     assert!(!snapshot.exists());
-    assert_eq!(fs::read_dir(directory).unwrap().count(), 3);
+    assert_eq!(fs::read_dir(directory).unwrap().count(), 4);
     let log = fs::read(directory.join("a.md.out")).unwrap();
     assert_eq!(log.len(), 8 * 1024 * 1024);
     assert!(log.starts_with(b"output after disconnect\n"));
@@ -475,6 +475,174 @@ spec() {
     let pid = fs::read_to_string(root.path().join("descendant-pid")).unwrap();
     if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
         assert_eq!(stat.split(") ").nth(1).unwrap().chars().next(), Some('Z'));
+    }
+}
+
+#[tokio::test]
+async fn optimizer_bypasses_build_timeout_and_keeps_output_beyond_build_cap() {
+    for mode in ["build", "optimize"] {
+        let root = tempfile::tempdir().unwrap();
+        let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
+        let id = Uuid::new_v4().to_string();
+        let supervisor =
+            include_str!("remote-supervisor.bash").replace("SECONDS >= 900", "SECONDS >= 1");
+        let mut child = tokio::process::Command::new("bash")
+            .args([
+                "-c",
+                include_str!("remote-build.bash"),
+                "--",
+                root.path().to_str().unwrap(),
+                "0",
+                // Exercise the real attachment/supervisor without launching an engine.
+                ": > \"$2\"; if [[ $3 == optimize ]]; then : > \"${1%/*}/report.jsonl\"; fi; head -c 9000000 /dev/zero; sleep 2; printf 'fresh report\n'",
+                &supervisor,
+                &id,
+                "optimization",
+                mode,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(stdin);
+        let directory = root.path().join(format!(".spec-runs/run-{id}"));
+        let expected_status = if mode == "optimize" { 0 } else { 124 };
+        assert_eq!(output.status.code(), Some(expected_status), "{mode}");
+        assert_eq!(
+            fs::read_to_string(directory.join("status")).unwrap(),
+            format!("{expected_status}\n")
+        );
+        let log = directory.join("optimization.out");
+        assert_eq!(fs::read(&log).unwrap(), output.stdout);
+        if mode == "optimize" {
+            assert_eq!(output.stdout.len(), 9000000 + b"fresh report\n".len());
+            assert!(output.stdout.ends_with(b"fresh report\n"));
+        } else {
+            assert_eq!(output.stdout.len(), 8 * 1024 * 1024);
+        }
+        for cancel in [false, true] {
+            let (status, bytes, truncated) =
+                remote.snapshot(&id, cancel, "optimization").await.unwrap();
+            assert_eq!(
+                status,
+                if mode == "optimize" {
+                    "completed"
+                } else {
+                    "timed out"
+                }
+            );
+            assert!(truncated);
+            assert_eq!(bytes, output.stdout[output.stdout.len() - MAX_OUTPUT..]);
+        }
+        if mode == "build" {
+            // An ordinary build named optimization must retain the size limit.
+            File::options()
+                .write(true)
+                .open(log)
+                .unwrap()
+                .set_len(8388609)
+                .unwrap();
+            assert!(remote.snapshot(&id, false, "optimization").await.is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn optimizer_cancellation_flushes_interrupted_report_and_bounds_term_grace() {
+    for cooperative in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
+        fs::write(root.path().join("a.md.out"), "build output").unwrap();
+        fs::write(
+            root.path().join(".bash_history"),
+            "nohup spec build a.md > a.md.out &\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("a.md.optim"),
+            serde_json::json!({
+                "version": 1,
+                "objectives": [{
+                    "name": "cancellation",
+                    "command": ["python3", "-c", "import os, signal, time; from pathlib import Path; signal.signal(signal.SIGTERM, signal.SIG_IGN); Path('descendant-pid').write_text(str(os.getpid())); time.sleep(60)"],
+                    "measure": ["python3", "-c", "print(0)"],
+                    "direction": "maximize"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let payload = if cooperative {
+            include_str!("optimize.py")
+        } else {
+            r#"import os, signal, subprocess, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen(["sleep", "60"])
+Path("descendant-pid").write_text(str(child.pid))
+time.sleep(60)
+"#
+        };
+        let id = Uuid::new_v4().to_string();
+        let directory = root.path().join(format!(".spec-runs/run-{id}"));
+        let mut child = remote
+            .optimization_command(payload.len(), &id, "optimization")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(payload.as_bytes()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !fs::read_to_string(root.path().join("descendant-pid"))
+                .is_ok_and(|pid| !pid.is_empty())
+            {
+                assert!(!directory.join("status").exists(), "optimizer exited early");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let cancelled = tokio::time::Instant::now();
+        stdin.write_all(b"C").await.unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(stdin);
+        assert_eq!(output.status.code(), Some(130), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(directory.join("status")).unwrap(),
+            "130\n"
+        );
+        assert!(!directory.join("snapshot.md").exists());
+        let pid = fs::read_to_string(root.path().join("descendant-pid")).unwrap();
+        if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+            assert!(stat.split(") ").nth(1).unwrap().starts_with('Z'));
+        }
+        if cooperative {
+            let report = fs::read_to_string(directory.join("report.jsonl")).unwrap();
+            let final_event: serde_json::Value =
+                serde_json::from_str(report.lines().last().unwrap()).unwrap();
+            assert_eq!(final_event["event"], "final");
+            assert_eq!(final_event["outcome"], "interrupted");
+            assert_eq!(
+                fs::read_to_string(directory.join("progress.log")).unwrap(),
+                report
+            );
+            assert_eq!(output.stdout, report.as_bytes());
+        } else {
+            assert!(cancelled.elapsed() >= Duration::from_secs(5));
+        }
     }
 }
 
@@ -605,18 +773,22 @@ async fn retention_prunes_only_old_finished_sessions_and_rejects_unsafe_parent()
     let sessions = root.path().join(".spec-runs");
     fs::create_dir(&sessions).unwrap();
     fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
-    for name in ["old", "recent", "unfinished"] {
+    for name in ["old", "recent", "unfinished", "optimization"] {
         fs::create_dir(sessions.join(name)).unwrap();
     }
     fs::write(sessions.join("old/status"), "0\n").unwrap();
     fs::write(sessions.join("recent/status"), "0\n").unwrap();
     let old = std::time::SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
-    File::options()
-        .write(true)
-        .open(sessions.join("old/status"))
-        .unwrap()
-        .set_times(fs::FileTimes::new().set_modified(old))
-        .unwrap();
+    fs::write(sessions.join("optimization/report.jsonl"), "full report\n").unwrap();
+    fs::write(sessions.join("optimization/status"), "0\n").unwrap();
+    for name in ["old", "optimization"] {
+        File::options()
+            .write(true)
+            .open(sessions.join(name).join("status"))
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+    }
     let mut child = remote
         .command(5, &Uuid::new_v4().to_string(), "a.md")
         .stdin(Stdio::piped())
@@ -637,6 +809,10 @@ async fn retention_prunes_only_old_finished_sessions_and_rejects_unsafe_parent()
     assert!(!sessions.join("old").exists());
     assert!(sessions.join("recent/status").exists());
     assert!(sessions.join("unfinished").exists());
+    assert_eq!(
+        fs::read_to_string(sessions.join("optimization/report.jsonl")).unwrap(),
+        "full report\n"
+    );
 
     // Refuse unsafe existing storage without changing its permissions or contents.
     for symlink in [false, true] {
@@ -889,7 +1065,12 @@ async fn named_logs_preserve_and_quote_original_filenames_and_recover_without_me
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         files.sort();
-        let mut expected = vec![format!("{name}.out"), "lease".into(), "status".into()];
+        let mut expected = vec![
+            format!("{name}.out"),
+            "invocation".into(),
+            "lease".into(),
+            "status".into(),
+        ];
         expected.sort();
         assert_eq!(files, expected);
         assert_eq!(
