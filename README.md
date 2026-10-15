@@ -4,6 +4,12 @@ A local-first **Rust backend + Vite / React / TypeScript frontend** for writing 
 
 This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates over SSH to the remote `spec build` alias/function. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
 
+## Latest release: v0.1.5
+
+[Spec v0.1.5](https://github.com/AI10xDev/spec/releases/tag/v0.1.5) extends the Optimize workflow introduced in v0.1.4 with free-form `.optim` planning, OpenCode builder iterations, Responses-based review, final-state validation, timestamped reports, and supervised cleanup of detached command descendants. Explicit JSON objectives remain model-free, including UTF-8 BOM-prefixed files. Builder tool output can quote agent-fallback warnings without falsely failing the run.
+
+Rebuild and restart the local server, then reload the browser to use the updated optimizer. Prose mode needs the additional execution-host setup under [Optimization](#optimization). Releases are versioned by Git tags; package manifests retain `0.1.0`, following the existing source-release convention.
+
 ## Workspace showcase
 
 ![Animated tour of the spec workspace showing saved files, multiple editor tabs, and completed remote SSH build output beside the specification](docs/workspace.gif)
@@ -13,22 +19,25 @@ This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/A
 ## Features
 
 - **Saved files tab:** previously written files in the selected workspace, most-recently-modified first, with timestamps, sizes, filtering, and refresh.
-- **Multiple editor tabs:** independent buffers, quick switching, dirty indicators, and confirmation before discarding unsaved edits.
+- **Multiple editor tabs:** independent buffers, quick switching, dirty indicators, and confirmation before discarding unsaved edits. Reloading reopens the last selected saved file if it still exists; unsaved buffers and the full tab layout are not persisted.
 - **Two panes:** the active spec on the left; that file's output and logs on the right. Smaller screens stack them vertically.
 - **Reliable saves:** atomic replacement, private file permissions, and revision checks that reject stale saves instead of silently overwriting them.
 - **Local file workflow:** create, edit, save, reopen, and download UTF-8 files; Ctrl/Cmd+S saves the active editor.
 - **Completed spec lines:** press `/` to toggle the current line's `# ` completion marker; Alt+/ inserts a literal slash. The build agent is instructed to retain completed lines as context and implement only pending requirements.
 - **Trailing completions:** optional Azure-powered ghost text for the current sentence part; Tab or **Accept part** inserts it, Escape dismisses it.
 - **Optional Save & run:** explicit confirmation, immutable saved-spec input, live output polling, follow toggle, cancellation, concurrency limits, and a 15-minute timeout.
-- **Optimize:** recursively runs trusted project `.optim` commands until all measured objectives plateau, with gain reports, separate recoverable output, and manual cancellation. Requires Python 3.10+ on the remote host; unlike builds, optimization has no automatic iteration or runtime limit. See the [optimizer guide](OPTIMIZE.md) for configuration, convergence, and safety details.
+- **Continue completed builds:** **Use recommended & continue** resumes the same captured engine session with a fixed recommended-choice prompt, without saving or uploading editor changes.
+- **Optimize:** recursively improves a trusted project using explicit `.optim` commands or free-form instructions with OpenCode builder execution and Responses-based review. Independent measurements determine when all objectives plateau; gain reports, separate recoverable output, and manual cancellation make progress inspectable. Unlike builds, optimization has no overall iteration or runtime limit. See [optimization](#optimization) below.
 - **Save repo changes:** shown only when the configured remote directory belongs to a Git worktree with uncommitted changes. Uses `azure/gpt-6-sol` with the existing repository workflow and the saved spec as context.
 - **Recoverable output:** reopening a saved spec restores its latest build output after browser or server restart, without rerunning the build.
 - **Separate session chat:** ask about the current nohup output, written spec, or general topics in a dedicated browser window, without adding chat to the editor/output panes.
+- **Voice and context tools:** independent OpenAI and Azure Realtime voice panels, current/last-answer context inspection, and a revision-checked Agent.md editor.
+- **Accessible responsive styling:** dark, rainbow-accented UI with visible keyboard focus, reduced-motion support, forced-colors fallbacks, and narrow-screen layouts.
 - **Local API protection:** loopback binding, a random access token, no permissive CORS, constrained filenames, and symlink rejection.
 
 The output pane displays available stdout/stderr and explanations. It does **not** request or expose hidden model chain-of-thought.
 
-Read the [complete feature guide](docs/FEATURES.md), [code review](docs/REVIEW.md), [security notes](docs/SECURITY.md), and [source collection notes](archive/README.md).
+Read the [original workspace feature guide](docs/FEATURES.md), [code review](docs/REVIEW.md), [security notes](docs/SECURITY.md), and [source collection notes](archive/README.md). This README and the linked workflow guides cover the newer execution and AI features.
 
 ## Quick start
 
@@ -60,9 +69,11 @@ SPEC_WORKSPACE="$HOME/specs" ./run.sh
 
 The original shell function mirrors specs into `$HOME/specs`, so this can display those previously written files directly. **This edits the selected files in place.** Back them up first if needed. This version does not automatically read `~/.local/state/spec/saved-files` or traverse unrelated paths from that history. Nested folders, hidden files, symlinks, and non-UTF-8 files are not editable.
 
+Files are limited to 2 MiB and filenames to 180 UTF-8 bytes; the workspace is flat and has no rename/delete API. A stale save preserves your unsaved buffer rather than overwriting a newer disk revision. See [save conflicts and recovery](docs/FEATURES.md#5-save-conflicts-and-download).
+
 ### Remote execution through `spec build` (local web server)
 
-The **browser, Rust web backend, and editable workspace run on your local computer**. Only **`spec build <snapshot-file>` runs on the remote machine over SSH**. No remote web backend, HTTP port forwarding, or remote frontend build is needed.
+The **browser, Rust web backend, and editable workspace run on your local computer**. **Save & run** executes `spec build <snapshot-file>` remotely over SSH; **Optimize** runs the remote Python optimizer, and continuation uses `opencode-source`. No remote web backend, HTTP port forwarding, or remote frontend build is needed.
 
 `./run.sh` configures remote execution automatically using the defaults above. To choose another host and directory, start the app on your **local computer** like this:
 
@@ -125,9 +136,9 @@ An active or unresolved harness blocks repository saves, including runs for othe
 
 #### Remote shell requirements
 
-The remote machine needs Linux, Bash, `setsid`, GNU coreutils (including `stdbuf`), findutils, and a configured `spec` build alias/function (or shell launcher on PATH) with its engine/provider credentials. It does **not** need this Rust web server or Bun/Vite for the web UI.
+The remote machine needs Linux, Bash, `setsid`, `flock`, GNU coreutils (including `stdbuf`), findutils, and a configured `spec` build alias/function (or shell launcher on PATH) with its engine/provider credentials. It does **not** need this Rust web server or Bun/Vite for the web UI. Optimization has additional requirements described below.
 
-The adapter explicitly sources the trusted remote **`~/.bash_aliases`** in noninteractive Bash with alias expansion enabled. For a new build it invokes:
+For builds and continuation, the adapter explicitly sources the trusted remote **`~/.bash_aliases`** in noninteractive Bash with alias expansion enabled. Optimization does not source that file. For a new build it invokes:
 
 ```sh
 export SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1
@@ -148,6 +159,8 @@ Use the actual directory containing the engine. An interactive shell alias for `
 **Automatic tool approval and recommended question answers are requested.** The adapter sets `SPEC_BUILD_AUTO=1`, `OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1`, and `OPENCODE_QUESTION_AUTO_RECOMMEND=1` after sourcing aliases, and clears persistent-session settings. A compatible OpenCode harness can then run unattended after the one **Save & run** confirmation. The installed remote alias/engine determines actual approval and answer behavior; verify it supports these flags and the foreground contract. There is no browser runtime-answer channel or blind `yes` fallback for unsupported engines or questions without a recommendation. Assume builds can modify remote files, execute tools, access the network, and incur provider costs using remote credentials. The UI confirmation is not a sandbox or per-tool approval boundary.
 
 #### Sessions and cancellation
+
+The watchdog, remote output cap, and retention policy in this subsection apply to ordinary builds. Optimization has separate reporting and retention rules described under [optimization](#optimization).
 
 The build adapter supplies supplemental OpenCode instructions without rewriting the saved snapshot. A single leading `# ` after optional indentation marks only that line completed; removing it reopens the requirement. `##` headings, inline hashes, and hashes in code blocks are not completion markers. The `/` editor shortcut preserves indentation and native undo; inside fenced code it types a normal slash. Use Alt+/ for literal slashes elsewhere. The remote adapter needs Bun or Node to merge these instructions into OpenCode configuration; the remote launcher must honor that configuration.
 
@@ -170,7 +183,7 @@ Completed run directories older than seven days are pruned on the next launch in
 
 Keep `.spec-runs/` out of remote version control and artifact uploads, for example by adding it to that checkout's `.git/info/exclude`. Private filesystem permissions do not prevent a same-user tool from reading or committing session files.
 
-Run records and latest-run associations persist privately in the local workspace's `.spec-output/` directory. After restarting the server, connect using its newly printed token and open the spec from **Saved files** to restore its latest output and status. Live or unresolved sessions resume polling; **Recover output** retries a failed lookup without launching a build or replacing the editor buffer. Recovery requires the same remote configuration for unfinished sessions; cached finished output remains available without SSH. **Stop run** explicitly cancels a recovered session. Unresolved sessions count toward concurrency limits and block another run for the same file. Recovery itself only retrieves logs/status; continuation is a separate explicit action described below. Local records have no automatic disk pruning; protect them like specs because they can contain sensitive runtime output.
+Run records and latest-run associations persist privately in the local workspace's `.spec-output/` directory. After restarting the server, connect using its newly printed token and open the spec from **Saved files** to restore its latest output and status. Live or unresolved sessions resume polling; **Load nohup output** explicitly rereads the latest associated remote log without launching a build or replacing the editor buffer. Recovery requires the same remote configuration for unfinished sessions; cached finished output remains available without SSH. **Stop run** explicitly cancels a recovered session. Unresolved sessions count toward concurrency limits and block another run for the same file. Recovery itself only retrieves logs/status; continuation is a separate explicit action described below. Local records have no automatic disk pruning; protect them like specs because they can contain sensitive runtime output.
 
 #### Continue a completed build
 
@@ -185,6 +198,41 @@ Duplicate requests for an older run are rejected once its continuation is submit
 Builds are capped at **120 KiB** because some existing launchers forward the prompt as one Linux process argument. Editing/saving support 2 MiB. Remote launchers using Bash command substitution may strip trailing newlines and must use an end-of-options separator when passing prompts to their engine.
 
 `SPEC_COMMAND` and local build execution have been removed: unset the old variable and use the SSH settings above. No model credentials are needed locally for editing or SSH builds. Validation uses an isolated SSH stand-in running the actual remote supervisor and alias scripts; no live SSH host or provider call is required by tests.
+
+### Optimization
+
+Click **Optimize** in the top-right header to improve the **latest discovered initial build**, independently of the selected editor tab. It does not save or upload editor changes and can run without an open tab. Discovery uses recorded build invocation metadata and narrowly supported nohup history, with a legacy fallback; it can select a project outside `SPEC_SSH_WORKSPACE`. Missing or ambiguous targets fail with diagnostics instead of inventing objectives.
+
+Create a trusted `.optim` file in the discovered remote project. For `task.md`, lookup prefers `task.md.optim`, then `task.optim`, otherwise requires exactly one root-level `*.optim`. No project objectives or benchmarks are bundled. See [OPTIMIZE.md](OPTIMIZE.md) for complete discovery rules, schema, and examples.
+
+Two modes share the same measurement scheduler:
+
+- **Explicit JSON v1:** provide one-step command argv, fixed read-only scalar measurement argv, direction, tolerances, patience, and optional command timeouts for each objective. The scheduler executes these commands directly without model requests.
+- **Free-form prose:** describe the improvements and real measurements to use. Responses planning with `gpt-6-sol` creates a validated plan. Each active-objective iteration runs the OpenCode **build** agent for a focused improvement, then Responses-based review, repair, and the planned validation/process command. Completed spec requirements and unrelated edits must be preserved. A model's assertion of convergence cannot stop the scheduler.
+
+Both modes require **Python 3.10+ on Linux**, subreaper support, and readable procfs on the execution host. Prose mode additionally needs authenticated OpenCode (`opencode` on PATH, or `SPEC_OPTIM_OPENCODE` naming a compatible executable) and execution-host Responses credentials with access to `gpt-6-sol`: `AZURE_OPENAI_ENDPOINT` plus `AZURE_OPENAI_API_KEY`, or `OPENAI_API_KEY` with the Azure endpoint unset. Existing OpenCode configuration selects the builder's provider. Local chat/voice dotenv settings are not transferred over SSH, and optimization does not source `~/.bash_aliases`.
+
+#### Measured stopping
+
+The scheduler records baselines, improves each active objective once per round, and independently remeasures **every** objective, including plateaued ones. For each objective, a stable round satisfies:
+
+```text
+abs(gain) <= absolute_tolerance + relative_tolerance * abs(previous_score)
+```
+
+Defaults are `1e-6` absolute tolerance, `1e-4` relative tolerance, and **three consecutive stable rounds**. A larger change, including a regression, resets the streak and reactivates a plateaued objective. Optimization stops only when all objectives satisfy their patience in the same measurement sweep. The difference between successive gains (`marginal_difference`) is diagnostic, not the stopping criterion: constant positive gains do not converge merely because their differences are small.
+
+Validation must succeed on the final tool state of each model-guided step; a later tool call invalidates an earlier success and requires revalidation. Command errors, invalid measurements, provider failures, and timeouts fail the run rather than count as convergence. Plateau detection does not guarantee a global optimum or positive cumulative improvement. There is **no overall iteration, model-turn, or runtime cap**; improving, oscillating, or noisy objectives can run indefinitely. Per-command timeouts are optional, and each Responses request has its own 300-second network timeout.
+
+#### Output and safety
+
+Select **Optimization** in **Output & logs** for optimization progress, or **Current file** for the selected file's build output. Optimization has a separate persisted latest-run association and recovers after browser/server restart without an open file. Selecting Optimization retries failed initial recovery. **Stop run** requests cancellation; optimization cannot use **Use recommended & continue**. Active or unresolved harnesses block conflicting optimization, build, continuation, and repository-save operations, while local editing and saving remain available after submission.
+
+Timestamped reports include baselines, iteration scores, signed and cumulative gains, marginal differences, stability streaks, and convergence/failure/interruption. Prose mode also reports planning, builder results, tool calls, validation, and step summaries. Full diagnostics remain in remote `progress.log`, `report.jsonl`, and bounded `commands.log` files. The browser retains the latest 256 KiB. Unlike ordinary builds, optimization has no overall watchdog or 8 MiB progress cap; report-bearing run directories are excluded from automatic seven-day pruning. Budget storage and remove finished reports manually.
+
+Each command runs under a Linux subreaper that cleans up detached descendants before releasing the project lock, including on timeout or confirmed cancellation. A command leaving live descendants behind fails after cleanup. Forced SIGKILL, crashes, privileged/hostile commands, work handed to existing external services, and a broken cancellation connection remain outside this guarantee; inspect remote state before restarting work.
+
+**This is trusted, unsandboxed execution.** Commands and model tools can change files, access credentials and the network, and incur provider costs. Prose mode sends objectives, `.optim` contents, bounded build/tool output, and measured state to model providers; reports may contain sensitive data. Instructions to preserve measurements and avoid credentials are not isolation. Review the [optimizer trust and privacy notes](OPTIMIZE.md#model-privacy-and-trust) before enabling it.
 
 ### Trailing sentence-part completions
 
@@ -226,6 +274,8 @@ Questions send up to the first **64 KiB of spec**, the last **64 KiB of availabl
 
 **Edit Agent.md** opens an inline editor for creating and saving that workspace file, with revision checks to prevent overwriting concurrent edits. See [chat editing](docs/chat-editing.md) for draft and reload behavior. Saving does not automatically install instructions into remote builds or AI conversations.
 
+**Inspect current context** previews the current spec/output, while **Inspect last answer input** shows the frozen snapshot used for the previous answer before provider context limits. Later output polling does not change that snapshot.
+
 The separate **OpenAI voice conversation** mic button opens **OpenAI Realtime** voice input and audio responses. Set server-side `OPENAI_API_KEY` (optionally `OPENAI_REALTIME_MODEL`, default `gpt-realtime`), restart, and reload. Voice is independent of Azure text chat and requires microphone permission on HTTPS or localhost. See [voice setup and privacy](docs/realtime.md).
 
 The **Azure OpenAI mic** button opens a separate **Azure OpenAI Realtime** panel for voice input and audio responses, preserving the OpenAI button. Select **Start Azure voice conversation** and allow microphone access. Starting either provider stops the other voice session in that chat window. Set all three local Rust server-side variables `AZURE_OPENAI_REALTIME_ENDPOINT="https://your-resource.openai.azure.com"`, `AZURE_OPENAI_REALTIME_API_KEY`, and `AZURE_OPENAI_REALTIME_DEPLOYMENT`, then restart and reload. The endpoint accepts only a canonical public Azure HTTPS resource origin, optionally ending in `/`, not an `/openai/v1` URL. Invalid Azure voice configuration disables Azure voice only with a sanitized stderr warning, without aborting the text server; shared text configuration errors still fail startup. There is no fallback to OpenAI or Azure text credentials. The authenticated `POST /api/realtime/azure` endpoint and `azureRealtime` capability are independent of OpenAI. Azure uses GA client-secret minting followed by raw-SDP negotiation, keeping both credentials backend-side. Spec/log snapshots and microphone audio go to the selected provider and incur its charges. See [Azure setup, protocol, and privacy](docs/realtime.md#azure-setup).
@@ -237,6 +287,14 @@ SPEC_AZURE_REALTIME_ENV_FILE="$HOME/.config/spec/azure-voice.env" ./run.sh --loc
 ```
 
 This exports the voice-only selector without sourcing the file or changing `SPEC_AI_ENV_FILE` or text variables. Omit `--local` to keep remote builds enabled. Use an absolute path because the launcher changes to `backend/`. Browser and remote build environments are not automatically transferred to the local Rust server. Never put secrets in the browser or frontend environment variables. Restart the server and reload the browser after changing configuration.
+
+With Azure CLI already signed in, the isolated launcher can retrieve an existing resource's voice settings without writing credentials to disk or changing text configuration:
+
+```sh
+bash scripts/azure-voice.bash RESOURCE_GROUP RESOURCE REALTIME_DEPLOYMENT ./run.sh --local
+```
+
+Voice takes a fresh spec/output snapshot at connection time; subsequent edits are not streamed into the call. Recent provider-supplied transcripts appear separately from text chat. Use **Resume audio** if playback is blocked, and stop or close the panel to release the microphone.
 
 ### Frontend development
 
@@ -304,7 +362,16 @@ bunx playwright install chromium
 bun run test:e2e
 ```
 
-Browser tests start isolated real Rust servers and temporary workspaces. They cover authentication, saved files, tabs, conflicts/downloads, in-flight saves, desktop/mobile layouts, and remote-build streaming/completion/cancellation/failure using a local SSH stand-in and the actual fixed remote scripts. They never use your specs or invoke a model. Screenshots are written under `frontend/test-results/`, not over the documentation image. See [validation results](docs/REVIEW.md#validation).
+Also run the standalone optimizer and Azure launcher suites from the repository root:
+
+```sh
+python3 -B -m unittest discover -s backend/src -p optimize_test.py -v
+node --test scripts/azure-voice.test.cjs
+```
+
+Build the debug backend and frontend assets before browser tests: the fixtures use `backend/target/debug/spec` and `frontend/dist` without rebuilding them. Run in an environment without production provider/SSH exports so inherited settings cannot enable live integrations.
+
+Browser tests start isolated real Rust servers and temporary workspaces. They cover authentication, saved files, tabs, conflicts/downloads, in-flight saves, desktop/mobile layouts, optimization controls/recovery, same-session continuation, repository saving, chat/context editing, and both voice panels. Remote-build streaming/completion/cancellation/failure uses a local SSH stand-in and the actual fixed remote scripts; providers are mocked. They never use your specs or invoke a model. Screenshots are written under `frontend/test-results/`, not over the documentation image. See the [release notes](https://github.com/AI10xDev/spec/releases/tag/v0.1.5) for current results and the [historical validation results](docs/REVIEW.md#validation) for the original review.
 
 For a timed output smoke test, run `bun run test` from `frontend/`. It prints integers 1 through 100, starting immediately and waiting 1000 milliseconds between lines, then exits successfully (about 99 seconds total). Use `bun run test:unit` for the automated unit suite.
 
@@ -316,6 +383,8 @@ frontend/      New Vite + React TypeScript UI, unit and browser tests
 run.sh         Build the frontend and launch the Rust server
 build.sh       Build the frontend and release backend without starting a server
 ops.sh         Build and launch with configurable remote SSH settings
+OPTIMIZE.md    Optimizer configuration, convergence, execution, and safety guide
+scripts/       Remote batch builds and isolated Azure voice launcher
 docs/          Feature guide, review, security notes, screenshot
 archive/       Original source collection and license notices (not executed or bundled)
 workspace/     Local user files (created at runtime; gitignored)

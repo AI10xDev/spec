@@ -101,6 +101,7 @@ test("Optimize works without a tab, confirms risks, prevents same-tick duplicate
   await expect(page.getByRole("status")).toHaveText("Starting optimization...")
   expect(dialogs).toHaveLength(1)
   expect(dialogs[0]).toMatch(/trusted project's \.optim commands.*modify files.*incur provider costs/)
+  expect(dialogs[0]).toContain("Prose mode sends project context to model providers")
   expect(dialogs[0]).toContain("loops until convergence, with no automatic time or iteration cap")
   expect(dialogs[0]).toContain("Use Stop run to stop it manually")
   expect(dialogs[0]).toContain("does not save or upload editor changes")

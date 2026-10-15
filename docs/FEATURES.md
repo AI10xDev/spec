@@ -1,5 +1,7 @@
 # Vite version: feature guide
 
+This guide covers the core workspace. See the [README](../README.md#features) for the complete current feature list, including [optimization](../README.md#optimization), [repository saving](../README.md#save-edited-repository-changes), and [session chat, context inspection, and voice](../README.md#session-chat).
+
 ## 1. Connect to your local workspace
 
 Start the Rust server and open its printed URL. The fragment supplies a per-process access token; the UI removes the fragment from the address bar and stores the token in the current tab's session storage. You can also paste the token into the connection form. Restarting Rust rotates the token: use its new URL.
@@ -31,7 +33,7 @@ Use the **New file** input to create a named buffer, or select a saved file. Eac
 - Opening a file already in a tab does not silently reload it from disk.
 - Edits typed while a save is in flight remain in the buffer and remain dirty if different from the acknowledged snapshot.
 
-Open-tab layout and unsaved buffers are intentionally **not persisted in browser storage**. Save or download before leaving. Closing a tab does not cancel its running process; reopen the saved file to recover its latest output, including after browser or server restart.
+Open-tab layout and unsaved buffers are intentionally **not persisted in browser storage**. Reloading reopens only the last selected saved file if it still exists. Save or download before leaving. Closing a tab does not cancel its running process; reopen the saved file to recover its latest output, including after browser or server restart.
 
 ## 4. Two-pane editor and output view
 
@@ -77,10 +79,12 @@ A failure to launch the local SSH client is reported immediately. SSH connection
 
 ### Run limits and lifecycle
 
+The watchdog and remote log/retention limits below apply to ordinary builds, not [optimization](../README.md#output-and-safety), which has independent output and no overall runtime cap.
+
 - At most one unresolved run per filename and four in total, including recovered or detached sessions whose completion is unconfirmed.
 - Latest 256 KiB of output per retained run. Truncation is explicitly indicated.
 - At most 32 runs retained in memory; finished entries can be evicted but durable records remain on disk without automatic pruning.
-- Polling approximately every 650 ms for the visible active run; slower retry on fetch errors or unavailable/unknown recovered sessions.
+- Polling approximately every 650 ms for recoverable file runs, including background tabs, and independently for optimization; slower retry on fetch errors or unavailable/unknown recovered sessions.
 - An independent fifteen-minute remote watchdog survives disconnect. The local attachment times out fifteen seconds later. Network loss may prevent Stop confirmation.
 - Ctrl+C/SIGTERM detaches on normal server shutdown; uploaded builds continue remotely.
 - Closing a browser page does not stop execution.
@@ -97,7 +101,7 @@ A failure to launch the local SSH client is reported immediately. SSH connection
 | Spec/output split | Desktop two-pane view; stacked mobile view |
 | Background shell build | Opt-in remote foreground build over SSH; local web server, bounded output, cancellation |
 | Basename mirror saves | No mirroring; saves only the named workspace file |
-| Persistent V2 session inbox | Not ported; one-shot runs only |
+| Persistent V2 session inbox | Not ported; explicit [continuation of completed builds](../README.md#continue-a-completed-build) resumes the captured engine session |
 | Azure inline completion/filename ranking | Optional sentence-part trailing completions; filename ranking not ported |
 | `/eval`, `/telle`, legacy eval, plan picker | Not ported |
 | Terminal keybindings/syntax highlighting | Browser editing, save shortcut, and slash completion-marker toggle; no syntax highlighting |

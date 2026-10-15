@@ -284,7 +284,7 @@ function App() {
     if (busy || submitting.current || !execution || pendingRuns) return
     submitting.current = true
     try {
-      if (!window.confirm("Run optimization using the trusted project's .optim commands? These commands can modify files, execute tools, access the network, and incur provider costs. The optimizer loops until convergence, with no automatic time or iteration cap. Use Stop run to stop it manually. This does not save or upload editor changes.")) return
+      if (!window.confirm("Run optimization using the trusted project's .optim commands or prose instructions? Prose mode sends project context to model providers and uses OpenCode builder and review tools. Both modes can modify files, execute tools, access the network, and incur provider costs. The optimizer loops until convergence, with no automatic time or iteration cap. Use Stop run to stop it manually. This does not save or upload editor changes.")) return
       setBusy(true)
       setError("")
       setNotice("Starting optimization...")

@@ -1,9 +1,16 @@
 # Deterministic Optimizer
 
-`backend/src/optimize.py` uses Python 3.10+ on Linux and only the standard library. It
-optimizes a trusted project using explicit argv commands, without an LLM or shell
-dispatch. It does not supply a project `.optim`: actual objectives must be chosen
-by the project owner.
+`backend/src/optimize.py` uses Python 3.10+ on Linux and only the standard library.
+Command supervision requires `prctl(PR_SET_CHILD_SUBREAPER)` and readable procfs
+`/proc/self/task/<pid>/children`; unavailable supervision fails before command launch. It
+optimizes a trusted project in either the shipped explicit-command JSON mode
+(without an LLM) or free-form prose mode using `ResponsesOptimizer` with OpenCode
+builder execution for each optimization iteration. Prose mode
+calls the Responses API with model `gpt-6-sol` and the exact `instructions` value
+`Optimize above till asymptotics`. Both modes use the same independently measured
+scheduler to determine convergence, not model self-scores or declarations. The
+script does not supply a project `.optim`: actual objectives must be chosen by
+the project owner.
 
 ## Integration Contract
 
@@ -43,10 +50,11 @@ matching target reuses that protection instead of conflicting with its own
 supervisor; other targets acquire an additional lock. Do not set this variable
 for standalone invocations. It is removed from objective subprocess environments,
 and lock descriptors are not passed to those subprocesses.
-Locks are advisory, not a sandbox. An external target's additional lock is owned
-by the optimizer process; abrupt process death releases it before the supervisor
-necessarily finishes cleaning up descendants. Confirm remote cleanup before
-restarting work after a crash.
+Locks are advisory, not a sandbox. Normal completion, command failure, timeout,
+and handled cancellation finish command-descendant cleanup before releasing the
+target lock. An external target's additional lock is owned by the optimizer
+process; abrupt process death can release it before cleanup finishes. Confirm
+remote cleanup before restarting work after a crash or forced termination.
 
 For each **initial build only**, the harness must write
 `WORKSPACE/.spec-runs/run-*/invocation` as these four NUL-separated byte fields,
@@ -62,16 +70,35 @@ optimization, repository save, or continuation as initial builds. The output mus
 exist and be a regular `.out` file. The original objective/snapshot need not still
 exist: its original filename is identity, not an input to execute.
 
-The caller must own cancellation and terminate the **whole process group**.
-Commands inherit that group; the optimizer never creates subprocess sessions.
+The caller must own cancellation and signal the optimizer's **whole process group**.
+Direct commands inherit that group; OpenCode may create detached tool sessions.
 SIGTERM/SIGINT attempt an `interrupted` final report and exit 130. SIGKILL cannot
 write a final report. Exit 0 means joint convergence; exit 1 means failure; exit 2
 means incorrect CLI arguments. No optimizer iteration or wall-clock limit exists.
 An integrating supervisor must not silently apply its ordinary build timeout if
-unbounded optimization is desired. On errors/timeouts the direct child is killed
-and reaped; the supervisor must also clean up remaining descendants. Commands
-must not daemonize, escape the group, or mutate the project asynchronously after
-returning. Use one optimizer at a time per project and keep measurements read-only.
+unbounded optimization is desired.
+
+Every command (builder, model tool, process, or measurement) runs under its own
+Python subreaper process. Detached and double-forked descendants are adopted there,
+not by the optimizer's caller. On completion, failure, timeout, or handled
+cancellation, that subreaper kills remaining live children with SIGKILL and reaps
+them, repeating as further descendants are adopted. Only its own unreaped direct
+children are signaled, avoiding PID-reuse races and unrelated caller processes.
+The optimizer waits for this cleanup before continuing, measuring, or releasing
+the project lock. Repeated SIGINT/SIGTERM are blocked during cleanup. A successful
+command that leaves live descendants behind is cleaned up and reported as a failure;
+commands must finish all project work before returning. Detached sessions used
+synchronously by OpenCode are supported.
+
+Cleanup can exceed a command's timeout: unkillable processes or cleanup errors
+retain supervision rather than voluntarily releasing the lock. This is not a
+sandbox or a SIGKILL/crash guarantee. Killing the optimizer or its subreaper,
+including the SSH supervisor's five-second forced-kill escalation, can defeat
+cleanup. Work delegated to an already-running external service is not a descendant
+and cannot be tracked this way. Privileged or hostile commands are outside this
+guarantee. Use external containment such as a cgroup if cleanup must survive forced
+process death, and verify cleanup before restarting after such an event. Use one
+optimizer at a time per project and keep measurements read-only.
 
 ## Discovery
 
@@ -129,7 +156,128 @@ In the discovered project root, prefer `<filename>.optim`, then `<stem>.optim`
 basename for this lookup, even if the recorded name includes directories. If
 neither exists, require exactly one root-level `*.optim`. Ambiguity is an error.
 
-The file is strict JSON v1, for example:
+The `.optim` file must be nonempty UTF-8 and at most 1 MiB. An optional leading
+UTF-8 BOM is ignored for mode detection. If its first
+non-whitespace character is `{`, it is parsed as strict JSON v1 using the shipped
+explicit-command mode; malformed JSON does not fall back to prose. Other nonempty
+content selects free-form Responses mode.
+
+### Free-Form Responses Mode
+
+For example, a project owner could write `task.md.optim` as:
+
+```text
+Optimize the pending objectives in task.md while preserving completed requirements.
+Improve request throughput without changing externally visible behavior.
+Inspect the existing benchmark and tests, establish a repeatable read-only
+throughput measurement in requests per second, and keep that measurement fixed.
+Profile the hot path, implement one improvement at a time, and run correctness
+tests before accepting a change. Maximize throughput with absolute tolerance
+0.000001, relative tolerance 0.0001, and patience 3. Set timeout_seconds to 300
+for each command and measurement.
+```
+
+This is illustrative prose, not a shipped objective or a guarantee that a suitable
+benchmark exists. The model first plans, using `run_command` to inspect the
+project as needed. It is instructed not to optimize during planning, to respect
+completed spec lines and unrelated user changes, and to return a JSON v1 plan
+covering every pending objective and its corresponding `.optim` process. The plan
+defines objective names, one-step command argv, fixed read-only scalar measurement
+argv, directions, tolerances, patience, and optional command timeouts. It is
+validated with the same schema as explicit JSON below. If no real measurement can
+be established, the model is instructed to explain why rather than invent scores;
+a non-plan response fails validation.
+
+After planning, the scheduler measures all baselines. For each active objective
+in each round, it first invokes the OpenCode **build** agent for one focused
+refactor, asking it to delegate inspection to the **explore** subagent when useful.
+The builder receives the original objectives, unchanged `.optim` text, bounded
+build output, the objective's process and fixed measurements, measured states,
+and prior summaries. Completed requirements and unrelated changes must be preserved.
+The Responses model then receives that builder result, the plan for that objective,
+measured states, and previous step summaries. It reviews and validates the builder's
+changes rather than repeating the refactor, and is instructed to inspect and apply
+improvements through `run_command`, including executing the planned command when
+appropriate, then return a factual summary. Tool calls execute real argv commands
+on the execution host and return output to the model; this is not a plan-only
+workflow. The scheduler executes the planned optimization command after the model
+summary unless its last tool in this step ran that exact argv successfully.
+Every subsequent tool invalidates prior validation, even an apparent inspection,
+because tool mutability is unknown; a failed rerun also invalidates success.
+Inspection-only calls or unsupported claims of convergence cannot replace the
+planned process. Nonzero model tool exits return their exit status and output to
+the model for diagnosis and repair; a failed scheduler-run process still fails the
+run. The scheduler independently executes the fixed measurement commands after the round and alone
+owns convergence. Instructions prohibit changing measurement definitions,
+fabricating scores, reading credentials, or declaring convergence; these are
+model instructions, not a sandbox or an enforced guarantee of model behavior.
+
+Install and authenticate OpenCode on the execution host. The default executable
+is `opencode` on `PATH`; set `SPEC_OPTIM_OPENCODE=/absolute/path/to/opencode-source`
+(or another compatible executable) to override it. This is one executable path,
+not a shell command or alias. It must support:
+
+```sh
+opencode run --dir PROJECT --agent build --auto --format json -- 'Follow the optimization iteration instructions supplied on stdin.' < CONTEXT.md
+```
+
+`--auto` requests unattended permission approval, as in the build harness; only
+use this flow for trusted projects. The build agent delegates to explore because
+OpenCode's explore agent is normally subagent-only, not directly runnable.
+Provider/model selection and agent permissions use the execution host's existing
+OpenCode configuration; the optimizer does not replace that configuration.
+Responses credentials below are also required for planning and validation.
+Shell aliases are not loaded. The remote launcher includes `~/.local/bin` and
+`~/.bun/bin` on `PATH`; other installations need a configured executable path.
+
+Context is supplied on stdin through an unnamed temporary mode-0600 file, avoiding
+both command-line size limits and OpenCode's truncating attachment reader. The
+descriptor is closed on completion, failure, or cancellation. Builder output retains
+the last 64 KiB so verbose tool output does not displace the final summary, and is
+included in progress reports. Each builder runs under the per-command subreaper
+and the objective's command timeout, including cleanup of detached OpenCode tools
+as described above.
+A missing executable, nonzero builder exit, timeout, or OpenCode stderr warning about
+falling back to the default agent fails the run, not convergence. JSON mode keeps
+tool/model events on stdout separate from these diagnostics, so quoted warning
+text in tool results does not trigger fallback detection. Compatible executables
+must preserve this stdout/stderr contract. Keep the `build`
+agent enabled and runnable as a primary agent in the host's configuration.
+No nested `spec build` is launched: it would contend with the optimizer's project
+lock. Planned commands should perform project process work and correctness
+validation rather than launch another locking harness.
+
+Configure credentials in the environment inherited by the Python optimizer on
+the **remote execution host** (or the local execution host for direct runs):
+
+| Provider | Execution-host environment |
+| --- | --- |
+| Azure | `AZURE_OPENAI_ENDPOINT=https://RESOURCE.openai.azure.com` and `AZURE_OPENAI_API_KEY` |
+| OpenAI | `OPENAI_API_KEY`, with `AZURE_OPENAI_ENDPOINT` unset |
+
+Azure also accepts endpoint paths `/openai/v1` and `/openai/v1/responses`; requests
+use `/openai/v1/responses` with the `api-key` header. Without
+`AZURE_OPENAI_ENDPOINT`, requests use `https://api.openai.com/v1/responses` with
+Bearer authentication. Presence of the Azure endpoint selects Azure, with no
+fallback to the OpenAI key. Endpoints must be HTTPS without embedded credentials,
+queries, fragments, or whitespace; redirects are not followed. The selected key
+must be nonempty ASCII without whitespace, and the provider must support
+`gpt-6-sol`. This is **not Rust/UI server configuration**: setting keys only on
+that server does not configure the remote optimizer. Shell aliases are not
+sourced or executed to obtain endpoint/key settings. JSON mode needs no model
+credentials and makes no Responses requests.
+
+There is no overall iteration, tool-call, model-turn, or run wall-clock cap.
+Each Responses request uses a 300-second network timeout; a timeout, failed
+request, or unsuccessful response fails the run, never counts as convergence.
+This is not an overall optimization deadline. Each planning tool command has a
+300-second timeout. Each optimization tool command uses its objective's
+`timeout_seconds`, as do measurements; omitted or null means no command timeout.
+That timeout applies per command, not to the entire model-guided step.
+
+### Explicit JSON Mode And Shared Schema
+
+The shipped strict JSON v1 format is retained, for example:
 
 ```json
 {
@@ -156,11 +304,14 @@ The file is strict JSON v1, for example:
 ```
 
 These tool paths are illustrative, not shipped commands or a runnable config.
+In JSON mode, the scheduler directly executes each active objective's `command`
+once per round, without model planning or model tool calls.
 `name`, `command`, `measure`, and `direction` are required for every objective.
 Names must be unique, printable, nonblank strings of at most 200 characters.
 Argv arrays must have 1..256 string elements, a nonempty executable, no NULs, and
 at most 65,536 total characters. Commands run with the discovered project as cwd,
-inherited environment, and stdin closed. No `shell=True` is used. Arguments remain
+inherited environment, and stdin closed (except builder context input above).
+No `shell=True` is used. Arguments remain
 literal, including shell-looking strings. Inherited `PATH` resolves executables.
 
 Each subprocess additionally receives:
@@ -181,7 +332,8 @@ arithmetic overflow, or stdout exceeding 4 KiB fail the run, never converge it.
 Defaults are absolute tolerance `1e-6`, relative tolerance `1e-4`, and patience `3`.
 Patience must be an integer in 2..10,000. Absolute tolerance must be in 0..1e100;
 relative tolerance in 0..1. Optional `timeout_seconds` applies separately to each
-step and measurement, including baseline: positive and at most 86,400 seconds;
+JSON step command, model tool command, and measurement, including baseline:
+positive and at most 86,400 seconds;
 omitted or null means no timeout. Timeout is an explicit failure, not convergence.
 Config is limited to 1 MiB and 1..128 objectives. Unknown/duplicate keys, wrong
 types (including booleans as numbers), nonfinite and excessive values are rejected.
@@ -210,12 +362,22 @@ near-zero difference between gains, counts as stability. Any larger change,
 including regression, resets the streak. All objectives must have their required
 successive stable rounds in the same final remeasurement sweep. There is **no
 hard iteration cap**, and steadily improving, oscillating, or noisy objectives may
-run indefinitely. This is a plateau criterion, not a guarantee of optimality or
-positive cumulative gain. Tiny regressions within tolerance can also plateau.
+run indefinitely. This is a measured plateau criterion, not a guarantee of an
+asymptotic optimum, global optimality, or positive cumulative gain, regardless of
+the model's instructions. Tiny regressions within tolerance can also plateau.
+Scores come from independently executed measurement commands, never model
+self-scores; their usefulness still depends on the validity of those measurements.
 
 Progress is streamed to stdout and appended as readable JSON lines to
 `progress.log`. `report.jsonl` contains the same structured records: `start`,
-`baseline`, `step`, per-objective `iteration`, and `final`. Iteration records include
+`baseline`, `step`, per-objective `iteration`, and `final`. Responses mode also
+records `model_request` (model, objective, iteration), `model_tool` (executed argv),
+`process` (the planned command when dispatched by the scheduler),
+`plan` (model and validated objectives), and `model_step` (factual step summary).
+`builder_start` records each OpenCode invocation; `builder_result` records its
+exit code, bounded output, and truncation flag before validation and measurement.
+Every record includes a Unix-seconds `timestamp`, so model requests, plans, tool
+dispatches, steps, and numeric results can be correlated. Iteration records include
 scores, signed/cumulative gains, marginal differences, tolerance, streak, patience,
 and whether a step ran. Final records report convergence with scores, failure with
 an error, or interruption. Completed records are flushed and fsynced, including
@@ -228,6 +390,28 @@ accumulated in memory or used to block children. Metric stdout has its independe
 4 KiB validation cap even after log truncation. Logs flush as chunks arrive and
 are fsynced with progress records. Progress/report files grow with the number of
 iterations; budget storage accordingly.
+
+### Model Privacy And Trust
+
+Responses mode sends the provider the project path, original filename, original
+objective file contents when available (up to 1 MiB), the complete `.optim` text,
+and the last 64 KiB of original build output with a truncation flag. If the
+original objective file is unavailable, the context says so; the run does not
+require it to exist. It also sends measured states and step summaries, and up to
+64 KiB of combined stdout/stderr per tool call, with an exit code and a truncation
+flag when the buffer fills. Tool inspection can expose additional project contents. The
+Responses payload sets `store: false`; this does not prevent transmission to the
+provider or establish a broader provider retention guarantee.
+The same objective/process context and measured states are supplied to OpenCode's
+configured builder provider; builder output is also sent to the Responses model.
+
+Model-directed code is unrestricted trusted code, **not sandboxed**. Tools have
+the same project cwd and inherited environment as other commands, including
+access to execution-host credentials. Bounded output, argv validation, locks, and
+instructions not to read credentials are not security isolation. Review what the
+objective, `.optim`, build logs, and tools may disclose before enabling prose
+mode. Local reports include model plans, tool argv, summaries, and command output
+and may also contain sensitive data.
 
 The SSH harness likewise keeps streaming optimizer progress beyond its ordinary
 8 MiB build-log cap. The UI retains the latest 256 KiB; full reports stay in the
@@ -255,4 +439,9 @@ python3 -B -m unittest discover -s backend/src -p optimize_test.py -v
 
 Tests use temporary directories, Python subprocess fixtures, and the real Linux
 shell harness with Git/flock to cover external-target contention and same-scope
-supervisor locking. No project config, network, or history execution is required.
+supervisor locking. Detached-session and double-fork fixtures cover timeout,
+cancellation, successful exits with leftover workers, and failed exits, verifying
+cleanup before lock release and survival of unrelated caller children. Those
+fixtures use Linux pidfds for safe test cleanup. Validation regressions cover
+later edits, failed reruns, inspection, and successful final revalidation.
+No project config, network, or history execution is required.
