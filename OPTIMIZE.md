@@ -14,25 +14,33 @@ the project owner.
 
 ## Integration Contract
 
-The top-right **Optimize** button launches the optimizer through the existing
-authenticated SSH harness, independently of the open editor file. It does not
-save or upload unsaved editor changes. Confirm execution only for trusted project
-commands. View live progress under **Optimization** in Output & logs; **Stop run**
+The top-right **Optimize** button uploads the active, nonempty `.optim` editor
+buffer through the existing authenticated SSH harness, including unsaved changes.
+It does not save the file locally or change the editor's saved revision. Confirm
+execution only for trusted commands. View live progress under **Optimization** in Output & logs; **Stop run**
 cancels the run. Reloading restores its status, and selecting Optimization retries
 a failed initial recovery. Remote execution must be configured as for Save & run.
 
+The UI sends `POST /api/optimize` with `{"name":"task.optim","content":"..."}`.
 The harness puts the unchanged bytes of `backend/src/optimize.py` in the run's
-`snapshot.md` and launches:
+`snapshot.md`, then uploads the spec unchanged to a unique mode-0600
+`~/projects/spec-optimization.XXXXXXXX.optim` on the remote host. It resolves that
+directory there and passes the uploaded file's absolute path when launching:
 
 ```sh
-python3 -u snapshot.md RUN_DIRECTORY WORKSPACE
+python3 -u snapshot.md RUN_DIRECTORY WORKSPACE CONFIG_PATH
 ```
 
 `WORKSPACE` is the directory containing the build harness's `.spec-runs` registry;
 the discovered project may be elsewhere. `RUN_DIRECTORY` receives append-only
 reports and is created if needed. Prefer absolute paths and a fresh run directory.
-The script can also be executed directly under its `.py` name with the same two
-arguments. Optimization has a separate persisted output pointer from file builds.
+The script can also be executed directly under its `.py` name with these arguments.
+Only standalone `.py` invocations may omit `CONFIG_PATH` to use project-root
+lookup. Optimization has a separate persisted output pointer from file builds.
+Uploads are byte-count framed separately from the script and cancellation control;
+incomplete uploads fail before launch and remove the partial config. After launch,
+the uploaded config is retained alongside the reports' reference to its path;
+remove it manually when no longer needed.
 
 Before loading config or measuring, the optimizer takes a nonblocking exclusive
 `flock` on the actual target project's lock directory. It uses Git to resolve the
@@ -160,7 +168,13 @@ supported history entry before optimization can safely choose the latest target.
 
 ## Configuration
 
-In the discovered project root, prefer `<filename>.optim`, then `<stem>.optim`
+UI runs always load the explicitly uploaded absolute `CONFIG_PATH`; they never
+search the discovered project root or fall back to a different config. The report's
+`config` field identifies this input. Missing or invalid explicit configs fail
+instead of executing another file. No default process or measurements are invented.
+
+For standalone `.py` invocations without `CONFIG_PATH` only, in the discovered
+project root prefer `<filename>.optim`, then `<stem>.optim`
 (for `task.md`: `task.md.optim`, then `task.optim`). Use the original filename's
 basename for this lookup, even if the recorded name includes directories. If
 neither exists, require exactly one root-level `*.optim`. Ambiguity is an error.
@@ -168,12 +182,10 @@ neither exists, require exactly one root-level `*.optim`. Ambiguity is an error.
 If selection fails, the final failure report includes the discovered `project`,
 `filename`, build `output`, and invocation `source`. A missing-config error lists
 the expected paths; an ambiguity error also lists the competing candidates.
-Create the intended config in that project on the **execution host**, not merely
-in a local editor tab: Optimize does not save or upload editor files. No default
-process is generated, and no older build is selected to work around missing config.
-For example, a discovered project `/home/opencode/project` and filename `upgrade_4`
-require `/home/opencode/project/upgrade_4.optim`, or one other root-level `.optim`
-file containing the owner's optimization process and measurable objectives.
+For standalone lookup, create the intended config in that project on the
+**execution host**, or supply an absolute `CONFIG_PATH`. In the UI, select the
+`.optim` tab and click Optimize to upload its current contents instead.
+No older build is selected to work around missing config.
 
 The discovered project is the execution directory recorded in the selected build
 invocation, not a repository name mentioned in the build prompt. For example,

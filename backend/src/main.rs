@@ -121,11 +121,17 @@ struct Run {
     revision: String,
 }
 
+#[derive(Deserialize)]
+struct Optimize {
+    name: String,
+    content: String,
+}
+
 enum RunInput {
     Build(Run),
     RepositorySave(Run),
     Continue(String),
-    Optimize,
+    Optimize(Optimize),
 }
 
 const CONTINUE_RECOMMENDED: &str = "Use the recommended option from your last response and continue the build session. Implement it now; do not stop at a plan. If no recommended option was provided, explain what input is needed rather than guessing.";
@@ -331,8 +337,23 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
     start_run(app, RunInput::Build(input)).await
 }
 
-async fn optimize(State(app): State<App>) -> Result<Json<serde_json::Value>> {
-    start_run(app, RunInput::Optimize).await
+async fn optimize(
+    State(app): State<App>,
+    Json(input): Json<Optimize>,
+) -> Result<Json<serde_json::Value>> {
+    validate(&input.name)?;
+    if !input.name.ends_with(".optim") {
+        return Err(invalid("Select a .optim file to optimize"));
+    }
+    if input.content.trim().is_empty()
+        || input.content.contains('\0')
+        || input.content.len() > 1024 * 1024
+    {
+        return Err(invalid(
+            "Optimization specs must be nonempty UTF-8 without NUL bytes and at most 1 MiB",
+        ));
+    }
+    start_run(app, RunInput::Optimize(input)).await
 }
 
 async fn latest_optimization(State(app): State<App>) -> Result<Json<Option<Output>>> {
@@ -375,7 +396,7 @@ async fn repository_save(
 
 async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>> {
     let repository_save = matches!(&input, RunInput::RepositorySave(_));
-    let optimization = matches!(&input, RunInput::Optimize);
+    let optimization = matches!(&input, RunInput::Optimize(_));
     let remote = app.remote.as_ref().ok_or_else(|| Error(
         if repository_save { StatusCode::FORBIDDEN } else { StatusCode::BAD_REQUEST },
         "Remote execution is disabled. Set SPEC_SSH_TARGET and SPEC_SSH_WORKSPACE on the local Rust server, then restart it.".into(),
@@ -397,12 +418,16 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         RunInput::Continue(id) => Some(id.clone()),
         _ => None,
     };
+    let mut optimization_spec = String::new();
     let (name, content, session_id) = match input {
-        RunInput::Optimize => (
-            "optimization".into(),
-            include_str!("optimize.py").into(),
-            None,
-        ),
+        RunInput::Optimize(input) => {
+            optimization_spec = input.content;
+            (
+                "optimization".into(),
+                include_str!("optimize.py").into(),
+                None,
+            )
+        }
         RunInput::Build(input) | RunInput::RepositorySave(input) => {
             let document = read(&app.root, &input.name)?;
             if document.revision != input.revision {
@@ -527,7 +552,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
     } else if repository_save {
         remote.repository_command(content.len(), &id, &name)
     } else if optimization {
-        remote.optimization_command(content.len(), &id, &name)
+        remote.optimization_command(content.len(), &id, &name, optimization_spec.len())
     } else {
         remote.command(content.len(), &id, &name)
     };
@@ -570,16 +595,17 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             } else if repository_save {
                 b"[started] remote repository save over SSH: azure/gpt-6-sol with the saved snapshot as context and the existing repository workflow. Output and logs only.\n"
             } else if optimization {
-                b"[started] Optimizing the latest detached build using its project's .optim objectives. No iteration or time limit; Stop run cancels. Progress and gain reports follow.\n"
+                b"[started] Uploading the editor's .optim spec to remote ~/projects and optimizing the latest detached build using its absolute path. No iteration or time limit; Stop run cancels. Progress and gain reports follow.\n"
             } else {
                 b"[started] remote spec build over SSH: running the saved snapshot with automatic tool approval requested. Output and logs only.\n"
             },
         );
         // EOF only detaches. Stop sends a distinct control byte after the entire
-        // snapshot, so an early Stop cannot be mistaken for snapshot contents.
+        // snapshot and optimization spec, so an early Stop cannot corrupt either.
         let mut control = stopped.clone();
         let mut upload = tokio::spawn(async move {
             stdin.write_all(content.as_bytes()).await?;
+            stdin.write_all(optimization_spec.as_bytes()).await?;
             let _ = control.changed().await;
             if *control.borrow() == RunControl::Cancel {
                 stdin.write_all(b"C").await?;

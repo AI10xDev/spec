@@ -150,15 +150,21 @@ impl Remote {
     }
 
     pub fn command(&self, bytes: usize, id: &str, name: &str) -> Command {
-        self.build_command(bytes, id, name, "build", "")
+        self.build_command(bytes, id, name, "build", "", 0)
     }
 
     pub fn repository_command(&self, bytes: usize, id: &str, name: &str) -> Command {
-        self.build_command(bytes, id, name, "repository-save", "")
+        self.build_command(bytes, id, name, "repository-save", "", 0)
     }
 
-    pub fn optimization_command(&self, bytes: usize, id: &str, name: &str) -> Command {
-        self.build_command(bytes, id, name, "optimize", "")
+    pub fn optimization_command(
+        &self,
+        bytes: usize,
+        id: &str,
+        name: &str,
+        config_bytes: usize,
+    ) -> Command {
+        self.build_command(bytes, id, name, "optimize", "", config_bytes)
     }
 
     pub fn continuation_command(
@@ -168,7 +174,7 @@ impl Remote {
         name: &str,
         session_id: &str,
     ) -> Command {
-        self.build_command(bytes, id, name, "continue", session_id)
+        self.build_command(bytes, id, name, "continue", session_id, 0)
     }
 
     fn build_command(
@@ -178,9 +184,10 @@ impl Remote {
         name: &str,
         mode: &str,
         session_id: &str,
+        config_bytes: usize,
     ) -> Command {
         self.ssh(format!(
-            "bash -c {} -- {} {} {} {} {} {} {} {} {}",
+            "bash -c {} -- {} {} {} {} {} {} {} {} {} {}",
             quote(include_str!("remote-build.bash")),
             quote(&self.directory),
             bytes,
@@ -191,6 +198,7 @@ impl Remote {
             quote(mode),
             quote(include_str!("remote-repository.bash")),
             quote(session_id),
+            config_bytes,
         ))
     }
 

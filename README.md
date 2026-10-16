@@ -4,9 +4,9 @@ A local-first **Rust backend + Vite / React / TypeScript frontend** for writing 
 
 This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates over SSH to the remote `spec build` alias/function. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
 
-## Latest release: v0.1.8
+## Latest release: v0.1.9
 
-[Spec v0.1.8](https://github.com/AI10xDev/spec/releases/tag/v0.1.8) is a documentation-only follow-up to the v0.1.7 Optimization Button filepath diagnostics. It clarifies that mentioning a repository in a build prompt does not change the discovered execution project: the owner must supply the intended `.optim` process and measurable objectives in that project's root on the execution host. A missing-config error after successful discovery is not a nohup parsing failure. Runtime behavior is unchanged. Optimization remains separate from builds, with independently measured convergence; a plateau is not proof of an upper bound or global optimum.
+[Spec v0.1.9](https://github.com/AI10xDev/spec/releases/tag/v0.1.9) fixes the Optimization Button's spec filepath handoff. Optimize uploads the active `.optim` editor buffer, including unsaved changes, to a unique private file under remote `~/projects/` and passes its absolute path to the optimizer. The discovered build project remains the execution target; invalid uploads never fall back to another config. No local save is performed. Optimization remains separate from builds, with independently measured convergence; a plateau is not proof of an upper bound or global optimum.
 
 Rebuild and restart the local server, then reload the browser to use the updated optimizer. Prose mode needs the additional execution-host setup under [Optimization](#optimization). Releases are versioned by Git tags; package manifests retain `0.1.0`, following the existing source-release convention.
 
@@ -201,11 +201,11 @@ Builds are capped at **120 KiB** because some existing launchers forward the pro
 
 ### Optimization
 
-Click **Optimize** in the top-right header to improve the **latest discovered initial build**, independently of the selected editor tab. It does not save or upload editor changes and can run without an open tab. Discovery uses recorded build invocation metadata and narrowly supported nohup history, with a legacy fallback; it can select a project outside `SPEC_SSH_WORKSPACE`. Missing or ambiguous targets fail with diagnostics instead of inventing objectives.
+Open or create a nonempty `.optim` file, select its editor tab, and click **Optimize** in the top-right header to improve the **latest discovered initial build**. The current buffer, including unsaved changes, is uploaded to a unique private `.optim` file under the remote host's `~/projects/`; no local save occurs. Discovery still uses recorded build invocation metadata and narrowly supported nohup history, with a legacy fallback; it can select a project outside `SPEC_SSH_WORKSPACE`. Missing or ambiguous targets fail with diagnostics instead of inventing objectives.
 
-Create a trusted `.optim` file in the discovered remote project. For `task.md`, lookup prefers `task.md.optim`, then `task.optim`, otherwise requires exactly one root-level `*.optim`. No project objectives or benchmarks are bundled. See [OPTIMIZE.md](OPTIMIZE.md) for complete discovery rules, schema, and examples.
+The optimizer receives the uploaded spec's **absolute remote path** and loads it directly, without searching the discovered project root. The discovered build project remains the execution directory. No project objectives or benchmarks are bundled. See [OPTIMIZE.md](OPTIMIZE.md) for complete discovery rules, schema, and examples.
 
-If config selection fails, the final report identifies the discovered project, filename, output, and invocation source. The error distinguishes a missing config from ambiguous candidates and lists the expected paths. Create the intended file on the execution host; an unsaved or local-only editor file is not available to the optimizer.
+The report identifies the uploaded `config` path and, once discovered, the project, filename, output, and invocation source. Invalid uploads fail without falling back to another config. Uploaded specs are retained for inspection; remove them manually when no longer needed.
 
 Two modes share the same measurement scheduler:
 

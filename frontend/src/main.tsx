@@ -282,13 +282,18 @@ function App() {
 
   async function optimize() {
     if (busy || submitting.current || !execution || pendingRuns) return
+    if (!tab || !tab.name.endsWith(".optim") || !tab.content.trim()) {
+      setNotice("")
+      setError("Open or create a file with a name ending in .optim, enter your optimization instructions, and select that tab before clicking Optimize.")
+      return
+    }
     submitting.current = true
     try {
-      if (!window.confirm("Run optimization using the trusted project's .optim commands or prose instructions? Prose mode sends project context to model providers and uses OpenCode builder and review tools. Both modes can modify files, execute tools, access the network, and incur provider costs. The optimizer loops until convergence, with no automatic time or iteration cap. Use Stop run to stop it manually. This does not save or upload editor changes.")) return
+      if (!window.confirm(`Upload the current .optim editor buffer (${tab.name}) to remote ~/projects and run optimization using its absolute remote path? Unsaved editor changes are included; this does not save the file locally. Only run trusted .optim commands or prose instructions. Prose mode sends project context to model providers and uses OpenCode builder and review tools. Both modes can modify files, execute tools, access the network, and incur provider costs. The optimizer loops until convergence, with no automatic time or iteration cap. Use Stop run to stop it manually.`)) return
       setBusy(true)
       setError("")
       setNotice("Starting optimization...")
-      const job = await api<{ id: string }>("/optimize", {})
+      const job = await api<{ id: string }>("/optimize", { name: tab.name, content: tab.content })
       setOptimization({ ...job, name: "optimization", output: "Starting...", status: "running", truncated: false, recoverable: true, continuable: false })
       setOutputView("optimization")
       setFollow(true)
@@ -388,7 +393,7 @@ function App() {
             {tab && outputView === "file" && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>Spec + current nohup output in a separate window</span></div>}
             <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button>}{output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={busy || !execution || !!optimization?.recoverable || output.status !== "completed" || output.recoverable || output.continuable !== true} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
-            <pre ref={log} className="output" aria-label="Run output">{output?.output ?? (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery, or Optimize to start a new run using the project's .optim file." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
+            <pre ref={log} className="output" aria-label="Run output">{output?.output ?? (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery. To start a new run, open or create a nonempty .optim file and select its tab, then click Optimize. The current editor buffer, including unsaved changes, is uploaded to remote ~/projects and its absolute path is sent to the optimizer. No local save is performed." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
             <footer className="output-footer">{output && <span>Harness: {output.status}{output.recoverable ? " (completion not confirmed)" : ""}. CLI success alone does not verify saved changes.<br /></span>}Available output only. No hidden model reasoning is requested.</footer>
           </section>
         </div>

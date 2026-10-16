@@ -69,9 +69,9 @@ async function workspace(page: Page, options: { latest?: typeof completed | null
     }
     if (request.method() !== "GET") return route.fulfill({ status: 500, json: { error: "Unexpected write" } })
     if (pathname === "/api/config") return route.fulfill({ json: { execution: options.execution ?? true, completion: false, chat: false, realtime: false, azureRealtime: false } })
-    if (pathname === "/api/files") return route.fulfill({ json: ["optimization", "second.md"].map((name) => ({ name, modified: 0, bytes: 10 })) })
+    if (pathname === "/api/files") return route.fulfill({ json: ["optimization", "objectives.optim", "second.md"].map((name) => ({ name, modified: 0, bytes: 10 })) })
     if (pathname === "/api/repository") return route.fulfill({ json: { connected: true, dirty: true, directory: "/fixture", model: "fixture-model" } })
-    for (const name of ["optimization", "second.md"]) {
+    for (const name of ["optimization", "objectives.optim", "second.md"]) {
       if (pathname === `/api/files/${name}`) return route.fulfill({ json: { name, content: `Saved ${name}`, revision: "revision-1" } })
       if (pathname === `/api/files/${name}/run`) return route.fulfill({ json: { ...(options.fileRun ?? fileOutput), name } })
     }
@@ -84,8 +84,10 @@ async function workspace(page: Page, options: { latest?: typeof completed | null
   return { writes, dialogs, errors, auth }
 }
 
-test("Optimize works without a tab, confirms risks, prevents same-tick duplicates, and polls reports", async ({ page }) => {
+test("Optimize uploads the active .optim buffer, confirms risks, prevents same-tick duplicates, and polls reports", async ({ page }) => {
   const { writes, dialogs, errors, auth } = await workspace(page)
+  await page.getByRole("tabpanel").getByRole("button", { name: /objectives\.optim/ }).click()
+  await expect(page.getByRole("textbox", { name: "Edit objectives.optim", exact: true })).toHaveValue("Saved objectives.optim")
   let release!: () => void
   const held = new Promise<void>((resolve) => { release = resolve })
   await page.route("**/api/optimize", async (route) => {
@@ -100,11 +102,14 @@ test("Optimize works without a tab, confirms risks, prevents same-tick duplicate
   await expect(button).toBeDisabled()
   await expect(page.getByRole("status")).toHaveText("Starting optimization...")
   expect(dialogs).toHaveLength(1)
-  expect(dialogs[0]).toMatch(/trusted project's \.optim commands.*modify files.*incur provider costs/)
+  expect(dialogs[0]).toMatch(/trusted \.optim commands.*modify files.*incur provider costs/)
+  expect(dialogs[0]).toContain("current .optim editor buffer (objectives.optim) to remote ~/projects")
+  expect(dialogs[0]).toContain("absolute remote path")
+  expect(dialogs[0]).toContain("Unsaved editor changes are included")
   expect(dialogs[0]).toContain("Prose mode sends project context to model providers")
   expect(dialogs[0]).toContain("loops until convergence, with no automatic time or iteration cap")
   expect(dialogs[0]).toContain("Use Stop run to stop it manually")
-  expect(dialogs[0]).toContain("does not save or upload editor changes")
+  expect(dialogs[0]).toContain("does not save the file locally")
   release()
   await expect(page.getByLabel("Run output")).toHaveText(running.output)
   await expect(page.locator(".topbar .badge")).toHaveText("Optimization: running")
@@ -114,19 +119,76 @@ test("Optimize works without a tab, confirms risks, prevents same-tick duplicate
   await expect(page.getByLabel("Run output")).toHaveText(completed.output)
   await expect(button).toBeEnabled()
   await expect(page.getByRole("button", { name: "Use recommended & continue" })).toBeHidden()
-  await expect(page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button")).toHaveCount(0)
-  expect(writes).toEqual([{ path: "/api/optimize", method: "POST", body: {} }])
+  await expect(page.locator(".editor-pane .badge")).toHaveText("Saved")
+  expect(writes).toEqual([{ path: "/api/optimize", method: "POST", body: { name: "objectives.optim", content: "Saved objectives.optim" } }])
   expect(auth.every((value) => value === `Bearer ${new URL(url).hash.slice(7)}`)).toBe(true)
   expect(errors).toEqual([])
   expect(polls).toBe(2)
 })
 
+test("Optimize requires a selected nonempty .optim tab without confirming or writing", async ({ page }) => {
+  const { writes, dialogs } = await workspace(page)
+  const button = page.getByRole("button", { name: "Optimize", exact: true })
+  await page.getByRole("button", { name: "Optimization", exact: true }).click()
+  await expect(page.getByLabel("Run output")).toContainText("current editor buffer, including unsaved changes, is uploaded to remote ~/projects")
+  await expect(page.getByLabel("Run output")).toContainText("No local save is performed")
+  await button.click()
+  await expect(page.getByRole("alert")).toContainText("Open or create a file with a name ending in .optim")
+  await page.getByRole("tabpanel").getByRole("button", { name: /objectives\.optim/ }).click()
+  const editor = page.getByRole("textbox", { name: "Edit objectives.optim", exact: true })
+  for (const content of ["", " \n\t "]) {
+    await editor.fill(content)
+    await button.click()
+    await expect(page.getByRole("alert")).toContainText("enter your optimization instructions")
+    await expect(button).toBeEnabled()
+  }
+  await editor.fill("Valid instructions in an inactive tab")
+  for (const name of ["second.md", "objectives.optim.txt", "objectives.OPTIM"]) {
+    await page.getByRole("textbox", { name: "New filename" }).fill(name)
+    await page.getByRole("button", { name: "Create file", exact: true }).click()
+    await page.getByRole("textbox", { name: `Edit ${name}`, exact: true }).fill("Not an .optim file")
+    await button.click()
+    await expect(page.getByRole("alert")).toContainText("select that tab before clicking Optimize")
+    await expect(button).toBeEnabled()
+  }
+  expect(dialogs).toEqual([])
+  expect(writes).toEqual([])
+})
+
+test("a newly created unsaved .optim uploads without creating a local file or revision", async ({ page }) => {
+  const { writes } = await workspace(page)
+  const name = "new.optim"
+  const content = "Measure throughput and improve it.\n"
+  await page.getByRole("textbox", { name: "New filename" }).fill(name)
+  await page.getByRole("button", { name: "Create file", exact: true }).click()
+  const editor = page.getByRole("textbox", { name: `Edit ${name}`, exact: true })
+  await editor.fill(content)
+  await page.route("**/api/runs/optimizer", (route) => route.fulfill({ json: completed }))
+  await page.getByRole("button", { name: "Optimize", exact: true }).click()
+  await expect(page.getByLabel("Run output")).toHaveText(completed.output)
+  await expect(editor).toHaveValue(content)
+  await expect(page.locator(".editor-pane .badge")).toHaveText("Unsaved")
+  await expect(page.getByRole("tabpanel").getByRole("button", { name: /new\.optim/ })).toHaveCount(0)
+  expect(writes).toEqual([{ path: "/api/optimize", method: "POST", body: { name, content } }])
+  await page.route("**/api/files/new.optim", (route) => route.fulfill({ json: { name, content, revision: "revision-2" } }))
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(page.locator(".editor-pane .badge")).toHaveText("Saved")
+  expect(writes[1]).toEqual({ path: "/api/files/new.optim", method: "PUT", body: { content, revision: null } })
+})
+
 test("dismissing confirmation submits nothing", async ({ page }) => {
   const { writes } = await workspace(page)
+  await page.getByRole("tabpanel").getByRole("button", { name: /objectives\.optim/ }).click()
+  const editor = page.getByRole("textbox", { name: "Edit objectives.optim", exact: true })
+  await editor.fill("Unsaved instructions")
   page.removeAllListeners("dialog")
-  page.on("dialog", (dialog) => dialog.dismiss())
+  let confirmations = 0
+  page.on("dialog", (dialog) => { confirmations++; return dialog.dismiss() })
   await page.getByRole("button", { name: "Optimize", exact: true }).click()
   await expect(page.getByRole("button", { name: "Optimize", exact: true })).toBeEnabled()
+  await expect(editor).toHaveValue("Unsaved instructions")
+  await expect(page.locator(".editor-pane .badge")).toHaveText("Unsaved")
+  expect(confirmations).toBe(1)
   expect(writes).toEqual([])
 })
 
@@ -136,6 +198,10 @@ test("optimization is separate from a same-named file and preserves unsaved tabs
   const editor = page.getByRole("textbox", { name: "Edit optimization", exact: true })
   await editor.fill("Unsaved optimization file")
   await expect(page.getByLabel("Run output")).toHaveText(fileOutput.output)
+  await page.getByRole("tabpanel").getByRole("button", { name: /objectives\.optim/ }).click()
+  const objectives = page.getByRole("textbox", { name: "Edit objectives.optim", exact: true })
+  const content = "  Optimize latency using measurements.\nPreserve behavior.\n"
+  await objectives.fill(content)
   let release!: () => void
   const held = new Promise<void>((resolve) => { release = resolve })
   await page.route("**/api/optimize", async (route) => { await held; await route.fulfill({ json: { id: running.id } }) })
@@ -146,12 +212,13 @@ test("optimization is separate from a same-named file and preserves unsaved tabs
   await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
   await expect(page.getByRole("button", { name: "Save repo changes" })).toBeDisabled()
   await expect(page.getByRole("button", { name: "Use recommended & continue" })).toBeDisabled()
-  await editor.press("Control+s")
-  await editor.fill("Edited while submitting")
+  await objectives.press("Control+s")
+  await objectives.fill("Edited while submitting")
   release()
   await expect(page.getByLabel("Run output")).toHaveText(running.output)
-  await expect(editor).toHaveValue("Edited while submitting")
-  await page.getByRole("button", { name: "Current file: optimization", exact: true }).click()
+  await expect(objectives).toHaveValue("Edited while submitting")
+  await expect(page.locator(".editor-pane .badge")).toHaveText("Unsaved")
+  await page.getByRole("button", { name: "Current file: objectives.optim", exact: true }).click()
   await expect(page.getByLabel("Run output")).toHaveText(fileOutput.output)
   await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
   await expect(page.getByRole("button", { name: "Use recommended & continue" })).toBeDisabled()
@@ -163,12 +230,17 @@ test("optimization is separate from a same-named file and preserves unsaved tabs
   await expect(page.getByLabel("Run output")).toHaveText(completed.output)
   await expect(page.getByRole("textbox", { name: "Edit second.md" })).toHaveValue("Unsaved second tab")
   await page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button", { name: /^optimization/ }).click()
-  await expect(editor).toHaveValue("Edited while submitting")
+  await expect(editor).toHaveValue("Unsaved optimization file")
   await page.getByRole("button", { name: "Current file: optimization", exact: true }).click()
   await expect(page.getByLabel("Run output")).toHaveText(fileOutput.output)
   await page.getByRole("button", { name: "Optimization", exact: true }).click()
   await expect(page.getByLabel("Run output")).toHaveText(completed.output)
-  expect(writes).toEqual([{ path: "/api/optimize", method: "POST", body: {} }])
+  await page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button", { name: /^objectives\.optim/ }).click()
+  await expect(objectives).toHaveValue("Edited while submitting")
+  await expect(page.locator(".editor-pane .badge")).toHaveText("Unsaved")
+  await objectives.fill("Saved objectives.optim")
+  await expect(page.locator(".editor-pane .badge")).toHaveText("Saved")
+  expect(writes).toEqual([{ path: "/api/optimize", method: "POST", body: { name: "objectives.optim", content } }])
   expect(errors).toEqual([])
 })
 
@@ -190,6 +262,7 @@ test("Stop run cancels optimization through the shared endpoint and polls final 
 
 test("submission errors retain previous logs and allow retry", async ({ page }) => {
   const { writes } = await workspace(page, { latest: completed })
+  await page.getByRole("tabpanel").getByRole("button", { name: /objectives\.optim/ }).click()
   await page.getByRole("button", { name: "Optimization", exact: true }).click()
   await page.route("**/api/optimize", (route) => route.fulfill({ status: 409, json: { error: "No trusted .optim file found" } }))
   await page.getByRole("button", { name: "Optimize", exact: true }).click()

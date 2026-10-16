@@ -69,16 +69,19 @@ class OptimizerTest(unittest.TestCase):
         self.assertEqual((self.logs / "progress.log").read_text(), (self.logs / "report.jsonl").read_text())
         return status, events
 
-    def harness(self, workspace, mode="optimize", payload=None):
+    def harness(self, workspace, mode="optimize", payload=None, config=None, config_bytes=None):
         workspace.mkdir(exist_ok=True)
         source = Path(optimize.__file__).parent
         if payload is None:
             payload = Path(optimize.__file__).read_bytes() if mode == "optimize" else b""
+        if config is None:
+            config = (self.project / "objective.md.optim").read_bytes() if mode == "optimize" else b""
         run_id = str(uuid.uuid4())
         child = subprocess.Popen(
             ["bash", "-c", (source / "remote-build.bash").read_text(), "--", str(workspace),
              str(len(payload)), (source / "remote-alias.bash").read_text(),
-             (source / "remote-supervisor.bash").read_text(), run_id, "optimization", mode],
+             (source / "remote-supervisor.bash").read_text(), run_id, "optimization", mode,
+             "", "", str(len(config) if config_bytes is None else config_bytes)],
             env={**os.environ, "HOME": str(workspace), "PYTHONDONTWRITEBYTECODE": "1"},
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -94,9 +97,102 @@ class OptimizerTest(unittest.TestCase):
                 handle.close()
 
         self.addCleanup(cleanup)
-        child.stdin.write(payload)
+        child.stdin.write(payload + config)
         child.stdin.flush()
         return child, workspace / ".spec-runs" / f"run-{run_id}"
+
+    def test_uploaded_config_used_without_root_config_and_despite_conflicts(self):
+        workspace = self.workspace / "home with ' spaces"
+        workspace.mkdir()
+        uploads = self.workspace / "resolved projects with spaces"
+        uploads.mkdir()
+        (workspace / "projects").symlink_to(uploads, target_is_directory=True)
+        output = self.project / "objective.md.out"
+        output.touch()
+        (workspace / ".bash_history").write_text(
+            f"cd '{self.project}' && nohup spec build objective.md > '{output}' &\n")
+        config = json.dumps({"version": 1, "objectives": [self.objective(
+            name="Caf\u00e9", patience=2, command=python(
+                f"from pathlib import Path; assert Path.cwd() == Path({str(self.project)!r})"))]},
+            ensure_ascii=False).encode("utf-8")
+        paths = []
+        for conflicts in (False, True):
+            with self.subTest(conflicts=conflicts):
+                if conflicts:
+                    for name in ("objective.md.optim", "objective.optim", "other.optim"):
+                        (self.project / name).write_text("Do not execute this conflicting config.")
+                child, directory = self.harness(workspace, config=config)
+                self.assertEqual(child.wait(timeout=10), 0, child.stderr.read().decode())
+                events = [json.loads(line) for line in (directory / "report.jsonl").read_text().splitlines()]
+                start = events[0]
+                self.assertEqual(start["project"], str(self.project))
+                self.assertEqual(start["filename"], "objective.md")
+                self.assertEqual(start["output"], str(output))
+                self.assertEqual(events[-1]["outcome"], "converged")
+                path = Path(start["config"])
+                self.assertTrue(path.is_absolute())
+                self.assertEqual(path.parent, uploads)
+                self.assertEqual(path.suffix, ".optim")
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(path.read_bytes(), config)
+                self.assertNotIn(path, paths)
+                paths.append(path)
+        self.assertEqual(len(list(uploads.iterdir())), 2)
+        self.assertTrue(all(path.read_bytes() == config for path in paths))
+        self.assertTrue(all(path.read_text() == "Do not execute this conflicting config."
+                            for path in self.project.glob("*.optim")))
+
+    def test_incomplete_upload_eof_or_signal_cleans_config_without_launch(self):
+        for interruption in (None, signal.SIGHUP, signal.SIGTERM):
+            with self.subTest(interruption=interruption):
+                workspace = self.workspace / f"upload {interruption}"
+                child, directory = self.harness(workspace,
+                    payload=b"from pathlib import Path; Path('launched').touch()\n",
+                    config=b"partial config C", config_bytes=100)
+                deadline = time.monotonic() + 5
+                while not list((workspace / "projects").glob("*.optim")):
+                    self.assertIsNone(child.poll(), "attachment exited before upload")
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+                if interruption is not None:
+                    child.send_signal(interruption)
+                child.stdin.close()
+                self.assertEqual(child.wait(timeout=5), 125)
+                self.assertEqual((directory / "status").read_text(), "125\n")
+                self.assertFalse((directory / "snapshot.md").exists())
+                self.assertFalse((directory / "lease").exists())
+                self.assertFalse((workspace / "launched").exists())
+                self.assertEqual(list((workspace / "projects").iterdir()), [])
+
+    def test_explicit_invalid_config_never_falls_back_to_project_config(self):
+        self.record()
+        self.config([self.objective(patience=2)])
+        path = self.workspace / "uploaded.optim"
+        for content in (None, b"", b"\xff", b"{invalid JSON"):
+            with self.subTest(content=content):
+                if content is not None:
+                    path.write_bytes(content)
+                with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(
+                        optimize, "config_path", side_effect=AssertionError("must not search")) as search:
+                    self.assertEqual(optimize.run(self.logs, self.workspace, self.history, config=path), 1)
+                search.assert_not_called()
+                final = json.loads((self.logs / "report.jsonl").read_text().splitlines()[-1])
+                self.assertEqual(final["outcome"], "failed")
+                self.assertEqual(final["config"], str(path))
+
+    def test_snapshot_cli_requires_explicit_config_but_standalone_retains_fallback(self):
+        for script, args, status in (("snapshot.md", [], 2), ("optimize.py", [], 0),
+                                     ("snapshot.md", ["/explicit/upload.optim"], 0)):
+            with self.subTest(script=script), mock.patch.object(
+                    sys, "argv", [script, str(self.logs), str(self.workspace), *args]), \
+                    mock.patch.object(optimize, "run", return_value=0) as run, \
+                    mock.patch.object(optimize.signal, "signal"), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(optimize.main(), status)
+                if status == 2:
+                    run.assert_not_called()
+                else:
+                    run.assert_called_once_with(str(self.logs), str(self.workspace),
+                                                config=args[0] if args else None)
 
     def test_external_target_excludes_other_workspace_and_build(self):
         for git in (False, True):
@@ -580,10 +676,10 @@ class OptimizerTest(unittest.TestCase):
                 "assert os.environ['SPEC_OPTIM_OBJECTIVE'] == 'score'; "
                 "assert int(os.environ['SPEC_OPTIM_ITERATION']) >= 1; "
                 "import sys; assert sys.argv[1] == '$(touch OWNED)'")
-        self.config([self.objective(command=python(code) + ["$(touch OWNED)"], patience=2)])
+        config = self.config([self.objective(command=python(code) + ["$(touch OWNED)"], patience=2)])
         snapshot = self.workspace / "snapshot.md"
         snapshot.write_bytes(Path(optimize.__file__).read_bytes())
-        result = subprocess.run([sys.executable, "-u", str(snapshot), str(self.logs), str(self.workspace)],
+        result = subprocess.run([sys.executable, "-u", str(snapshot), str(self.logs), str(self.workspace), str(config)],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
                                 env={**os.environ, "HOME": str(self.workspace)})
         self.assertEqual(result.returncode, 0, result.stderr.decode() + result.stdout.decode())

@@ -4,8 +4,12 @@
 spec_build_mode=${3:-build}
 [[ $spec_build_mode == build || $spec_build_mode == repository-save || $spec_build_mode == optimize ]] || exit 125
 if [[ $spec_build_mode == optimize ]]; then
+    [[ ${SPEC_OPTIM_CONFIG:-} == /* ]] || {
+        printf '%s\n' '[remote] Optimization requires an absolute uploaded config path.' >&2
+        exit 125
+    }
     export PATH="$HOME/.local/bin:$HOME/.bun/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
-    exec python3 -u "$1" "${1%/*}" "$PWD"
+    exec python3 -u "$1" "${1%/*}" "$PWD" "$SPEC_OPTIM_CONFIG"
 fi
 spec_build_workspace=$PWD
 shopt -s expand_aliases

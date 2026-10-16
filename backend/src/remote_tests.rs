@@ -144,6 +144,49 @@ async fn truncated_upload_never_starts_build_and_persists_rejection() {
 }
 
 #[tokio::test]
+async fn truncated_optimizer_config_rejects_before_launch_and_removes_partial_upload() {
+    for cancel in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home with ' spaces");
+        fs::create_dir(&home).unwrap();
+        let remote = tests::remote_fixture(&home, &home.join("unused"));
+        let id = Uuid::new_v4().to_string();
+        let directory = home.join(format!(".spec-runs/run-{id}"));
+        let payload = b"from pathlib import Path; Path('launched').touch()\n";
+        let mut child = remote
+            .optimization_command(payload.len(), &id, "optimization", 100)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(payload).await.unwrap();
+        stdin.write_all(b"partial config").await.unwrap();
+        if cancel {
+            // A control-looking byte inside an incomplete frame cannot launch it.
+            stdin.write_all(b"C").await.unwrap();
+        }
+        drop(stdin);
+        let result = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(125), "{result:?}");
+        assert!(String::from_utf8_lossy(&result.stderr).contains("incomplete optimization config"));
+        assert_eq!(
+            fs::read_to_string(directory.join("status")).unwrap(),
+            "125\n"
+        );
+        assert!(!directory.join("snapshot.md").exists());
+        assert!(!directory.join("lease").exists());
+        assert!(!home.join("launched").exists());
+        assert_eq!(fs::read_dir(home.join("projects")).unwrap().count(), 0);
+    }
+}
+
+#[tokio::test]
 async fn remote_function_is_supported_and_missing_spec_is_reported() {
     for defined in [true, false] {
         let root = tempfile::tempdir().unwrap();
@@ -499,14 +542,21 @@ async fn optimizer_bypasses_build_timeout_and_keeps_output_beyond_build_cap() {
                 &id,
                 "optimization",
                 mode,
+                "",
+                "",
+                if mode == "optimize" { "1" } else { "0" },
             ])
+            .env("HOME", root.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let stdin = child.stdin.take().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        if mode == "optimize" {
+            stdin.write_all(b"C").await.unwrap();
+        }
         let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
             .await
             .unwrap()
@@ -565,9 +615,7 @@ async fn optimizer_cancellation_flushes_interrupted_report_and_bounds_term_grace
             "nohup spec build a.md > a.md.out &\n",
         )
         .unwrap();
-        fs::write(
-            root.path().join("a.md.optim"),
-            serde_json::json!({
+        let config = serde_json::json!({
                 "version": 1,
                 "objectives": [{
                     "name": "cancellation",
@@ -576,9 +624,7 @@ async fn optimizer_cancellation_flushes_interrupted_report_and_bounds_term_grace
                     "direction": "maximize"
                 }]
             })
-            .to_string(),
-        )
-        .unwrap();
+            .to_string();
         let payload = if cooperative {
             include_str!("optimize.py")
         } else {
@@ -593,7 +639,7 @@ time.sleep(60)
         let id = Uuid::new_v4().to_string();
         let directory = root.path().join(format!(".spec-runs/run-{id}"));
         let mut child = remote
-            .optimization_command(payload.len(), &id, "optimization")
+            .optimization_command(payload.len(), &id, "optimization", config.len())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -602,6 +648,7 @@ time.sleep(60)
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(payload.as_bytes()).await.unwrap();
+        stdin.write_all(config.as_bytes()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while !fs::read_to_string(root.path().join("descendant-pid"))
                 .is_ok_and(|pid| !pid.is_empty())

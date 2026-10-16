@@ -249,7 +249,7 @@ def config_path(invocation):
             f"for build filename {invocation.filename!r}. Create {expected}, or exactly one "
             "project-root *.optim, on the execution host with your optimization process "
             "and measurable objectives (free-form UTF-8 prose is supported). "
-            "Optimize does not save or upload editor files.")
+            "Alternatively, pass an absolute config path or upload a .optim editor tab using Optimize.")
     if len(candidates) != 1:
         raise OptimizeError(
             f"ambiguous .optim files in discovered project {invocation.project} "
@@ -735,16 +735,19 @@ def optimize(invocation, objectives, reporter, agent=None):
             return
 
 
-def run(run_directory, workspace, history=None):
+def run(run_directory, workspace, history=None, config=None):
     reporter = Reporter(Path(run_directory))
-    target = {}
+    target = {} if config is None else {"config": str(config)}
     try:
         invocation = discover(workspace, history)
-        target = dict(project=str(invocation.project), filename=invocation.filename,
+        target.update(project=str(invocation.project), filename=invocation.filename,
                       output=str(invocation.output), source=invocation.source)
         with project_lock(invocation.project):
-            path = config_path(invocation)
-            reporter.emit("start", **target, config=str(path))
+            path = config_path(invocation) if config is None else Path(config)
+            if not path.is_absolute():
+                raise OptimizeError("config path must be absolute")
+            target["config"] = str(path)
+            reporter.emit("start", **target)
             text = read_limited(path, CONFIG_LIMIT).decode("utf-8-sig")
             if not text.strip():
                 raise OptimizeError(".optim spec must not be empty")
@@ -766,8 +769,9 @@ def run(run_directory, workspace, history=None):
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "--supervise":
         return supervise_command(sys.argv[2:])
-    if len(sys.argv) != 3:
-        print("usage: python3 -u snapshot.md RUN_DIRECTORY WORKSPACE", file=sys.stderr)
+    # The shipped standalone .py CLI retains discovery; UI snapshots require an upload.
+    if len(sys.argv) != 4 and not (len(sys.argv) == 3 and Path(sys.argv[0]).suffix == ".py"):
+        print("usage: python3 -u snapshot.md RUN_DIRECTORY WORKSPACE CONFIG_PATH", file=sys.stderr)
         return 2
 
     def interrupted(signum, frame):
@@ -777,7 +781,7 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
-        return run(sys.argv[1], sys.argv[2])
+        return run(sys.argv[1], sys.argv[2], config=sys.argv[3] if len(sys.argv) == 4 else None)
     except (OSError, KeyboardInterrupt) as error:
         print(f"optimizer could not write reports: {error}", file=sys.stderr, flush=True)
         return 1

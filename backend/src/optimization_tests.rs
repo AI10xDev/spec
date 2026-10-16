@@ -39,8 +39,8 @@ async fn build(state: &App, name: &str) -> String {
     json(response).await["id"].as_str().unwrap().to_owned()
 }
 
-async fn start_optimization(state: &App) -> String {
-    let response = request(state.clone(), "POST", "/api/optimize", body!({})).await;
+async fn start_optimization(state: &App, input: Value) -> String {
+    let response = request(state.clone(), "POST", "/api/optimize", input).await;
     assert_eq!(
         response.status(),
         StatusCode::OK,
@@ -73,10 +73,10 @@ async fn terminal(state: &App, id: &str, status: &str) -> Value {
     .expect("run did not reach a terminal status within 15 seconds")
 }
 
-fn objective(root: &FsPath, command: &str) {
-    fs::write(
-        root.join("objective.optim"),
-        body!({
+fn objective(command: &str) -> Value {
+    body!({
+        "name": "objective.optim",
+        "content": format!("\n{}\n", body!({
             "version": 1,
             "objectives": [{
                 "name": "throughput",
@@ -87,10 +87,8 @@ fn objective(root: &FsPath, command: &str) {
                 "relative_tolerance": 0,
                 "patience": 2
             }]
-        })
-        .to_string(),
-    )
-    .unwrap();
+        }))
+    })
 }
 
 #[tokio::test]
@@ -125,8 +123,7 @@ async fn optimization_real_python_reports_gains_and_persists_separately_from_bui
         );
         let stored_build =
             fs::read(root.path().join(format!(".spec-output/{build_id}.json"))).unwrap();
-        objective(
-            root.path(),
+        let input = objective(
             "import os; from pathlib import Path; Path('score').write_text(str(min(int(os.environ['SPEC_OPTIM_ITERATION']),2)))",
         );
         fs::write(
@@ -135,8 +132,15 @@ async fn optimization_real_python_reports_gains_and_persists_separately_from_bui
         )
         .unwrap();
 
-        // Optimize has no editor name, revision, or document in its request.
-        let id = start_optimization(&state).await;
+        // The editor document has never been saved, and no root config exists.
+        assert!(!fs::read_dir(root.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "optim")
+        }));
+        let id = start_optimization(&state, input.clone()).await;
         let output = terminal(&state, &id, "completed").await;
         assert_eq!(output["name"], "optimization");
         assert_eq!(output["continuable"], false);
@@ -168,6 +172,19 @@ async fn optimization_real_python_reports_gains_and_persists_separately_from_bui
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(events[0]["event"], "start");
+        let config = PathBuf::from(events[0]["config"].as_str().unwrap());
+        assert!(config.is_absolute());
+        assert_eq!(config.parent().unwrap(), root.path().join("projects"));
+        assert_eq!(config.extension().unwrap(), "optim");
+        assert_ne!(config.file_name().unwrap(), input["name"].as_str().unwrap());
+        assert_eq!(
+            fs::read(&config).unwrap(),
+            input["content"].as_str().unwrap().as_bytes()
+        );
+        let metadata = fs::symlink_metadata(&config).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert!(!root.path().join(input["name"].as_str().unwrap()).exists());
         assert_eq!(events[0]["project"], root.path().to_str().unwrap());
         assert_eq!(events[0]["filename"], name);
         assert_eq!(events[0]["output"], log.to_str().unwrap());
@@ -272,6 +289,39 @@ async fn optimization_real_python_reports_gains_and_persists_separately_from_bui
             .await["id"],
             next_build
         );
+
+        // Reusing the editor name must create a new upload, not overwrite the old one.
+        let mut next_input = objective("from pathlib import Path; Path('score').write_text('3')");
+        // The 1 MiB config limit is independent of the smaller build snapshot limit.
+        let content = next_input["content"].as_str().unwrap();
+        next_input["content"] = body!(format!(
+            "{content}{}",
+            " ".repeat(1024 * 1024 - content.len())
+        ));
+        let next_id = start_optimization(&fresh, next_input.clone()).await;
+        let next_output = terminal(&fresh, &next_id, "completed").await;
+        let next_start: Value = serde_json::from_str(
+            next_output["output"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let next_config = PathBuf::from(next_start["config"].as_str().unwrap());
+        assert_ne!(next_config, config);
+        assert_eq!(next_config.parent().unwrap(), root.path().join("projects"));
+        assert_eq!(next_config.extension().unwrap(), "optim");
+        assert_eq!(
+            fs::read(next_config).unwrap(),
+            next_input["content"].as_str().unwrap().as_bytes()
+        );
+        assert_eq!(
+            fs::read(config).unwrap(),
+            input["content"].as_str().unwrap().as_bytes()
+        );
+        assert!(!root.path().join(input["name"].as_str().unwrap()).exists());
     }
 }
 
@@ -336,22 +386,54 @@ async fn optimization_pointer_preserves_legacy_regular_file_records() {
 }
 
 #[tokio::test]
-async fn optimization_missing_config_fails_with_durable_diagnostic() {
+async fn optimization_invalid_uploaded_json_fails_durably_without_root_fallback() {
     let root = tempfile::tempdir().unwrap();
     let state = fixture(root.path());
     fs::write(root.path().join("a.md"), "Pending requirement\n").unwrap();
     let build_id = build(&state, "a.md").await;
     let original = terminal(&state, &build_id, "completed").await;
-    let id = start_optimization(&state).await;
+    let valid = objective("from pathlib import Path; Path('fallback-used').touch()");
+    let local_config = root.path().join("objective.optim");
+    fs::write(&local_config, valid["content"].as_str().unwrap()).unwrap();
+    let input = body!({"name": "objective.optim", "content": "{invalid uploaded JSON\n"});
+    let id = start_optimization(&state, input.clone()).await;
     let output = terminal(&state, &id, "failed (exit status: 1)").await;
     assert_eq!(output["continuable"], false);
-    assert!(output["output"].as_str().unwrap().contains(".optim"));
+    assert!(
+        output["output"]
+            .as_str()
+            .unwrap()
+            .contains("JSONDecodeError")
+    );
     let directory = root.path().join(format!(".spec-runs/run-{id}"));
-    let report: Value =
-        serde_json::from_str(&fs::read_to_string(directory.join("report.jsonl")).unwrap()).unwrap();
-    assert_eq!(report["event"], "final");
-    assert_eq!(report["outcome"], "failed");
-    assert!(report["error"].as_str().unwrap().contains(".optim"));
+    let report = fs::read_to_string(directory.join("report.jsonl")).unwrap();
+    assert_eq!(output["output"], report);
+    let events: Vec<Value> = report
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events[0]["event"], "start");
+    let config = PathBuf::from(events[0]["config"].as_str().unwrap());
+    assert!(config.is_absolute());
+    assert_eq!(config.parent().unwrap(), root.path().join("projects"));
+    assert_eq!(
+        fs::read(config).unwrap(),
+        input["content"].as_str().unwrap().as_bytes()
+    );
+    let final_event = events.last().unwrap();
+    assert_eq!(final_event["event"], "final");
+    assert_eq!(final_event["outcome"], "failed");
+    assert!(
+        final_event["error"]
+            .as_str()
+            .unwrap()
+            .contains("JSONDecodeError")
+    );
+    assert_eq!(
+        fs::read_to_string(local_config).unwrap(),
+        valid["content"].as_str().unwrap()
+    );
+    assert!(!root.path().join("fallback-used").exists());
     assert_eq!(fs::read_to_string(directory.join("status")).unwrap(), "1\n");
     let fresh = app(root.path());
     assert_eq!(
@@ -365,6 +447,67 @@ async fn optimization_missing_config_fails_with_durable_diagnostic() {
 }
 
 #[tokio::test]
+async fn optimization_bad_requests_do_not_create_jobs_or_uploads() {
+    let root = tempfile::tempdir().unwrap();
+    let state = fixture(root.path());
+    let valid = objective("pass");
+    for name in [
+        "",
+        "objective.md",
+        "objective.optim.txt",
+        "../objective.optim",
+        "/objective.optim",
+        "nested/objective.optim",
+        "nested\\objective.optim",
+        ".hidden.optim",
+        "bad:name.optim",
+        "bad\nname.optim",
+        "bad\0name.optim",
+    ] {
+        let response = request(
+            state.clone(),
+            "POST",
+            "/api/optimize",
+            body!({"name": name, "content": valid["content"]}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "name: {name:?}");
+    }
+    for content in [
+        String::new(),
+        " \n\t".into(),
+        "{\0}".into(),
+        "x".repeat(1024 * 1024 + 1),
+        "\u{e9}".repeat(512 * 1024 + 1),
+    ] {
+        let response = request(
+            state.clone(),
+            "POST",
+            "/api/optimize",
+            body!({"name": "objective.optim", "content": content}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    for input in [
+        body!({}),
+        body!({"name": "objective.optim"}),
+        body!({"content": valid["content"]}),
+    ] {
+        let response = request(state.clone(), "POST", "/api/optimize", input).await;
+        assert!(response.status().is_client_error());
+    }
+    assert!(state.jobs.lock().unwrap().is_empty());
+    assert!(!root.path().join(".spec-runs").exists());
+    assert!(!root.path().join("projects").exists());
+    assert!(!root.path().join("objective.optim").exists());
+    assert_eq!(
+        json(request(state, "GET", "/api/optimize", Value::Null).await).await,
+        Value::Null
+    );
+}
+
+#[tokio::test]
 async fn optimization_remote_disabled_does_not_create_a_job() {
     let root = tempfile::tempdir().unwrap();
     let state = app(root.path());
@@ -372,7 +515,7 @@ async fn optimization_remote_disabled_does_not_create_a_job() {
         json(request(state.clone(), "GET", "/api/optimize", Value::Null).await).await,
         Value::Null
     );
-    let response = request(state.clone(), "POST", "/api/optimize", body!({})).await;
+    let response = request(state.clone(), "POST", "/api/optimize", objective("pass")).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(
         json(response).await["error"]
@@ -382,6 +525,7 @@ async fn optimization_remote_disabled_does_not_create_a_job() {
     );
     assert!(state.jobs.lock().unwrap().is_empty());
     assert!(!root.path().join(".spec-runs").exists());
+    assert!(!root.path().join("projects").exists());
 }
 
 #[tokio::test]
@@ -392,9 +536,10 @@ async fn optimization_mutual_exclusion_restart_and_cancellation_kill_descendants
     fs::write(root.path().join("hold-build"), "").unwrap();
     let build_id = build(&state, "a.md").await;
     wait_for_file(&root.path().join("build-started")).await;
-    let response = request(state.clone(), "POST", "/api/optimize", body!({})).await;
+    let response = request(state.clone(), "POST", "/api/optimize", objective("pass")).await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(state.jobs.lock().unwrap().len(), 1);
+    assert!(!root.path().join("projects").exists());
     assert_eq!(
         request(
             state.clone(),
@@ -408,13 +553,12 @@ async fn optimization_mutual_exclusion_restart_and_cancellation_kill_descendants
     );
     terminal(&state, &build_id, "cancelled").await;
 
-    objective(
-        root.path(),
+    let input = objective(
         "import os, subprocess, time; from pathlib import Path; child=subprocess.Popen(['python3','-c','import time; time.sleep(60)']); Path('optimizer-pids').write_text(str(os.getpid())+' '+str(child.pid)); time.sleep(60)",
     );
     let (first, second) = tokio::join!(
-        request(state.clone(), "POST", "/api/optimize", body!({})),
-        request(state.clone(), "POST", "/api/optimize", body!({}))
+        request(state.clone(), "POST", "/api/optimize", input.clone()),
+        request(state.clone(), "POST", "/api/optimize", input.clone())
     );
     let (accepted, rejected) = if first.status() == StatusCode::OK {
         (first, second)
@@ -426,6 +570,10 @@ async fn optimization_mutual_exclusion_restart_and_cancellation_kill_descendants
     let id = json(accepted).await["id"].as_str().unwrap().to_owned();
     wait_for_file(&root.path().join("optimizer-pids")).await;
     assert_eq!(state.jobs.lock().unwrap().len(), 2);
+    assert_eq!(
+        fs::read_dir(root.path().join("projects")).unwrap().count(),
+        1
+    );
     let revision = read(root.path(), "a.md").ok().unwrap().revision;
     assert_eq!(
         request(
@@ -481,7 +629,7 @@ async fn optimization_mutual_exclusion_restart_and_cancellation_kill_descendants
     assert_eq!(running["continuable"], false);
     assert!(running["output"].as_str().unwrap().contains("throughput"));
     assert_eq!(
-        request(fresh.clone(), "POST", "/api/optimize", body!({}))
+        request(fresh.clone(), "POST", "/api/optimize", input)
             .await
             .status(),
         StatusCode::CONFLICT

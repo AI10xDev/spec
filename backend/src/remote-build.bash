@@ -1,5 +1,5 @@
-# SSH attachment: workspace, bytes, alias, supervisor, UUID, name, mode, repository probe, session ID.
-# Only an explicit C byte after the snapshot cancels; EOF/signals detach.
+# SSH attachment: workspace, bytes, alias, supervisor, UUID, name, mode, repository probe, session ID, config bytes.
+# Only an explicit C byte after both uploads cancels; EOF/signals detach after launch.
 set -eu
 umask 077
 cd -- "$1"
@@ -13,6 +13,13 @@ mode=${7:-build}
 [[ $mode == build || $mode == repository-save || $mode == continue || $mode == optimize ]] || exit 125
 repository_probe=${8:-}
 session_id=${9:-}
+config_bytes=${10:-0}
+[[ $config_bytes =~ ^(0|[1-9][0-9]{0,6})$ ]] || exit 125
+if [[ $mode == optimize ]]; then
+    (( config_bytes > 0 && config_bytes <= 1048576 )) || exit 125
+else
+    [[ $config_bytes == 0 ]] || exit 125
+fi
 if [[ $mode == continue ]]; then
     [[ $session_id =~ ^ses_[A-Za-z0-9]+$ && ${#session_id} -le 127 ]] || {
         printf '%s\n' '[remote] Invalid or missing continuation session ID.' >&2
@@ -34,6 +41,7 @@ mkdir -- "$directory" || exit 125
 launched=
 reader=
 registry_record=
+config_file=
 cleanup() {
     # EOF may race normal exit; do not let the reader's TERM interrupt cleanup.
     trap '' HUP INT TERM
@@ -47,6 +55,7 @@ cleanup() {
         # session alone never proves that a supervisor did not start.
         printf '%s\n' '[remote] Launch rejected before supervisor start.' >> "$directory/$log"
         rm -f -- "$directory/snapshot.md"
+        [[ -z $config_file ]] || rm -f -- "$config_file"
         printf '125\n' > "$directory/status.tmp"
         mv -T -- "$directory/status.tmp" "$directory/status"
         [[ -z $registry_record ]] || rm -f -- "$registry_record"
@@ -73,7 +82,7 @@ completed() {
 # Match the probe's worktree scope, ignoring inherited Git overrides. A linked
 # worktree has its own Git directory/index; subdirectories and symlinks share it.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
-unset SPEC_OPTIM_WORKSPACE_LOCK
+unset SPEC_OPTIM_WORKSPACE_LOCK SPEC_OPTIM_CONFIG
 registry=
 if [[ $(git rev-parse --is-inside-work-tree 2>/dev/null) == true ]]; then
     git_directory=$(git rev-parse --absolute-git-dir)
@@ -149,6 +158,15 @@ find .spec-runs -mindepth 2 -maxdepth 2 -name status -type f -mmin +10080 -print
     done
 head -c "$2" > "$directory/snapshot.md"
 [[ $(wc -c < "$directory/snapshot.md") -eq "$2" ]] || { echo '[remote] incomplete snapshot' >&2; exit 125; }
+if [[ $mode == optimize ]]; then
+    mkdir -p -- "$HOME/projects"
+    config_parent=$(cd -- "$HOME/projects" && pwd -P)
+    config_file=$(mktemp -- "$config_parent/spec-optimization.XXXXXXXX.optim")
+    head -c "$config_bytes" > "$config_file"
+    [[ $(wc -c < "$config_file") -eq "$config_bytes" ]] || reject 'incomplete optimization config'
+    # Retain the unique upload after launch so reports reference the actual input.
+    export SPEC_OPTIM_CONFIG="$config_file"
+fi
 if [[ $mode == repository-save ]]; then
     [[ -n $repository_probe ]] || exit 125
     timeout --kill-after=1s 10s bash --noprofile --norc -c "$repository_probe" -- "$PWD" require-dirty 9<&- >> "$directory/$log" 2>&1 || exit 125
