@@ -175,6 +175,14 @@ For example, a discovered project `/home/opencode/project` and filename `upgrade
 require `/home/opencode/project/upgrade_4.optim`, or one other root-level `.optim`
 file containing the owner's optimization process and measurable objectives.
 
+The discovered project is the execution directory recorded in the selected build
+invocation, not a repository name mentioned in the build prompt. For example,
+mentioning `ai10xdev/spec` does not redirect a build recorded under
+`/home/opencode/project` to `/home/opencode/spec`. When the report identifies the
+project and filename but says no `.optim` file exists, discovery succeeded;
+the missing process and measurable objectives must be supplied by the owner.
+Do not work around this by selecting an unrelated config or inventing objectives.
+
 The `.optim` file must be nonempty UTF-8 and at most 1 MiB. An optional leading
 UTF-8 BOM is ignored for mode detection. If its first
 non-whitespace character is `{`, it is parsed as strict JSON v1 using the shipped

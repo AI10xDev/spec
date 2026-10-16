@@ -4,9 +4,9 @@ A local-first **Rust backend + Vite / React / TypeScript frontend** for writing 
 
 This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates over SSH to the remote `spec build` alias/function. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
 
-## Latest release: v0.1.7
+## Latest release: v0.1.8
 
-[Spec v0.1.7](https://github.com/AI10xDev/spec/releases/tag/v0.1.7) clarifies Optimization Button spec filepath errors: failed config selection reports the discovered project, build filename, output, and invocation source, with expected `.optim` paths and any ambiguous candidates. Guidance explains that the config must exist on the execution host, not only in a local editor. Lookup precedence and fail-closed behavior are unchanged. Optimization remains separate from builds, with independently measured convergence; a plateau is not proof of an upper bound or global optimum.
+[Spec v0.1.8](https://github.com/AI10xDev/spec/releases/tag/v0.1.8) is a documentation-only follow-up to the v0.1.7 Optimization Button filepath diagnostics. It clarifies that mentioning a repository in a build prompt does not change the discovered execution project: the owner must supply the intended `.optim` process and measurable objectives in that project's root on the execution host. A missing-config error after successful discovery is not a nohup parsing failure. Runtime behavior is unchanged. Optimization remains separate from builds, with independently measured convergence; a plateau is not proof of an upper bound or global optimum.
 
 Rebuild and restart the local server, then reload the browser to use the updated optimizer. Prose mode needs the additional execution-host setup under [Optimization](#optimization). Releases are versioned by Git tags; package manifests retain `0.1.0`, following the existing source-release convention.
 
