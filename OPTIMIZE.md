@@ -112,8 +112,15 @@ optimizer at a time per project and keep measurements read-only.
    run are an error. The project is `WORKSPACE`, and the filename is the output
    basename with only the final `.out` removed. Legacy recency uses output mtime,
    which is necessarily less reliable than invocation metadata.
-3. Read `~/.bash_history` (never evaluate it). Unless known to predate the latest
-   invocation record, the last entry mentioning `nohup` must match one of the
+3. Read `~/.bash_history` (never evaluate it). Filename references such as
+   `cat nohup.out`, shell comments, and simple literal-only `echo` or
+   `printf '%s'`/`printf '%s\n'` descriptions are not invocations.
+   An embedded hash in a shell word is not a
+   comment. Other quoted `nohup` command text remains a candidate, including
+   wrappers such as `bash -c`, `eval`, and `ssh`; these fail closed rather than
+   falling back to an older build. This is a conservative lexical filter, not a
+   general shell parser: ambiguous descriptions may also fail closed.
+   Unless superseded by an invocation record, the last candidate must match one of the
    following complete single-line forms. Unsupported latest entries cause an error rather than selecting an
    earlier convenient match. No guessing from shell aliases, current directory
    changes on other lines, or shell expansions is performed.
@@ -142,9 +149,11 @@ are extracted. History is an untrusted hint, not permission to run config comman
 
 Bash `#EPOCH_SECONDS` timestamps immediately before entries allow comparison to
 recorded invocation or legacy output mtimes; the newer source wins. Without a
-history timestamp and with another recorded build present, only identical
-identities can be accepted, otherwise the
-ordering is ambiguous and fails. History alone uses its last entry's position.
+history timestamp, durable invocation metadata takes precedence, even if the
+history entry is unsupported: undated global shell history cannot establish a
+newer launch. Without invocation metadata, an undated history entry must agree
+with any legacy output identity, otherwise ordering is ambiguous and fails.
+History alone uses its last entry's position.
 History may be stale until Bash flushes it; new harness builds record launch
 metadata directly. An ambiguous external shell invocation requires a timestamped,
 supported history entry before optimization can safely choose the latest target.

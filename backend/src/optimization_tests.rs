@@ -129,6 +129,11 @@ async fn optimization_real_python_reports_gains_and_persists_separately_from_bui
             root.path(),
             "import os; from pathlib import Path; Path('score').write_text(str(min(int(os.environ['SPEC_OPTIM_ITERATION']),2)))",
         );
+        fs::write(
+            root.path().join(".bash_history"),
+            "nohup python3 timelock.py unlock input output &\ncat nohup.out\n",
+        )
+        .unwrap();
 
         // Optimize has no editor name, revision, or document in its request.
         let id = start_optimization(&state).await;

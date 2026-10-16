@@ -95,12 +95,35 @@ def history_invocation(history, workspace, recorded_time=None):
             timestamp = int(line[1:]) * 1_000_000_000
             continue
         if re.search(r"\bnohup\b", line):
-            candidate = line, timestamp
+            # Preserve raw words for comment boundaries: shlex treats even an
+            # embedded, unquoted '#' as a comment, unlike Bash.
+            words = []
+            for match in re.finditer(r"""(?:[^\s;&|<>()'"\\]+|'[^']*'|"(?:\\.|[^"\\])*"|\\.)+|[;&|<>()]+|\S""", line):
+                word = match.group()
+                if word.startswith("#"):
+                    break
+                words.append(word)
+            try:
+                tokens = shlex.split(" ".join(words), comments=False, posix=True)
+                # Only exempt simple literal descriptions, not quoted commands
+                # passed to wrappers, eval, pipelines, or shell substitutions.
+                description = (words[:1] == ["echo"] or (
+                    words[:1] == ["printf"] and tokens[1:2] in (["%s"], ["%s\\n"]))) and all(
+                    re.fullmatch(r"""'[^']*'|"[^"$`\\]*"|[^\s'"$`\\;&|<>()]+""", word)
+                    for word in words[1:])
+                mentions_nohup = not description and any(
+                    re.search(r"(?<![\w.-])nohup(?![\w.-])", token) for token in tokens)
+            except ValueError:
+                # Keep malformed candidates so the selected entry fails closed.
+                mentions_nohup = True
+            if mentions_nohup:
+                candidate = line, timestamp
         timestamp = None
     if candidate is None:
         return None
     line, timestamp = candidate
-    if recorded_time is not None and timestamp is not None and timestamp < recorded_time:
+    # Durable launch metadata outranks undated (often stale, global) shell history.
+    if recorded_time is not None and (timestamp is None or timestamp < recorded_time):
         return None
     try:
         # Reject expansion even inside quotes: history is only an identity hint.

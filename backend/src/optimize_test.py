@@ -260,6 +260,7 @@ class OptimizerTest(unittest.TestCase):
                    "nohup spec build {one,two} > plain.out &",
                    "nohup spec build # > plain.out &",
                    "nohup spec build 'unterminated > plain.out &",
+                   "/usr/bin/nohup spec build plain > plain.out &",
                    "nohup unknown task &"]
         for attack in attacks:
             self.history.write_text(valid + attack + "\n")
@@ -268,6 +269,68 @@ class OptimizerTest(unittest.TestCase):
                     optimize.discover(self.workspace, self.history)
                 popen.assert_not_called()
         self.assertFalse((self.workspace / "OWNED").exists())
+
+    def test_history_ignores_nohup_output_references(self):
+        (self.workspace / "plain.out").touch()
+        references = ("cat nohup.out", "tail -f '/tmp/nohup.out'", "ls nohup.log",
+                      "printf '%s' 'nohup spec build example'",
+                      r"printf '%s\n' 'nohup spec build example'",
+                      "echo 'nohup spec build example > example.out &'",
+                      "# nohup spec build example > example.out &",
+                      "  # nohup 'unterminated", "ls # nohup spec build example",
+                      "printf '%s' 'description' # nohup spec build example")
+        for entry in references:
+            with self.subTest(entry=entry):
+                self.history.write_text(entry + "\n")
+                self.assertIsNone(optimize.history_invocation(self.history, self.workspace))
+        self.history.write_text("#123\nnohup spec build plain > plain.out &\n"
+                                + "\n".join(references) + "\n")
+        invocation = optimize.discover(self.workspace, self.history)
+        self.assertEqual(invocation.filename, "plain")
+        self.assertEqual(invocation.timestamp, 123_000_000_000)
+        record, _ = self.record(timestamp=2_000_000_000)
+        for entry in references:
+            with self.subTest(timestamped=entry):
+                self.history.write_text("#3\n" + entry + "\n")
+                self.assertEqual(optimize.discover(self.workspace, self.history).source, str(record))
+
+    def test_metadata_wins_over_undated_history(self):
+        record, output = self.record()
+        for entry in ("nohup python3 timelock.py unlock input output &\ncat nohup.out\n",
+                      "nohup spec build other > other.out &\n",
+                      "nohup spec build 'unterminated > other.out &\n"):
+            with self.subTest(entry=entry):
+                self.history.write_text(entry)
+                invocation = optimize.discover(self.workspace, self.history)
+                self.assertEqual(invocation.source, str(record))
+                self.assertEqual(invocation.output, output)
+
+    def test_newer_unsupported_history_still_blocks_metadata(self):
+        record, _ = self.record(timestamp=2_000_000_000)
+        for entry in ("nohup unknown task &", "nohup spec build 'unterminated",
+                      "bash -c 'nohup spec build newer > newer.out &'",
+                      'env bash -c "nohup spec build newer > newer.out &"',
+                      "eval 'nohup spec build newer > newer.out &'",
+                      "ssh host 'nohup spec build newer > newer.out &'",
+                      "printf '%s' 'nohup spec build newer > newer.out &' | bash",
+                      'printf "%s" "$(nohup spec build newer > newer.out &)"',
+                      "printf -v 'a[$(nohup spec build newer > newer.out &)]' '%s' value",
+                      "printf '%n' 'a[$(nohup spec build newer > newer.out &)]'",
+                      "cd /tmp/project#2 && nohup spec build newer > newer.out &",
+                      "cd /tmp/''#2 && nohup spec build newer > newer.out &",
+                      r"cd /tmp/project\ #2 && nohup spec build newer > newer.out &",
+                      "printf ' # nohup spec build newer"):
+            with self.subTest(entry=entry), mock.patch.object(optimize.subprocess, "Popen") as popen:
+                self.history.write_text("#1\nnohup spec build older > older.out &\n"
+                                        + "#3\n" + entry + "\ncat nohup.out\n")
+                with self.assertRaisesRegex(optimize.OptimizeError, "unsupported or ambiguous"):
+                    optimize.history_invocation(self.history, self.workspace)
+                with self.assertRaisesRegex(optimize.OptimizeError, "unsupported or ambiguous"):
+                    optimize.discover(self.workspace, self.history)
+                for prefix in ("#1\n", ""):
+                    self.history.write_text(prefix + entry + "\n")
+                    self.assertEqual(optimize.discover(self.workspace, self.history).source, str(record))
+                popen.assert_not_called()
 
     def test_history_legacy_ordering(self):
         record, output = self.record()
@@ -293,8 +356,7 @@ class OptimizerTest(unittest.TestCase):
         with self.assertRaisesRegex(optimize.OptimizeError, "equal timestamps"):
             optimize.discover(self.workspace, self.history)
         self.history.write_text(command)
-        with self.assertRaisesRegex(optimize.OptimizeError, "cannot order"):
-            optimize.discover(self.workspace, self.history)
+        self.assertEqual(optimize.discover(self.workspace, self.history).filename, "objective.md")
 
     def test_config_selection(self):
         self.record()
