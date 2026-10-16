@@ -165,6 +165,16 @@ In the discovered project root, prefer `<filename>.optim`, then `<stem>.optim`
 basename for this lookup, even if the recorded name includes directories. If
 neither exists, require exactly one root-level `*.optim`. Ambiguity is an error.
 
+If selection fails, the final failure report includes the discovered `project`,
+`filename`, build `output`, and invocation `source`. A missing-config error lists
+the expected paths; an ambiguity error also lists the competing candidates.
+Create the intended config in that project on the **execution host**, not merely
+in a local editor tab: Optimize does not save or upload editor files. No default
+process is generated, and no older build is selected to work around missing config.
+For example, a discovered project `/home/opencode/project` and filename `upgrade_4`
+require `/home/opencode/project/upgrade_4.optim`, or one other root-level `.optim`
+file containing the owner's optimization process and measurable objectives.
+
 The `.optim` file must be nonempty UTF-8 and at most 1 MiB. An optional leading
 UTF-8 BOM is ignored for mode detection. If its first
 non-whitespace character is `{`, it is parsed as strict JSON v1 using the shipped

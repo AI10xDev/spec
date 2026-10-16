@@ -234,15 +234,30 @@ def discover(workspace, history=None):
 
 def config_path(invocation):
     name = Path(invocation.filename).name
-    for candidate in (invocation.project / (name + ".optim"),
-                      invocation.project / (Path(name).stem + ".optim")):
+    preferred = list(dict.fromkeys((invocation.project / (name + ".optim"),
+                                    invocation.project / (Path(name).stem + ".optim"))))
+    for candidate in preferred:
         if candidate.exists():
             if not candidate.is_file():
                 raise OptimizeError(f"config is not a regular file: {candidate}")
             return candidate
     candidates = sorted(invocation.project.glob("*.optim"))
-    if len(candidates) != 1 or not candidates[0].is_file():
-        raise OptimizeError("expected a filename-matched .optim or exactly one project-root *.optim")
+    expected = " or ".join(str(path) for path in preferred)
+    if not candidates:
+        raise OptimizeError(
+            f"no .optim file found in discovered project {invocation.project} "
+            f"for build filename {invocation.filename!r}. Create {expected}, or exactly one "
+            "project-root *.optim, on the execution host with your optimization process "
+            "and measurable objectives (free-form UTF-8 prose is supported). "
+            "Optimize does not save or upload editor files.")
+    if len(candidates) != 1:
+        raise OptimizeError(
+            f"ambiguous .optim files in discovered project {invocation.project} "
+            f"for build filename {invocation.filename!r}: "
+            + ", ".join(str(path) for path in candidates)
+            + f". Provide a filename-matched config at {expected}, or keep exactly one project-root *.optim.")
+    if not candidates[0].is_file():
+        raise OptimizeError(f"config is not a regular file: {candidates[0]}")
     return candidates[0]
 
 
@@ -722,12 +737,14 @@ def optimize(invocation, objectives, reporter, agent=None):
 
 def run(run_directory, workspace, history=None):
     reporter = Reporter(Path(run_directory))
+    target = {}
     try:
         invocation = discover(workspace, history)
+        target = dict(project=str(invocation.project), filename=invocation.filename,
+                      output=str(invocation.output), source=invocation.source)
         with project_lock(invocation.project):
             path = config_path(invocation)
-            reporter.emit("start", project=str(invocation.project), filename=invocation.filename,
-                          output=str(invocation.output), source=invocation.source, config=str(path))
+            reporter.emit("start", **target, config=str(path))
             text = read_limited(path, CONFIG_LIMIT).decode("utf-8-sig")
             if not text.strip():
                 raise OptimizeError(".optim spec must not be empty")
@@ -740,7 +757,7 @@ def run(run_directory, workspace, history=None):
         reporter.emit("final", outcome="interrupted")
         return 130
     except Exception as error:
-        reporter.emit("final", outcome="failed", error=f"{type(error).__name__}: {error}")
+        reporter.emit("final", outcome="failed", error=f"{type(error).__name__}: {error}", **target)
         return 1
     finally:
         reporter.close()

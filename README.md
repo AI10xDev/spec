@@ -4,9 +4,9 @@ A local-first **Rust backend + Vite / React / TypeScript frontend** for writing 
 
 This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates over SSH to the remote `spec build` alias/function. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
 
-## Latest release: v0.1.6
+## Latest release: v0.1.7
 
-[Spec v0.1.6](https://github.com/AI10xDev/spec/releases/tag/v0.1.6) fixes Optimization Button target discovery: durable build invocation metadata takes precedence over undated shell history, and output references, comments, and simple literal descriptions no longer masquerade as launches. Newer unsupported or wrapped `nohup` invocations still fail closed instead of selecting an older target. Optimization remains separate from builds, with independently measured convergence; a plateau is not proof of an upper bound or global optimum.
+[Spec v0.1.7](https://github.com/AI10xDev/spec/releases/tag/v0.1.7) clarifies Optimization Button spec filepath errors: failed config selection reports the discovered project, build filename, output, and invocation source, with expected `.optim` paths and any ambiguous candidates. Guidance explains that the config must exist on the execution host, not only in a local editor. Lookup precedence and fail-closed behavior are unchanged. Optimization remains separate from builds, with independently measured convergence; a plateau is not proof of an upper bound or global optimum.
 
 Rebuild and restart the local server, then reload the browser to use the updated optimizer. Prose mode needs the additional execution-host setup under [Optimization](#optimization). Releases are versioned by Git tags; package manifests retain `0.1.0`, following the existing source-release convention.
 
@@ -205,6 +205,8 @@ Click **Optimize** in the top-right header to improve the **latest discovered in
 
 Create a trusted `.optim` file in the discovered remote project. For `task.md`, lookup prefers `task.md.optim`, then `task.optim`, otherwise requires exactly one root-level `*.optim`. No project objectives or benchmarks are bundled. See [OPTIMIZE.md](OPTIMIZE.md) for complete discovery rules, schema, and examples.
 
+If config selection fails, the final report identifies the discovered project, filename, output, and invocation source. The error distinguishes a missing config from ambiguous candidates and lists the expected paths. Create the intended file on the execution host; an unsaved or local-only editor file is not available to the optimizer.
+
 Two modes share the same measurement scheduler:
 
 - **Explicit JSON v1:** provide one-step command argv, fixed read-only scalar measurement argv, direction, tolerances, patience, and optional command timeouts for each objective. The scheduler executes these commands directly without model requests.
@@ -371,7 +373,7 @@ node --test scripts/azure-voice.test.cjs
 
 Build the debug backend and frontend assets before browser tests: the fixtures use `backend/target/debug/spec` and `frontend/dist` without rebuilding them. Run in an environment without production provider/SSH exports so inherited settings cannot enable live integrations.
 
-Browser tests start isolated real Rust servers and temporary workspaces. They cover authentication, saved files, tabs, conflicts/downloads, in-flight saves, desktop/mobile layouts, optimization controls/recovery, same-session continuation, repository saving, chat/context editing, and both voice panels. Remote-build streaming/completion/cancellation/failure uses a local SSH stand-in and the actual fixed remote scripts; providers are mocked. They never use your specs or invoke a model. Screenshots are written under `frontend/test-results/`, not over the documentation image. See the [release notes](https://github.com/AI10xDev/spec/releases/tag/v0.1.6) for current results and the [historical validation results](docs/REVIEW.md#validation) for the original review.
+Browser tests start isolated real Rust servers and temporary workspaces. They cover authentication, saved files, tabs, conflicts/downloads, in-flight saves, desktop/mobile layouts, optimization controls/recovery, same-session continuation, repository saving, chat/context editing, and both voice panels. Remote-build streaming/completion/cancellation/failure uses a local SSH stand-in and the actual fixed remote scripts; providers are mocked. They never use your specs or invoke a model. Screenshots are written under `frontend/test-results/`, not over the documentation image. See the [release notes](https://github.com/AI10xDev/spec/releases/tag/v0.1.7) for current results and the [historical validation results](docs/REVIEW.md#validation) for the original review.
 
 For a timed output smoke test, run `bun run test` from `frontend/`. It prints integers 1 through 100, starting immediately and waiting 1000 milliseconds between lines, then exits successfully (about 99 seconds total). Use `bun run test:unit` for the automated unit suite.
 

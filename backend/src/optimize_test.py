@@ -371,6 +371,49 @@ class OptimizerTest(unittest.TestCase):
         exact = self.config([self.objective()])
         self.assertEqual(optimize.config_path(invocation), exact)
 
+    def test_config_setup_errors_include_target_and_remedy(self):
+        record, output = self.record(name="specs/objective.md")
+        for filenames, message in (([], "no .optim file found"),
+                                   (["other.optim", "second.optim"], "ambiguous .optim files")):
+            with self.subTest(filenames=filenames):
+                for filename in filenames:
+                    self.config([self.objective()], filename)
+                with mock.patch.object(optimize, "ResponsesOptimizer") as agent, \
+                        mock.patch.object(optimize, "optimize") as scheduler, \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(optimize.run(self.logs, self.workspace, self.history), 1)
+                agent.assert_not_called()
+                scheduler.assert_not_called()
+                rows = [json.loads(line) for line in (self.logs / "report.jsonl").read_text().splitlines()]
+                event = rows[-1]
+                self.assertEqual(event["event"], "final")
+                self.assertEqual(event["outcome"], "failed")
+                self.assertEqual(event["project"], str(self.project))
+                self.assertEqual(event["filename"], "specs/objective.md")
+                self.assertEqual(event["output"], str(output))
+                self.assertEqual(event["source"], str(record))
+                self.assertIn(message, event["error"])
+                for filename in ["objective.md.optim", "objective.optim", *filenames]:
+                    self.assertIn(str(self.project / filename), event["error"])
+                if not filenames:
+                    self.assertIn("execution host", event["error"])
+                    self.assertIn("free-form UTF-8 prose", event["error"])
+                self.assertEqual(sorted(path.name for path in self.project.glob("*.optim")), filenames)
+                self.assertEqual((self.logs / "progress.log").read_text(),
+                                 (self.logs / "report.jsonl").read_text())
+
+    def test_nonregular_config_is_not_reported_as_missing(self):
+        self.record()
+        invocation = optimize.discover(self.workspace, self.history)
+        for filename in ("other.optim", "objective.optim", "objective.md.optim"):
+            with self.subTest(filename=filename):
+                path = self.project / filename
+                path.mkdir()
+                with self.assertRaisesRegex(optimize.OptimizeError, "config is not a regular file") as error:
+                    optimize.config_path(invocation)
+                self.assertIn(str(path), str(error.exception))
+                path.rmdir()
+
     def test_bom_json_config_does_not_construct_responses_optimizer(self):
         self.record()
         path = self.config([self.objective(patience=2)])
