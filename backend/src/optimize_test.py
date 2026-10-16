@@ -35,6 +35,13 @@ class OptimizerTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.workspace = Path(self.temp.name)
+        home = mock.patch.object(Path, "home", return_value=self.workspace)
+        home.start()
+        self.addCleanup(home.stop)
+        env = mock.patch.dict(os.environ, {key: value for key, value in os.environ.items()
+                                          if key not in ("SPEC_AI_ENV_FILE", "KIBI_ENV_FILE")}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
         self.project = self.workspace / "project with spaces"
         self.project.mkdir()
         self.history = self.workspace / "history"
@@ -1010,6 +1017,99 @@ finally:
                     self.assertEqual((self.project / f"{name}-heartbeat").read_text(), heartbeat)
                 subprocess.run(["flock", "--exclusive", "--nonblock", str(self.project / ".spec-runs"), "true"],
                                check=True)
+
+    def test_dotenv_lookup_precedence_and_environment_overrides(self):
+        legacy = self.workspace / "code.dev" / ".env"
+        legacy.parent.mkdir()
+        ancestor = self.workspace / ".env"
+        local = self.project / ".env"
+        selected = self.project / "custom env"
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(optimize.ai_settings(self.project), {})
+            for path, key in ((legacy, "legacy"), (ancestor, "ancestor"), (local, "project")):
+                path.write_text(f"OPENAI_API_KEY={key}\n")
+                self.assertEqual(optimize.ai_settings(self.project), {"OPENAI_API_KEY": key})
+            selected.write_text("OPENAI_API_KEY=selected\n")
+            os.environ["KIBI_ENV_FILE"] = "custom env"
+            self.assertEqual(optimize.ai_settings(self.project), {"OPENAI_API_KEY": "selected"})
+            os.environ["SPEC_AI_ENV_FILE"] = "~/code.dev/.env"
+            os.environ["HOME"] = str(self.workspace)
+            self.assertEqual(optimize.ai_settings(self.project), {"OPENAI_API_KEY": "legacy"})
+            for value in ("exported", ""):
+                os.environ["OPENAI_API_KEY"] = value
+                self.assertEqual(optimize.ai_settings(self.project), {"OPENAI_API_KEY": value})
+            os.environ["SPEC_AI_ENV_FILE"] = str(self.workspace / "missing")
+            with self.assertRaisesRegex(optimize.OptimizeError, "Could not read AI settings"):
+                optimize.ai_settings(self.project)
+
+    def test_dotenv_literal_syntax_and_no_environment_or_context_leak(self):
+        self.record()
+        invocation = optimize.discover(self.workspace, self.history)
+        marker = self.workspace / "must-not-exist"
+        (self.project / ".env").write_text(
+            "\ufeff# private settings\n"
+            " export AZURE_OPENAI_ENDPOINT = 'https://example.openai.azure.com/openai/v1' # endpoint\n"
+            'AZURE_OPENAI_API_KEY="dotenv-key=#literal" # key\n'
+            "OPENAI_API_KEY=unused-key # ignored for Azure\n"
+            f"UNRELATED=$(touch '{marker}')\n"
+            "UNRELATED_MULTILINE=\"unclosed\n")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            agent = optimize.ResponsesOptimizer("Optimize prose", invocation, mock.Mock())
+            self.assertEqual(agent.url, "https://example.openai.azure.com/openai/v1/responses")
+            self.assertEqual(agent.headers["api-key"], "dotenv-key=#literal")
+            self.assertEqual(dict(os.environ), {})
+            self.assertNotIn("dotenv-key", agent.context)
+            self.assertFalse(marker.exists())
+            (self.project / ".env").write_text(f"OPENAI_API_KEY='$(touch {marker})'\n")
+            self.assertEqual(optimize.ai_settings(self.project)["OPENAI_API_KEY"], f"$(touch {marker})")
+            self.assertFalse(marker.exists())
+
+    def test_dotenv_errors_are_sanitized_and_json_needs_no_credentials(self):
+        self.record()
+        path = self.project / ".env"
+        (self.project / "objective.md.optim").write_text("Optimize the real score until stable.")
+        for content in (b'OPENAI_API_KEY="secret-unclosed', b"AZURE_OPENAI_API_KEY secret-bad-assignment",
+                        b'OPENAI_API_KEY="secret" unexpected', b"OPENAI_API_KEY=secret-\xff"):
+            with self.subTest(content=content), mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch.object(optimize.urllib.request, "build_opener") as opener, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                path.write_bytes(content)
+                self.assertEqual(optimize.run(self.logs, self.workspace, self.history), 1)
+                reports = (self.logs / "report.jsonl").read_text()
+                self.assertIn("Could not read AI settings", reports)
+                self.assertNotIn("secret", reports)
+                opener.assert_not_called()
+        self.config([self.objective(patience=2)])
+        with mock.patch.object(optimize, "ai_settings", side_effect=AssertionError("JSON read credentials")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(optimize.run(self.logs, self.workspace, self.history), 0)
+
+    def test_uploaded_prose_snapshot_loads_discovered_project_dotenv(self):
+        workspace = self.workspace / "remote home"
+        workspace.mkdir()
+        output = self.project / "objective.md.out"
+        output.touch()
+        (workspace / ".bash_history").write_text(
+            f"cd '{self.project}' && nohup spec build objective.md > '{output}' &\n")
+        (self.project / ".env").write_text("OPENAI_API_KEY=private-dotenv-fixture\n")
+        # Intercept the first provider request in the unchanged remote launch path.
+        probe = '''
+def check_credentials(self, messages):
+    assert self.headers["Authorization"] == "Bearer private-dotenv-fixture"
+    assert "private-dotenv-fixture" not in self.context
+    raise OptimizeError("fixture reached authenticated request")
+ResponsesOptimizer.request = check_credentials
+'''
+        payload = Path(optimize.__file__).read_text().replace('\nif __name__ == "__main__":',
+                                                            probe + '\nif __name__ == "__main__":').encode()
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "OPENAI_API_KEY")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            child, directory = self.harness(workspace, payload=payload, config=b"Optimize the real score.")
+            self.assertEqual(child.wait(timeout=10), 1, child.stderr.read().decode())
+        reports = (directory / "report.jsonl").read_text()
+        self.assertIn("fixture reached authenticated request", reports)
+        self.assertNotIn("private-dotenv-fixture", reports)
 
     def test_responses_request_model_prompt_endpoint_auth_and_no_redirects(self):
         _, output = self.record()

@@ -286,13 +286,27 @@ No nested `spec build` is launched: it would contend with the optimizer's projec
 lock. Planned commands should perform project process work and correctness
 validation rather than launch another locking harness.
 
-Configure credentials in the environment inherited by the Python optimizer on
-the **remote execution host** (or the local execution host for direct runs):
+Configure credentials in the environment or a private dotenv file on the
+**remote execution host** (or the local execution host for direct runs):
 
 | Provider | Execution-host environment |
 | --- | --- |
 | Azure | `AZURE_OPENAI_ENDPOINT=https://RESOURCE.openai.azure.com` and `AZURE_OPENAI_API_KEY` |
 | OpenAI | `OPENAI_API_KEY`, with `AZURE_OPENAI_ENDPOINT` unset |
+
+The optimizer reads `SPEC_AI_ENV_FILE` when set, otherwise `KIBI_ENV_FILE` (the
+installed Spec editor's existing setting). Without either override, it reads the
+nearest `.env` in the discovered build project or its ancestors, falling back to
+`~/code.dev/.env`, the installed Spec editor launcher's shared default. It reads
+only one file, not files relative to the uploaded `.optim` or Python snapshot.
+Explicit paths may use `~`; relative paths are resolved against the build project.
+Missing explicit files and invalid AI assignments fail with a sanitized error.
+Exported variables override the corresponding file values, including empty values.
+Only `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, and `OPENAI_API_KEY` are
+consumed; they are not added to the process environment or model context. Supported
+dotenv syntax is single-line `KEY=value`, optional `export`, single/double quotes,
+and comments. Values are literal: shell commands, escapes, and variable expansion
+are not evaluated. Keep credentials private and do not commit dotenv files.
 
 Azure also accepts endpoint paths `/openai/v1` and `/openai/v1/responses`; requests
 use `/openai/v1/responses` with the `api-key` header. Without

@@ -351,13 +351,60 @@ def load_config(path, text=None):
     return objectives
 
 
+def ai_settings(project):
+    keys = ("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "OPENAI_API_KEY")
+    settings = {}
+    try:
+        explicit = os.environ.get("SPEC_AI_ENV_FILE", os.environ.get("KIBI_ENV_FILE"))
+        if explicit is not None:
+            if not explicit:
+                raise ValueError("empty env file path")
+            path = project / Path(explicit).expanduser()
+        else:
+            path = next((directory / ".env" for directory in (project, *project.parents)
+                         if (directory / ".env").exists()), None)
+            # The installed Spec editor launcher uses this shared dotenv location.
+            legacy = Path.home() / "code.dev" / ".env"
+            if path is None and legacy.exists():
+                path = legacy
+        if path is not None:
+            for line in read_limited(path, CONFIG_LIMIT).decode("utf-8-sig").splitlines():
+                assignment = re.fullmatch(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*", line)
+                if assignment is None:
+                    if re.match(r"\s*(?:export\s+)?(?:" + "|".join(keys) + r")\b", line):
+                        raise ValueError("invalid AI assignment")
+                    continue
+                name, value = assignment.groups()
+                if name not in keys:
+                    continue
+                # Parse credentials as literal data, never shell code or substitutions.
+                if value.startswith(("'", '"')):
+                    quote = value[0]
+                    end = value.find(quote, 1)
+                    if end == -1 or (value[end + 1:].strip() and not value[end + 1:].lstrip().startswith("#")):
+                        raise ValueError("invalid quoted AI value")
+                    value = value[1:end]
+                else:
+                    value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+                    if value.startswith("#"):
+                        value = ""
+                settings[name] = value
+    except (OSError, ValueError, OptimizeError):
+        # File and parser exceptions may contain a credential-bearing source line.
+        raise OptimizeError("Could not read AI settings from execution-host .env; check SPEC_AI_ENV_FILE, "
+                            "KIBI_ENV_FILE, file access, and single-line dotenv syntax") from None
+    settings.update({key: os.environ[key] for key in keys if key in os.environ})
+    return settings
+
+
 class ResponsesOptimizer:
     """Model-guided steps; only independently measured scores determine stopping."""
 
     def __init__(self, spec, invocation, reporter):
-        endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "https://api.openai.com/v1")
-        azure = "AZURE_OPENAI_ENDPOINT" in os.environ
-        key = os.environ.get("AZURE_OPENAI_API_KEY" if azure else "OPENAI_API_KEY", "")
+        settings = ai_settings(invocation.project)
+        endpoint = settings.get("AZURE_OPENAI_ENDPOINT", "https://api.openai.com/v1")
+        azure = "AZURE_OPENAI_ENDPOINT" in settings
+        key = settings.get("AZURE_OPENAI_API_KEY" if azure else "OPENAI_API_KEY", "")
         url = urllib.parse.urlsplit(endpoint)
         if (url.scheme != "https" or not url.hostname or url.username or url.password
                 or url.query or url.fragment or any(c.isspace() for c in endpoint)):
@@ -367,7 +414,9 @@ class ResponsesOptimizer:
         if path not in allowed:
             raise OptimizeError("Responses endpoint must end in /openai/v1[/responses] for Azure")
         if not key or not key.isascii() or any(c.isspace() for c in key):
-            raise OptimizeError("Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY, or OPENAI_API_KEY on the execution host")
+            raise OptimizeError("Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY, or OPENAI_API_KEY on the execution host "
+                                "in the environment or .env (project/ancestor, then ~/code.dev/.env); "
+                                "use SPEC_AI_ENV_FILE or KIBI_ENV_FILE for another dotenv path")
         self.url = urllib.parse.urlunsplit(url._replace(path="/openai/v1/responses" if azure else "/v1/responses"))
         self.headers = {"Content-Type": "application/json",
                         "api-key" if azure else "Authorization": key if azure else "Bearer " + key}
