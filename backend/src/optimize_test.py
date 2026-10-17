@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -1196,7 +1198,8 @@ ResponsesOptimizer.request = check_credentials
             return json.dumps({"status": "completed", "output": output}).encode()
 
         cases = [
-            ("malformed-json", b"{", "Responses request failed"),
+            ("malformed-json", b"{", "invalid JSON response"),
+            ("invalid-encoding", b"\xff", "invalid JSON response"),
             ("incomplete", json.dumps({"status": "incomplete", "output": model_text("converged")}).encode(),
              "did not complete"),
             ("api-failed", b'{"status":"failed","error":{"message":"provider-secret"}}', "did not complete"),
@@ -1213,9 +1216,15 @@ ResponsesOptimizer.request = check_credentials
             ("invalid-argv", completed(model_tool("not an argv array")), "bounded argv"),
             ("oversized", b"x" * (4 * optimize.CONFIG_LIMIT + 1), "exceeds 4 MiB"),
             ("http-error", urllib.error.HTTPError("https://example.com/provider-secret", 401,
-                                                 "provider-secret", {}, None), "Responses request failed"),
-            ("url-error", urllib.error.URLError("provider-secret"), "Responses request failed"),
-            ("timeout", TimeoutError("provider-secret"), "Responses request failed"),
+                                                 "provider-secret", {}, None), "HTTP 401"),
+            ("url-error", urllib.error.URLError("provider-secret"), "connection failed"),
+            ("timeout", TimeoutError("provider-secret"), "network timeout"),
+            ("wrapped-timeout", urllib.error.URLError(TimeoutError("provider-secret")), "network timeout"),
+            ("dns", urllib.error.URLError(socket.gaierror("provider-secret")), "DNS resolution failed"),
+            ("certificate", urllib.error.URLError(ssl.SSLCertVerificationError("provider-secret")),
+             "TLS certificate verification failed"),
+            ("tls", ssl.SSLError("provider-secret"), "TLS connection failed"),
+            ("connection", ConnectionResetError("provider-secret"), "connection failed"),
         ]
         for phase in ("plan", "step"):
             for name, failure, error in cases:
@@ -1235,6 +1244,31 @@ ResponsesOptimizer.request = check_credentials
                 self.assertEqual(any(row["event"] == "baseline" for row in rows), phase == "step")
                 self.assertFalse(any(row["event"] == "iteration" for row in rows))
                 self.assertEqual(opener.return_value.open.call_count, 2 if phase == "step" else 1)
+
+    def test_responses_http_errors_at_open_are_actionable_and_private(self):
+        self.record()
+        invocation = optimize.discover(self.workspace, self.history)
+        cases = [(302, "redirect refused"), (400, "payload support"), (401, "API credentials"),
+                 (403, "API permissions"), (404, "model/deployment gpt-6-sol"),
+                 (408, "provider timed out"), (429, "rate limit or quota"),
+                 (500, "provider and gateway availability"), (503, "provider and gateway availability")]
+        for status, guidance in cases:
+            with self.subTest(status=status), \
+                    mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True), \
+                    mock.patch.object(optimize.urllib.request, "build_opener") as opener:
+                body = io.BytesIO(b'{"error":{"message":"provider-secret"}}')
+                error = urllib.error.HTTPError("https://example.com/provider-secret", status,
+                                               "provider-secret", {"Location": "provider-secret"}, body)
+                opener.return_value.open.side_effect = error
+                agent = optimize.ResponsesOptimizer("Optimize prose", invocation, mock.Mock())
+                with self.assertRaises(optimize.OptimizeError) as caught:
+                    agent.request([])
+                self.assertIn(f"HTTP {status}", str(caught.exception))
+                self.assertIn(guidance, str(caught.exception))
+                self.assertNotIn("provider-secret", str(caught.exception))
+                self.assertNotIn("test-key", str(caught.exception))
+                self.assertTrue(body.closed)
+                opener.return_value.open.assert_called_once()
 
     def test_responses_invalid_plan_fails_before_baseline(self):
         self.record()

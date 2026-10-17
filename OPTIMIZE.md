@@ -327,6 +327,13 @@ credentials and makes no Responses requests.
 There is no overall iteration, tool-call, model-turn, or run wall-clock cap.
 Each Responses request uses a 300-second network timeout; a timeout, failed
 request, or unsuccessful response fails the run, never counts as convergence.
+Request failures report HTTP status with troubleshooting guidance, or distinguish
+DNS, TLS/certificate, timeout, connection, and invalid-JSON failures. Provider error
+bodies, URLs, and headers are not logged because they may contain credentials.
+An HTTP 404 can indicate either a wrong Responses route or an unavailable
+`gpt-6-sol` deployment; HTTP 401/403 indicates authentication or access checks,
+and HTTP 429 requires checking rate limits/quota. Build and Optimize use separate
+provider clients, so a working build does not verify Optimize's endpoint or auth.
 This is not an overall optimization deadline. Each planning tool command has a
 300-second timeout. Each optimization tool command uses its objective's
 `timeout_seconds`, as do measurements; omitted or null means no command timeout.

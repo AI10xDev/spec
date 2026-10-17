@@ -12,6 +12,8 @@ import re
 import selectors
 import shlex
 import signal
+import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -462,9 +464,35 @@ class ResponsesOptimizer:
             if len(raw) > 4 * CONFIG_LIMIT:
                 raise OptimizeError("Responses payload exceeds 4 MiB")
             body = json.loads(raw)
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-            # Provider bodies and URLs may include sensitive details.
-            raise OptimizeError("Responses request failed; check execution-host credentials and provider availability") from None
+        except urllib.error.HTTPError as error:
+            # Only expose the status and local guidance, never provider bodies or URLs.
+            guidance = {
+                400: "check Responses payload support and the model/deployment configuration",
+                401: "check execution-host API credentials and the endpoint's authentication requirements",
+                403: "check API permissions, network access rules, and gateway authentication",
+                404: "check the Responses endpoint path and availability of model/deployment " + MODEL,
+                408: "provider timed out; retry when available",
+                429: "rate limit or quota exceeded; check provider quota before retrying",
+            }.get(error.code, "check provider and gateway availability")
+            if 300 <= error.code < 400:
+                guidance = "redirect refused; configure the final HTTPS Responses endpoint directly"
+            error.close()
+            raise OptimizeError(f"Responses request failed (HTTP {error.code}); {guidance}") from None
+        except (urllib.error.URLError, OSError) as error:
+            reason = error.reason if isinstance(error, urllib.error.URLError) else error
+            if isinstance(reason, TimeoutError):
+                detail = "network timeout; check execution-host connectivity and provider availability"
+            elif isinstance(reason, ssl.SSLCertVerificationError):
+                detail = "TLS certificate verification failed; check execution-host CA trust and the provider certificate"
+            elif isinstance(reason, ssl.SSLError):
+                detail = "TLS connection failed; check execution-host TLS configuration and the provider"
+            elif isinstance(reason, socket.gaierror):
+                detail = "DNS resolution failed; check the endpoint hostname and execution-host DNS"
+            else:
+                detail = "connection failed; check execution-host network/proxy settings and provider availability"
+            raise OptimizeError(f"Responses request failed: {detail}") from None
+        except ValueError:
+            raise OptimizeError("Responses request failed: invalid JSON response; check the Responses endpoint and gateway") from None
         if not isinstance(body, dict) or body.get("status") != "completed" or not isinstance(body.get("output"), list):
             raise OptimizeError("Responses request did not complete successfully")
         return body["output"]
