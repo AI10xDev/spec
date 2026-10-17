@@ -4,9 +4,9 @@ A local-first **Rust backend + Vite / React / TypeScript frontend** for writing 
 
 This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates over SSH to the remote `spec build` alias/function. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
 
-## Latest release: v0.1.10
+## Latest release: v0.1.11
 
-[Spec v0.1.10](https://github.com/AI10xDev/spec/releases/tag/v0.1.10) fixes missing Optimize credentials by loading an execution-host dotenv file, with exported variables taking precedence. It supports explicit `SPEC_AI_ENV_FILE` / `KIBI_ENV_FILE` paths, build-project/ancestor `.env` discovery, and the installed Spec launcher's `~/code.dev/.env` fallback. The uploaded `.optim` absolute-path handoff from v0.1.9 is preserved; config location and execution project remain separate. Dotenv values are treated as literal data, and parsing errors are sanitized. Optimization still uses independently measured convergence; a plateau is not proof of an upper bound or global optimum.
+[Spec v0.1.11](https://github.com/AI10xDev/spec/releases/tag/v0.1.11) fixes Optimize rejecting Azure Responses endpoints with gateway routing prefixes. URLs ending in `/openai/v1` or `/openai/v1/responses` now preserve those prefixes, while resource-root endpoints and endpoint security checks remain supported. The uploaded `.optim` absolute-path handoff from v0.1.9 and execution-host dotenv credential loading from v0.1.10 are unchanged; config location and execution project remain separate. Optimization still uses independently measured convergence; a plateau is not proof of an upper bound or global optimum.
 
 Rebuild and restart the local server, then reload the browser to use the updated optimizer. Prose mode needs the additional execution-host setup under [Optimization](#optimization). Releases are versioned by Git tags; package manifests retain `0.1.0`, following the existing source-release convention.
 

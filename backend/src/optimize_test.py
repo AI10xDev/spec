@@ -1048,14 +1048,14 @@ finally:
         marker = self.workspace / "must-not-exist"
         (self.project / ".env").write_text(
             "\ufeff# private settings\n"
-            " export AZURE_OPENAI_ENDPOINT = 'https://example.openai.azure.com/openai/v1' # endpoint\n"
+            " export AZURE_OPENAI_ENDPOINT = 'https://gateway.example/team/provider/azure/openai/v1' # endpoint\n"
             'AZURE_OPENAI_API_KEY="dotenv-key=#literal" # key\n'
             "OPENAI_API_KEY=unused-key # ignored for Azure\n"
             f"UNRELATED=$(touch '{marker}')\n"
             "UNRELATED_MULTILINE=\"unclosed\n")
         with mock.patch.dict(os.environ, {}, clear=True):
             agent = optimize.ResponsesOptimizer("Optimize prose", invocation, mock.Mock())
-            self.assertEqual(agent.url, "https://example.openai.azure.com/openai/v1/responses")
+            self.assertEqual(agent.url, "https://gateway.example/team/provider/azure/openai/v1/responses")
             self.assertEqual(agent.headers["api-key"], "dotenv-key=#literal")
             self.assertEqual(dict(os.environ), {})
             self.assertNotIn("dotenv-key", agent.context)
@@ -1123,6 +1123,11 @@ ResponsesOptimizer.request = check_credentials
             cases.append(({"AZURE_OPENAI_ENDPOINT": "https://example.openai.azure.com" + suffix,
                            "AZURE_OPENAI_API_KEY": "azure-test-key", "OPENAI_API_KEY": "not-used"},
                           "https://example.openai.azure.com/openai/v1/responses", "api-key", "azure-test-key"))
+        for prefix in ("/azure", "/team/provider/azure"):
+            for suffix in ("/openai/v1", "/openai/v1/", "/openai/v1/responses", "/openai/v1/responses/"):
+                cases.append(({"AZURE_OPENAI_ENDPOINT": "https://gateway.example" + prefix + suffix,
+                               "AZURE_OPENAI_API_KEY": "azure-test-key"},
+                              "https://gateway.example" + prefix + "/openai/v1/responses", "api-key", "azure-test-key"))
         for env, url, header, key in cases:
             with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True), \
                     mock.patch.object(optimize.urllib.request, "build_opener") as build_opener:
@@ -1166,7 +1171,13 @@ ResponsesOptimizer.request = check_credentials
                  {"AZURE_OPENAI_ENDPOINT": "https://example.com", "OPENAI_API_KEY": "no-fallback"}]
         for endpoint in ("http://example.com", "https://user:password@example.com",
                          "https://example.com?api-key=secret", "https://example.com#fragment",
-                         "https://example.com/wrong", "https://example .com"):
+                         "https://example.com/wrong", "https://example .com",
+                         "https://gateway.example/team/openai/v1/responses/extra",
+                         "https://gateway.example/team/not-openai/v1",
+                         "https://gateway.example/team/openai/v1?api-key=secret",
+                         "https://gateway.example/team/openai/v1#fragment",
+                         "http://gateway.example/team/openai/v1",
+                         "https://user:password@gateway.example/team/openai/v1"):
             cases.append({"AZURE_OPENAI_ENDPOINT": endpoint, "AZURE_OPENAI_API_KEY": "test-key"})
         for env in cases:
             with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True), \

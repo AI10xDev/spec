@@ -410,14 +410,21 @@ class ResponsesOptimizer:
                 or url.query or url.fragment or any(c.isspace() for c in endpoint)):
             raise OptimizeError("Responses endpoint must be HTTPS without credentials, query, or fragment")
         path = url.path.rstrip("/")
-        allowed = ("", "/openai/v1", "/openai/v1/responses") if azure else ("/v1", "/v1/responses")
-        if path not in allowed:
-            raise OptimizeError("Responses endpoint must end in /openai/v1[/responses] for Azure")
+        if azure:
+            if not path:
+                path = "/openai/v1"
+            elif not path.endswith(("/openai/v1", "/openai/v1/responses")):
+                raise OptimizeError("Azure Responses endpoint must be a resource root or end in /openai/v1[/responses]")
+        elif path not in ("/v1", "/v1/responses"):
+            raise OptimizeError("OpenAI Responses endpoint must end in /v1[/responses]")
         if not key or not key.isascii() or any(c.isspace() for c in key):
             raise OptimizeError("Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY, or OPENAI_API_KEY on the execution host "
                                 "in the environment or .env (project/ancestor, then ~/code.dev/.env); "
                                 "use SPEC_AI_ENV_FILE or KIBI_ENV_FILE for another dotenv path")
-        self.url = urllib.parse.urlunsplit(url._replace(path="/openai/v1/responses" if azure else "/v1/responses"))
+        # Keep gateway routing prefixes when expanding a base URL to Responses.
+        if not path.endswith("/responses"):
+            path += "/responses"
+        self.url = urllib.parse.urlunsplit(url._replace(path=path))
         self.headers = {"Content-Type": "application/json",
                         "api-key" if azure else "Authorization": key if azure else "Bearer " + key}
         self.invocation = invocation

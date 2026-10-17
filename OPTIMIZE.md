@@ -308,8 +308,12 @@ dotenv syntax is single-line `KEY=value`, optional `export`, single/double quote
 and comments. Values are literal: shell commands, escapes, and variable expansion
 are not evaluated. Keep credentials private and do not commit dotenv files.
 
-Azure also accepts endpoint paths `/openai/v1` and `/openai/v1/responses`; requests
-use `/openai/v1/responses` with the `api-key` header. Without
+Azure also accepts endpoint paths ending in `/openai/v1` and
+`/openai/v1/responses`, including gateway routing prefixes. For example,
+`https://gateway.example/team/azure/openai/v1` becomes
+`https://gateway.example/team/azure/openai/v1/responses`; the prefix is preserved,
+and a full Responses URL is used as-is (apart from trailing slashes). Resource-root
+URLs use `/openai/v1/responses`. All Azure requests use the `api-key` header. Without
 `AZURE_OPENAI_ENDPOINT`, requests use `https://api.openai.com/v1/responses` with
 Bearer authentication. Presence of the Azure endpoint selects Azure, with no
 fallback to the OpenAI key. Endpoints must be HTTPS without embedded credentials,
