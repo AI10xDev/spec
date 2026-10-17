@@ -1113,6 +1113,50 @@ ResponsesOptimizer.request = check_credentials
         self.assertIn("fixture reached authenticated request", reports)
         self.assertNotIn("private-dotenv-fixture", reports)
 
+    def test_responses_uploaded_azure_planning_failure_reports_http_status(self):
+        workspace = self.workspace / "remote home"
+        workspace.mkdir()
+        output = self.project / "upgrade_4.out"
+        output.touch()
+        (workspace / ".bash_history").write_text(
+            f"cd '{self.project}' && nohup spec build upgrade_4 > '{output}' &\n")
+        (self.project / ".env").write_text(
+            "AZURE_OPENAI_ENDPOINT=https://fixture.openai.azure.com/openai/v1/\n"
+            "AZURE_OPENAI_API_KEY=private-dotenv-fixture\n")
+        # Exercise the uploaded script and real request handler without contacting Azure.
+        probe = '''
+class FixtureOpener:
+    def open(self, request, timeout):
+        assert request.full_url == "https://fixture.openai.azure.com/openai/v1/responses"
+        assert request.get_header("Api-key") == "private-dotenv-fixture"
+        assert json.loads(request.data)["model"] == "gpt-6-sol"
+        assert "private-dotenv-fixture" not in request.data.decode()
+        raise urllib.error.HTTPError(request.full_url, 401, "private-provider-error", {}, None)
+urllib.request.build_opener = lambda *handlers: FixtureOpener()
+'''
+        payload = Path(optimize.__file__).read_text().replace('\nif __name__ == "__main__":',
+                                                            probe + '\nif __name__ == "__main__":').encode()
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "OPENAI_API_KEY")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            child, directory = self.harness(workspace, payload=payload, config=b"Optimize the real score.")
+            self.assertEqual(child.wait(timeout=10), 1, child.stderr.read().decode())
+        reports = (directory / "report.jsonl").read_text()
+        rows = [json.loads(line) for line in reports.splitlines()]
+        self.assertEqual([row["event"] for row in rows], ["start", "model_request", "final"])
+        self.assertEqual(rows[1]["objective"], "planning")
+        self.assertEqual(rows[1]["iteration"], 0)
+        final = rows[-1]
+        self.assertEqual(final["outcome"], "failed")
+        self.assertIn("Responses request failed (HTTP 401)", final["error"])
+        self.assertIn("execution-host API credentials", final["error"])
+        self.assertEqual(final["project"], str(self.project))
+        self.assertEqual(final["filename"], "upgrade_4")
+        self.assertEqual(Path(final["config"]).parent, workspace / "projects")
+        for private in ("private-dotenv-fixture", "private-provider-error", "fixture.openai.azure.com"):
+            self.assertNotIn(private, reports)
+        self.assertEqual((directory / "progress.log").read_text(), reports)
+
     def test_responses_request_model_prompt_endpoint_auth_and_no_redirects(self):
         _, output = self.record()
         output.write_bytes(b"old prefix" + b"x" * optimize.TOOL_OUTPUT_LIMIT)

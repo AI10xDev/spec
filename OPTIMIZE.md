@@ -339,6 +339,16 @@ This is not an overall optimization deadline. Each planning tool command has a
 `timeout_seconds`, as do measurements; omitted or null means no command timeout.
 That timeout applies per command, not to the entire model-guided step.
 
+If a run logs `model_request` for `planning` at iteration 0, initial endpoint and
+credential validation has already passed; that event does not mean the provider
+accepted the request. Read the complete `final` record in that run's `report.jsonl`
+for the failure reason. A trailing `/openai/v1/` is supported and is expanded to
+`/openai/v1/responses`; do not change it solely because planning failed. If the
+error still lacks the request diagnostics above, rebuild and restart the Spec
+server (`./run.sh`), reload the browser, and start a new Optimize run. The server
+embeds `optimize.py` at compile time and uploads a snapshot for each run; updating
+the source or retrying an old snapshot alone does not update that embedded code.
+
 ### Explicit JSON Mode And Shared Schema
 
 The shipped strict JSON v1 format is retained, for example:
