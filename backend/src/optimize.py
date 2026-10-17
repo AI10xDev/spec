@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import selectors
 import shlex
+import shutil
 import signal
 import socket
 import ssl
@@ -353,6 +354,44 @@ def load_config(path, text=None):
     return objectives
 
 
+def build_ai_settings(invocation, executable):
+    """Reuse the connected Azure provider used by the installed spec build launcher."""
+    try:
+        data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+        path = data / "opencode/auth.json"
+        if not path.exists():
+            return {}
+        auth = json.loads(read_limited(path, CONFIG_LIMIT)).get("azure", {})
+        if auth.get("type") != "api":
+            return {}
+        # Let OpenCode resolve JSONC, project/global config and env/file substitutions.
+        # This output contains credentials, so it must never reach command reports.
+        config = json.loads(execute([executable, "debug", "config"], invocation,
+                                    {"name": "configuration", "timeout_seconds": 30}, 0,
+                                    "config", None))
+        options = config.get("provider", {}).get("azure", {}).get("options", {})
+        if options.get("useDeploymentBasedUrls") or options.get("useCompletionUrls") or options.get("headers"):
+            raise ValueError("unsupported Azure routing")
+        resource = next((name for name in (options.get("resourceName"),
+                        auth.get("metadata", {}).get("resourceName"), os.environ.get("AZURE_RESOURCE_NAME"))
+                        if isinstance(name, str) and name.strip()), None)
+        endpoint = options.get("baseURL")
+        if not endpoint:
+            if not resource or not re.fullmatch(r"[A-Za-z0-9-]+", resource):
+                raise ValueError("missing or invalid Azure resource")
+            endpoint = f"https://{resource}.openai.azure.com/openai/v1"
+        key = options.get("apiKey", auth.get("key"))
+        version = options.get("apiVersion", "v1")
+        if not all(isinstance(value, str) and value for value in (endpoint, key, version)):
+            raise ValueError("invalid Azure configuration")
+        return {"AZURE_OPENAI_ENDPOINT": endpoint, "AZURE_OPENAI_API_KEY": key,
+                "build_api_version": version}
+    except (OSError, ValueError, TypeError, AttributeError, OptimizeError):
+        raise OptimizeError("Could not reuse spec build's connected Azure Responses configuration; "
+                            "check OpenCode azure API authentication and debug config on the execution host, "
+                            "or select a Responses dotenv explicitly with SPEC_AI_ENV_FILE") from None
+
+
 def ai_settings(project):
     keys = ("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "OPENAI_API_KEY")
     settings = {}
@@ -403,7 +442,20 @@ class ResponsesOptimizer:
     """Model-guided steps; only independently measured scores determine stopping."""
 
     def __init__(self, spec, invocation, reporter):
-        settings = ai_settings(invocation.project)
+        self.executable = os.environ.get("SPEC_OPTIM_OPENCODE", shutil.which("opencode-source") or "opencode")
+        explicit_file = "SPEC_AI_ENV_FILE" in os.environ or "KIBI_ENV_FILE" in os.environ
+        keys = ("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "OPENAI_API_KEY")
+        explicit_credentials = {key: os.environ[key] for key in keys if key in os.environ}
+        if explicit_file:
+            settings = ai_settings(invocation.project)
+        elif explicit_credentials:
+            # A provider override must not acquire an unrelated endpoint/key from old dotenv settings.
+            settings = explicit_credentials
+            if "AZURE_OPENAI_API_KEY" in settings and "AZURE_OPENAI_ENDPOINT" not in settings:
+                raise OptimizeError("Set both AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY, "
+                                    "or select a dotenv explicitly with SPEC_AI_ENV_FILE")
+        else:
+            settings = build_ai_settings(invocation, self.executable) or ai_settings(invocation.project)
         endpoint = settings.get("AZURE_OPENAI_ENDPOINT", "https://api.openai.com/v1")
         azure = "AZURE_OPENAI_ENDPOINT" in settings
         key = settings.get("AZURE_OPENAI_API_KEY" if azure else "OPENAI_API_KEY", "")
@@ -427,6 +479,9 @@ class ResponsesOptimizer:
         if not path.endswith("/responses"):
             path += "/responses"
         self.url = urllib.parse.urlunsplit(url._replace(path=path))
+        if "build_api_version" in settings:
+            self.url += "?" + urllib.parse.urlencode({"api-version": settings["build_api_version"]})
+            reporter.emit("model_config", source="spec build OpenCode", provider="azure")
         self.headers = {"Content-Type": "application/json",
                         "api-key" if azure else "Authorization": key if azure else "Bearer " + key}
         self.invocation = invocation
@@ -596,7 +651,7 @@ class ResponsesOptimizer:
         return summary
 
     def build(self, objective, iteration, states):
-        executable = os.environ.get("SPEC_OPTIM_OPENCODE", "opencode")
+        executable = self.executable
         if not executable or "\0" in executable:
             raise OptimizeError("SPEC_OPTIM_OPENCODE must name an OpenCode executable, not shell syntax")
         prompt = (
@@ -713,7 +768,8 @@ def execute(argv, invocation, objective, iteration, phase, reporter, input_file=
                SPEC_OPTIM_OUTPUT=str(invocation.output), SPEC_OPTIM_OBJECTIVE=objective["name"],
                SPEC_OPTIM_ITERATION=str(iteration))
     label = f"{objective['name']} iteration={iteration} {phase}"
-    reporter.command_output(("\n=== " + label + " ===\n").encode("utf-8"))
+    if phase != "config":
+        reporter.command_output(("\n=== " + label + " ===\n").encode("utf-8"))
     timeout = objective["timeout_seconds"]
     deadline = time.monotonic() + timeout if timeout is not None else None
     metric = bytearray()
@@ -742,8 +798,13 @@ def execute(argv, invocation, objective, iteration, phase, reporter, input_file=
                     if not data:
                         selector.unregister(key.fileobj)
                         continue
-                    reporter.command_output(("[" + key.data + "] ").encode() + data)
-                    if phase == "measure" and key.data == "stdout":
+                    if phase != "config":
+                        reporter.command_output(("[" + key.data + "] ").encode() + data)
+                    if phase == "config" and key.data == "stdout":
+                        if len(metric) + len(data) > CONFIG_LIMIT:
+                            raise OptimizeError("OpenCode configuration exceeds 1 MiB")
+                        metric.extend(data)
+                    elif phase == "measure" and key.data == "stdout":
                         if len(metric) + len(data) > METRIC_LIMIT:
                             raise OptimizeError(f"{label}: metric stdout exceeds {METRIC_LIMIT} bytes")
                         metric.extend(data)
@@ -774,6 +835,8 @@ def execute(argv, invocation, objective, iteration, phase, reporter, input_file=
                 child.stderr.close()
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+    if phase == "config":
+        return metric.decode("utf-8", "strict")
     if phase == "measure":
         text = metric.decode("ascii", "strict").strip()
         if not NUMBER.fullmatch(text):

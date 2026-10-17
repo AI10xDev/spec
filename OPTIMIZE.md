@@ -286,15 +286,47 @@ No nested `spec build` is launched: it would contend with the optimizer's projec
 lock. Planned commands should perform project process work and correctness
 validation rather than launch another locking harness.
 
-Configure credentials in the environment or a private dotenv file on the
-**remote execution host** (or the local execution host for direct runs):
+By default, Optimize reuses the connected Azure API provider on the **remote
+execution host** (or the local execution host for direct runs), as used by the
+installed `spec build` launcher. It reads `azure` in
+`${XDG_DATA_HOME:-~/.local/share}/opencode/auth.json` and asks OpenCode for its
+merged `debug config` in the discovered build project. This avoids using an old
+editor dotenv endpoint/key when Build already has a working Azure connection.
+The configuration command uses `SPEC_OPTIM_OPENCODE` if set, otherwise
+`opencode-source` when available (the installed build launcher's engine), then
+`opencode`. The same executable is used for subsequent optimization builder steps.
+
+OpenCode's `provider.azure.options.baseURL` takes precedence over the resource URL.
+Resource-name precedence is `options.resourceName`, connected auth
+`metadata.resourceName`, then `AZURE_RESOURCE_NAME`. The API key comes from
+`options.apiKey` or the connected Azure auth entry; endpoint and key are selected
+together, not mixed with an automatically discovered dotenv. Requests preserve
+`options.apiVersion` (default `v1`) as the Azure SDK's `api-version` query parameter.
+The optimizer still uses `gpt-6-sol`, not Build's selected model; that deployment
+must be available on the shared resource.
+
+Config resolution is bounded to 30 seconds and 1 MiB of stdout. Its stdout and
+stderr are private, including on failure; only a credential-free `model_config`
+source event is reported. An invalid connected configuration fails rather than
+silently switching resources. Deployment/chat routing and custom provider headers
+are not supported by this direct Responses client; select explicit Responses
+settings for those installations. OAuth and non-Azure auth entries are not reused.
+
+For an explicit override, configure credentials in the environment or select a
+private dotenv file on the execution host:
 
 | Provider | Execution-host environment |
 | --- | --- |
 | Azure | `AZURE_OPENAI_ENDPOINT=https://RESOURCE.openai.azure.com` and `AZURE_OPENAI_API_KEY` |
 | OpenAI | `OPENAI_API_KEY`, with `AZURE_OPENAI_ENDPOINT` unset |
 
-The optimizer reads `SPEC_AI_ENV_FILE` when set, otherwise `KIBI_ENV_FILE` (the
+Setting any of the three credential variables above, `SPEC_AI_ENV_FILE`, or
+`KIBI_ENV_FILE` bypasses connected OpenCode lookup. Direct environment credentials
+must form a complete provider configuration; they do not borrow missing values
+from an automatically discovered dotenv. To combine exported overrides with a
+dotenv, select that file explicitly. With an explicit dotenv, or when neither
+environment credentials nor a connected Azure API entry exists, the optimizer reads `SPEC_AI_ENV_FILE`
+when set, otherwise `KIBI_ENV_FILE` (the
 installed Spec editor's existing setting). Without either override, it reads the
 nearest `.env` in the discovered build project or its ancestors, falling back to
 `~/code.dev/.env`, the installed Spec editor launcher's shared default. It reads
@@ -317,7 +349,8 @@ URLs use `/openai/v1/responses`. All Azure requests use the `api-key` header. Wi
 `AZURE_OPENAI_ENDPOINT`, requests use `https://api.openai.com/v1/responses` with
 Bearer authentication. Presence of the Azure endpoint selects Azure, with no
 fallback to the OpenAI key. Endpoints must be HTTPS without embedded credentials,
-queries, fragments, or whitespace; redirects are not followed. The selected key
+queries, fragments, or whitespace; the inherited SDK API version is added separately.
+Redirects are not followed. The selected key
 must be nonempty ASCII without whitespace, and the provider must support
 `gpt-6-sol`. This is **not Rust/UI server configuration**: setting keys only on
 that server does not configure the remote optimizer. Shell aliases are not
@@ -337,7 +370,9 @@ bodies, URLs, and headers are not logged because they may contain credentials.
 An HTTP 404 can indicate either a wrong Responses route or an unavailable
 `gpt-6-sol` deployment; HTTP 401/403 indicates authentication or access checks,
 and HTTP 429 requires checking rate limits/quota. Build and Optimize use separate
-provider clients, so a working build does not verify Optimize's endpoint or auth.
+provider clients and may select different models, even when sharing the connected
+Azure endpoint and API authentication. A working build therefore does not verify
+that the optimizer's model is deployed or its Responses payload is supported.
 This is not an overall optimization deadline. Each planning tool command has a
 300-second timeout. Each optimization tool command uses its objective's
 `timeout_seconds`, as do measurements; omitted or null means no command timeout.

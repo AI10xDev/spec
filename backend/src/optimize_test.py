@@ -1020,6 +1020,142 @@ finally:
                 subprocess.run(["flock", "--exclusive", "--nonblock", str(self.project / ".spec-runs"), "true"],
                                check=True)
 
+    def test_build_azure_configuration_precedes_automatic_dotenv(self):
+        self.record()
+        invocation = optimize.discover(self.workspace, self.history)
+        data = self.workspace / "private data"
+        auth = data / "opencode/auth.json"
+        auth.parent.mkdir(parents=True)
+        auth.write_text(json.dumps({"azure": {"type": "api", "key": "private-build-key",
+                                              "metadata": {"resourceName": "build-resource"}}}))
+        (self.project / ".env").write_text("AZURE_OPENAI_ENDPOINT=https://stale.example\n"
+                                           "AZURE_OPENAI_API_KEY=private-stale-key\n")
+        cases = [({}, "https://build-resource.openai.azure.com/openai/v1/responses?api-version=v1",
+                  "private-build-key"),
+                 ({"resourceName": "configured-resource"},
+                  "https://configured-resource.openai.azure.com/openai/v1/responses?api-version=v1",
+                  "private-build-key"),
+                 ({"baseURL": "https://gateway.example/team/openai/v1/", "apiKey": "private-config-key",
+                   "apiVersion": "2025-04-01-preview"},
+                  "https://gateway.example/team/openai/v1/responses?api-version=2025-04-01-preview",
+                  "private-config-key")]
+        for options, url, key in cases:
+            with self.subTest(options=options), \
+                    mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(data), "AZURE_RESOURCE_NAME": "env-resource"}, clear=True), \
+                    mock.patch.object(optimize.shutil, "which", return_value="/build engine/opencode-source"), \
+                    mock.patch.object(optimize, "execute", return_value=json.dumps(
+                        {"provider": {"azure": {"options": options}}})) as execute, \
+                    mock.patch.object(optimize.urllib.request, "build_opener") as opener:
+                reporter = mock.Mock()
+                agent = optimize.ResponsesOptimizer("Optimize prose", invocation, reporter)
+                opener.return_value.open.return_value.__enter__.return_value.read.return_value = json.dumps(
+                    {"status": "completed", "output": model_text("planned")}).encode()
+                agent.request([])
+                request = opener.return_value.open.call_args.args[0]
+                self.assertEqual(request.full_url, url)
+                self.assertEqual(request.get_header("Api-key"), key)
+                self.assertEqual(json.loads(request.data)["model"], "gpt-6-sol")
+                self.assertEqual(agent.executable, "/build engine/opencode-source")
+                execute.assert_called_once_with([agent.executable, "debug", "config"], invocation,
+                    {"name": "configuration", "timeout_seconds": 30}, 0, "config", None)
+                reporter.emit.assert_called_once_with("model_config", source="spec build OpenCode", provider="azure")
+                for private in ("private-build-key", "private-config-key", "private-stale-key"):
+                    self.assertNotIn(private, agent.context + str(reporter.mock_calls))
+        for env in ({"SPEC_AI_ENV_FILE": ".env"}, {"KIBI_ENV_FILE": ".env"},
+                    {"AZURE_OPENAI_ENDPOINT": "https://explicit.example", "AZURE_OPENAI_API_KEY": "explicit-key"},
+                    {"OPENAI_API_KEY": "explicit-key"},
+                    {"OPENAI_API_KEY": "explicit-key", "SPEC_AI_ENV_FILE": "openai.env"}):
+            (self.project / "openai.env").write_text("")
+            with self.subTest(env=env), mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(data), **env}, clear=True), \
+                    mock.patch.object(optimize, "build_ai_settings", side_effect=AssertionError("ignored override")), \
+                    mock.patch.object(optimize.shutil, "which", return_value="/build engine/opencode-source"):
+                agent = optimize.ResponsesOptimizer("Optimize prose", invocation, mock.Mock())
+                self.assertNotIn("build-resource", agent.url)
+                self.assertEqual(agent.executable, "/build engine/opencode-source")
+                if "OPENAI_API_KEY" in env:
+                    self.assertEqual(agent.url, "https://api.openai.com/v1/responses")
+                    self.assertEqual(agent.headers["Authorization"], "Bearer explicit-key")
+        for env in ({"AZURE_OPENAI_API_KEY": "partial-key"}, {"AZURE_OPENAI_ENDPOINT": "https://partial.example"}):
+            with self.subTest(env=env), mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(data), **env}, clear=True), \
+                    mock.patch.object(optimize.urllib.request, "build_opener") as opener:
+                with self.assertRaises(optimize.OptimizeError):
+                    optimize.ResponsesOptimizer("Optimize prose", invocation, mock.Mock())
+                opener.assert_not_called()
+
+    def test_build_config_failures_are_private_and_do_not_fall_back(self):
+        self.record()
+        invocation = optimize.discover(self.workspace, self.history)
+        auth = self.workspace / ".local/share/opencode/auth.json"
+        auth.parent.mkdir(parents=True)
+        auth.write_text(json.dumps({"azure": {"type": "api", "key": "private-build-key",
+                                              "metadata": {"resourceName": "build-resource"}}}))
+        (self.project / ".env").write_text("OPENAI_API_KEY=must-not-fallback\n")
+        for config in ("private-invalid-json", "[]", '{"provider":null}',
+                       json.dumps({"provider": {"azure": {"options": {"headers": {"secret": "private"}}}}}),
+                       json.dumps({"provider": {"azure": {"options": {"apiKey": None}}}})):
+            with self.subTest(config=config), mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch.object(optimize, "execute", return_value=config), \
+                    mock.patch.object(optimize.urllib.request, "build_opener") as opener:
+                with self.assertRaisesRegex(optimize.OptimizeError, "Could not reuse spec build") as error:
+                    optimize.ResponsesOptimizer("Optimize prose", invocation, mock.Mock())
+                self.assertNotIn("private", str(error.exception))
+                opener.assert_not_called()
+        for code, expected in (("print('private-config'); print('private-error', file=sys.stderr)", "private-config\n"),
+                               ("print('private-config'); sys.exit(7)", None),
+                               (f"print('x' * {optimize.CONFIG_LIMIT + 1})", None),
+                               ("time.sleep(30)", None)):
+            with self.subTest(code=code):
+                reporter = mock.Mock()
+                args = (python("import sys, time; " + code), invocation,
+                        {"name": "configuration", "timeout_seconds": 0.2 if "sleep" in code else 5},
+                        0, "config", reporter)
+                if expected is None:
+                    with self.assertRaises(optimize.OptimizeError):
+                        optimize.execute(*args)
+                else:
+                    self.assertEqual(optimize.execute(*args), expected)
+                self.assertEqual(reporter.mock_calls, [])
+
+    def test_uploaded_prose_reuses_build_azure_auth_and_resolved_config(self):
+        workspace = self.workspace / "remote home"
+        workspace.mkdir()
+        output = self.project / "objective.md.out"
+        output.touch()
+        (workspace / ".bash_history").write_text(
+            f"cd '{self.project}' && nohup spec build objective.md > '{output}' &\n")
+        auth = workspace / ".local/share/opencode/auth.json"
+        auth.parent.mkdir(parents=True)
+        auth.write_text(json.dumps({"azure": {"type": "api", "key": "private-connected-key",
+                                              "metadata": {"resourceName": "build-resource"}}}))
+        (self.project / ".env").write_text("OPENAI_API_KEY=private-stale-key\n")
+        launcher = workspace / "build engine"
+        launcher.write_text(f"#!{sys.executable}\nimport json, os, sys\n"
+                            f"assert os.getcwd() == {str(self.project)!r}\n"
+                            "assert sys.argv[1:] == ['debug', 'config']\n"
+                            "print('private-cli-diagnostic', file=sys.stderr)\n"
+                            "print(json.dumps({'provider': {'azure': {'options': {}}}}))\n")
+        launcher.chmod(0o700)
+        probe = '''
+def check_credentials(self, messages):
+    assert self.url == "https://build-resource.openai.azure.com/openai/v1/responses?api-version=v1"
+    assert self.headers["api-key"] == "private-connected-key"
+    assert "private-connected-key" not in self.context
+    raise OptimizeError("fixture reused build configuration")
+ResponsesOptimizer.request = check_credentials
+'''
+        payload = Path(optimize.__file__).read_text().replace('\nif __name__ == "__main__":',
+                                                            probe + '\nif __name__ == "__main__":').encode()
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "OPENAI_API_KEY", "XDG_DATA_HOME")}
+        with mock.patch.dict(os.environ, {**env, "SPEC_OPTIM_OPENCODE": str(launcher)}, clear=True):
+            child, directory = self.harness(workspace, payload=payload, config=b"Optimize the real score.")
+            self.assertEqual(child.wait(timeout=10), 1, child.stderr.read().decode())
+        reports = (directory / "report.jsonl").read_text()
+        self.assertIn("fixture reused build configuration", reports)
+        self.assertIn('"event": "model_config"', reports)
+        for name in ("report.jsonl", "progress.log", "commands.log"):
+            self.assertNotIn("private-", (directory / name).read_text())
+
     def test_dotenv_lookup_precedence_and_environment_overrides(self):
         legacy = self.workspace / "code.dev" / ".env"
         legacy.parent.mkdir()
