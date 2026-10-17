@@ -459,7 +459,21 @@ class ResponsesOptimizer:
                 return None
 
         try:
-            with urllib.request.build_opener(NoRedirect).open(request, timeout=300) as response:
+            opener = urllib.request.build_opener(NoRedirect)
+            for attempt in range(3):
+                try:
+                    connection = opener.open(request, timeout=300)
+                    break
+                except (urllib.error.URLError, OSError) as error:
+                    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+                    # DNS failed before sending the POST; other failures may have reached the model.
+                    if not isinstance(reason, socket.gaierror) or reason.errno != socket.EAI_AGAIN or attempt == 2:
+                        raise
+                    delay = 2 ** attempt
+                    self.reporter.emit("model_retry", reason="temporary DNS resolution failure",
+                                       attempt=attempt + 2, delay_seconds=delay)
+                    time.sleep(delay)
+            with connection as response:
                 raw = response.read(4 * CONFIG_LIMIT + 1)
             if len(raw) > 4 * CONFIG_LIMIT:
                 raise OptimizeError("Responses payload exceeds 4 MiB")

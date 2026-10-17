@@ -1210,6 +1210,42 @@ urllib.request.build_opener = lambda *handlers: FixtureOpener()
                 self.assertIsNone(handler().redirect_request(request, None, 302, "redirect", {},
                                                              "https://other.example/responses"))
 
+    def test_responses_temporary_dns_retries_are_bounded_and_private(self):
+        self.record()
+        invocation = optimize.discover(self.workspace, self.history)
+        result = model_text("planned")
+        for wrapped in (False, True):
+            for code, recovers in ((socket.EAI_AGAIN, True), (socket.EAI_AGAIN, False),
+                                   (socket.EAI_NONAME, False)):
+                with self.subTest(wrapped=wrapped, code=code, recovers=recovers), \
+                        mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True), \
+                        mock.patch.object(optimize.urllib.request, "build_opener") as opener, \
+                        mock.patch.object(optimize.time, "sleep") as sleep:
+                    error = socket.gaierror(code, "private-provider-detail")
+                    if wrapped:
+                        error = urllib.error.URLError(error)
+                    response = mock.MagicMock()
+                    response.__enter__.return_value.read.return_value = json.dumps(
+                        {"status": "completed", "output": result}).encode()
+                    opener.return_value.open.side_effect = [error, error, response] if recovers else error
+                    reporter = mock.Mock()
+                    agent = optimize.ResponsesOptimizer("Optimize prose", invocation, reporter)
+                    if recovers:
+                        self.assertEqual(agent.request([]), result)
+                    else:
+                        with self.assertRaisesRegex(optimize.OptimizeError, "DNS resolution failed") as caught:
+                            agent.request([])
+                        self.assertNotIn("private-provider-detail", str(caught.exception))
+                    retries = code == socket.EAI_AGAIN
+                    self.assertEqual(opener.return_value.open.call_count, 3 if retries else 1)
+                    self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(2)] if retries else [])
+                    self.assertEqual(reporter.emit.call_args_list, [
+                        mock.call("model_retry", reason="temporary DNS resolution failure", attempt=2, delay_seconds=1),
+                        mock.call("model_retry", reason="temporary DNS resolution failure", attempt=3, delay_seconds=2),
+                    ] if retries else [])
+                    requests = opener.return_value.open.call_args_list
+                    self.assertTrue(all(call == requests[0] for call in requests))
+
     def test_responses_invalid_endpoint_or_credentials_fail_before_request(self):
         self.record()
         invocation = optimize.discover(self.workspace, self.history)
@@ -1265,6 +1301,8 @@ urllib.request.build_opener = lambda *handlers: FixtureOpener()
             ("timeout", TimeoutError("provider-secret"), "network timeout"),
             ("wrapped-timeout", urllib.error.URLError(TimeoutError("provider-secret")), "network timeout"),
             ("dns", urllib.error.URLError(socket.gaierror("provider-secret")), "DNS resolution failed"),
+            ("dns-after-send", urllib.error.URLError(socket.gaierror(socket.EAI_AGAIN, "provider-secret")),
+             "DNS resolution failed"),
             ("certificate", urllib.error.URLError(ssl.SSLCertVerificationError("provider-secret")),
              "TLS certificate verification failed"),
             ("tls", ssl.SSLError("provider-secret"), "TLS connection failed"),

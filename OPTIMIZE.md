@@ -325,8 +325,12 @@ sourced or executed to obtain endpoint/key settings. JSON mode needs no model
 credentials and makes no Responses requests.
 
 There is no overall iteration, tool-call, model-turn, or run wall-clock cap.
-Each Responses request uses a 300-second network timeout; a timeout, failed
-request, or unsuccessful response fails the run, never counts as convergence.
+Each Responses request uses a 300-second network timeout. Temporary DNS lookup
+failures (`EAI_AGAIN`) before sending the request get two retries after 1 and 2
+seconds, recorded as `model_retry` events. Permanent DNS errors and other request
+failures are not retried; in particular, ambiguous failures after sending a POST
+must not replay model work. Exhausted retries and all other request failures stop
+the run, never count as convergence.
 Request failures report HTTP status with troubleshooting guidance, or distinguish
 DNS, TLS/certificate, timeout, connection, and invalid-JSON failures. Provider error
 bodies, URLs, and headers are not logged because they may contain credentials.
@@ -348,6 +352,11 @@ error still lacks the request diagnostics above, rebuild and restart the Spec
 server (`./run.sh`), reload the browser, and start a new Optimize run. The server
 embeds `optimize.py` at compile time and uploads a snapshot for each run; updating
 the source or retrying an old snapshot alone does not update that embedded code.
+For DNS failures, verify the configured endpoint hostname using
+`getent ahosts HOSTNAME` on the execution host. If it resolves but Optimize still reports DNS
+errors, check the execution process's proxy settings and proxy hostname as well.
+Use the Azure resource's published endpoint; do not hard-code a resolved IP,
+disable TLS verification, or switch providers to work around DNS failures.
 
 ### Explicit JSON Mode And Shared Schema
 
