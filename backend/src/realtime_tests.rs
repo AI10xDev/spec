@@ -221,6 +221,11 @@ async fn unified_call_supplies_read_only_snapshot_without_touching_workspace() {
     assert_eq!(payload["tools"], json!([]));
     assert_eq!(payload["tool_choice"], "none");
     let instructions = payload["instructions"].as_str().unwrap();
+    assert!(instructions.starts_with("Language policy: This is an English-only conversation."));
+    assert!(instructions.contains("Speak and write only in English."));
+    assert!(instructions.contains("If speech is non-English, mixed-language, or unclear"));
+    assert!(instructions.contains("Please repeat your request in English."));
+    assert!(instructions.contains("Never switch languages, even when asked"));
     let context: Value = serde_json::from_str(instructions.strip_prefix(PROMPT).unwrap()).unwrap();
     assert_eq!(context["spec"], input()["spec"]);
     assert_eq!(context["output"], input()["output"]);

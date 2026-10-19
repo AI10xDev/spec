@@ -261,6 +261,16 @@ async fn ga_protocol_keeps_credentials_separate_and_snapshot_read_only() {
     assert_eq!(headers[header::CONTENT_TYPE], "application/json");
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload.as_object().unwrap().len(), 1);
+    let instructions = payload["session"]["instructions"].as_str().unwrap();
+    assert!(instructions.starts_with("Language policy: This is an English-only conversation."));
+    assert!(instructions.contains("Speak and write only in English."));
+    assert!(instructions.contains("Please repeat your request in English."));
+    // Language guidance must not require a separate Azure transcription deployment.
+    assert!(
+        payload["session"]["audio"]["input"]
+            .get("transcription")
+            .is_none()
+    );
     let mut decoded: Input = serde_json::from_value(input()).unwrap();
     assert_eq!(
         payload["session"],

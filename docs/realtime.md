@@ -5,6 +5,33 @@ completion. OpenAI retains its GA unified WebRTC calls API; Azure OpenAI has a
 separate GA client-secret and raw-SDP exchange. The backend does not proxy
 microphone/audio traffic or rebuild the chatbot.
 
+## Conversation Language
+
+OpenAI voice, Azure voice, and text chat send an English-only language policy in
+their server-authored instructions. The assistant is instructed to answer only
+in English, never follow language-switch requests from conversation or spec/log
+context, and ask "Please repeat your request in English." for non-English or
+mixed-language requests (also for unclear speech). English with any accent is
+welcome. Code, filenames, proper names, and quoted source text remain data and
+are explained in English; this is not an ASCII-only filter on specs or logs.
+Inline completion and provider credentials/settings are unchanged.
+
+This is model guidance, not a guaranteed input/output language filter. Microphone
+audio streams directly to the provider and automatic responses are played
+directly by the browser; the server does not detect or reject their language.
+Strict enforcement would require language validation and gating before response
+generation and playback. Test non-English speech, mixed-language speech, noise,
+and requests to change language with a live microphone before relying on it.
+
+Azure CLI cannot set a persistent deployment-wide Realtime language policy.
+The backend sends these instructions for each new session (and each text-chat
+request). Deploy/rebuild the updated backend, restart it, then stop and start
+voice to pick up the change; existing calls keep their original instructions.
+No Azure resource provisioning or text endpoint/key/deployment change is needed.
+Input transcription stays disabled: its optional `language: "en"` is only a
+transcription hint, not a constraint on native audio understanding or output.
+Enabling it may require a separate transcription deployment on Azure.
+
 ## Setup
 
 In session chat, select the mic button labeled **OpenAI voice conversation**, then
@@ -194,7 +221,7 @@ multipart request contains `sdp` (`application/sdp`) and `session`
 {
   "type": "realtime",
   "model": "gpt-realtime",
-  "instructions": "Read-only voice rules followed by a bounded JSON context snapshot",
+  "instructions": "English-only language policy and read-only voice rules followed by a bounded JSON context snapshot",
   "output_modalities": ["audio"],
   "audio": {
     "input": {"turn_detection": {"type": "server_vad", "create_response": true, "interrupt_response": true}},
