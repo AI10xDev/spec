@@ -809,6 +809,52 @@ async fn cancel(State(app): State<App>, Path(id): Path<String>) -> Result<Json<s
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+fn retained_remote<'a>(app: &'a App, name: &str) -> Result<&'a Remote> {
+    read(&app.root, name)?;
+    let remote = app.remote.as_ref().ok_or_else(|| {
+        Error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Remote execution is disabled".into(),
+        )
+    })?;
+    if let Some(id) = recovery::latest(app, name)?
+        && recovery::load(app, &id)?.remote_identity != remote.identity()
+    {
+        return Err(Error(
+            StatusCode::BAD_GATEWAY,
+            "Remote configuration does not match the saved run".into(),
+        ));
+    }
+    Ok(remote)
+}
+
+async fn retained_runs(
+    State(app): State<App>,
+    Path(name): Path<String>,
+) -> Result<Json<remote::RetainedRuns>> {
+    let remote = retained_remote(&app, &name)?;
+    remote
+        .retained(&name, None)
+        .await
+        .map(Json)
+        .map_err(|error| Error(StatusCode::BAD_GATEWAY, error))
+}
+
+async fn retained_log(
+    State(app): State<App>,
+    Path((name, id)): Path<(String, String)>,
+) -> Result<Json<Output>> {
+    if !Uuid::parse_str(&id).is_ok_and(|uuid| uuid.to_string() == id) {
+        return Err(invalid("Invalid run ID"));
+    }
+    let remote = retained_remote(&app, &name)?;
+    remote
+        .retained(&name, Some(&id))
+        .await
+        .map(Json)
+        .map_err(|error| Error(StatusCode::BAD_GATEWAY, error))
+}
+
 fn router(app: App) -> Router {
     Router::new()
         .route(
@@ -844,6 +890,11 @@ fn router(app: App) -> Router {
         .route("/api/files/{name}", get(load).put(write))
         .route("/api/files/{name}/run", get(latest_output))
         .route("/api/files/{name}/run/log", get(output_log))
+        .route("/api/files/{name}/retained-runs", get(retained_runs))
+        .route(
+            "/api/files/{name}/retained-runs/{id}/log",
+            get(retained_log),
+        )
         .route("/api/runs", post(start))
         .route("/api/optimize", get(latest_optimization).post(optimize))
         .route("/api/repository", get(repository))

@@ -10,6 +10,7 @@ import "./style.css"
 type Entry = { name: string; modified: number; bytes: number }
 type Repository = { connected: boolean; dirty: boolean; directory: string | null; model: string }
 type Output = RunOutput & { continuable: boolean }
+type RetainedRuns = { runs: { id: string; modified: number }[]; truncated: boolean }
 const chatName = new URLSearchParams(location.search).get("chat")
 
 function App() {
@@ -45,13 +46,17 @@ function App() {
   const [optimization, setOptimization] = useState<Output | null>(null)
   const [outputView, setOutputView] = useState<"file" | "optimization">("file")
   const [loadingOutput, setLoadingOutput] = useState<{ id?: string } | null>(null)
+  const [retained, setRetained] = useState<(RetainedRuns & { name: string; output?: Output; loading: boolean; listed: boolean }) | null>(null)
+  const retainedRequest = useRef(0)
   const [follow, setFollow] = useState(true)
   const log = useRef<HTMLPreElement>(null)
   const chatWindows = useRef(new Map<Window, string>())
   const tab = tabs.find((item) => item.name === active)
   const fileOutput = outputs[active]
-  const output = outputView === "optimization" ? optimization : fileOutput
-  const canContinue = !!output && outputView === "file" && execution && !busy && !optimization?.recoverable && output.status === "completed" && !output.recoverable && output.continuable === true
+  const retainedView = outputView === "file" && retained?.name === active ? retained : null
+  const historical = retainedView?.output
+  const output = outputView === "optimization" ? optimization : historical ?? fileOutput
+  const canContinue = !!output && !historical && outputView === "file" && execution && !busy && !optimization?.recoverable && output.status === "completed" && !output.recoverable && output.continuable === true
   const message = output ? feedback[output.id] ?? "" : ""
   const pendingRuns = [...Object.values(outputs), ...(optimization ? [optimization] : [])].filter((item) => item.recoverable).map((item) => item.id).join(",")
 
@@ -185,6 +190,12 @@ function App() {
   }, [output?.output, follow])
 
   useEffect(() => {
+    // Historical reads must not replace a new run or follow the user to another tab.
+    retainedRequest.current++
+    setRetained(null)
+  }, [active, fileOutput?.id, token, busy])
+
+  useEffect(() => {
     if (!connected || !execution || chatName || busy) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
@@ -208,7 +219,7 @@ function App() {
 
   async function recoverOutput(name: string, fromLog = false) {
     const previous = outputs[name]
-    if (fromLog) { setLoadingOutput({ id: previous?.id }); setError(""); setNotice("") }
+    if (fromLog) { retainedRequest.current++; setRetained(null); setLoadingOutput({ id: previous?.id }); setError(""); setNotice("") }
     try {
       const latest = await api<Output | null>(`/files/${encodeURIComponent(name)}/run${fromLog ? "/log" : ""}`)
       // A slow recovery must not overwrite a newly started run or a fresher poll.
@@ -220,13 +231,36 @@ function App() {
         setOutputs((items) => items[name] === previous ? { ...items, [name]: next } : items)
       }
       if (fromLog) {
-        if (latest?.status.startsWith("unavailable")) fail(`Remote output for ${name} is ${latest.status}. Showing cached output, which may be incomplete.`)
+        if (latest?.status.startsWith("unavailable")) fail(`Remote output for ${name} is ${latest.status}. Showing cached output, which may be incomplete. Browse retained runs to look for other logs without rerunning the spec.`)
         else setNotice(latest ? `Loaded ${name}.out` : `No saved run output for ${name}. Save & run to create one.`)
       }
     } catch (error) {
       fail(`Could not recover output for ${name}: ${error instanceof Error ? error.message : String(error)}.`)
     } finally {
       if (fromLog) setLoadingOutput(null)
+    }
+  }
+
+  async function browseRetained(name: string, id?: string) {
+    const request = ++retainedRequest.current
+    setError("")
+    setNotice("")
+    setRetained((previous) => ({ ...(previous?.name === name ? previous : { name, runs: [], truncated: false, listed: false }), loading: true }))
+    try {
+      const path = `/files/${encodeURIComponent(name)}/retained-runs`
+      if (id) {
+        const loaded = await api<Output>(`${path}/${id}/log`)
+        if (request !== retainedRequest.current) return
+        setRetained((previous) => previous?.name === name ? { ...previous, output: loaded, loading: false } : previous)
+      } else {
+        const listed = await api<RetainedRuns>(path)
+        if (request !== retainedRequest.current) return
+        setRetained({ name, ...listed, loading: false, listed: true })
+      }
+    } catch (error) {
+      if (request !== retainedRequest.current) return
+      setRetained((previous) => previous ? { ...previous, loading: false } : previous)
+      fail(`Could not load retained output for ${name}: ${error instanceof Error ? error.message : String(error)}. Existing output was not replaced.`)
     }
   }
 
@@ -436,11 +470,22 @@ function App() {
               setOutputView("optimization")
               if (!optimization) { setError(""); void recoverOptimization().catch(fail) }
             }}>Optimization</button></div>
-            {tab && outputView === "file" && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>Spec + current nohup output in a separate window</span></div>}
-            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button>}{output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={!canContinue} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
+            {tab && outputView === "file" && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>{historical ? "Chat uses the associated run, not this retained log" : "Spec + current nohup output in a separate window"}</span></div>}
+            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <><button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button><button disabled={!!loadingOutput || !!retainedView?.loading || busy || !execution} onClick={() => void browseRetained(tab.name)}>Browse retained runs</button></>}{!historical && output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={!canContinue} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
+            {retainedView && <div className="retained-runs" aria-label="Retained run selection" aria-busy={retainedView.loading}>
+              <label htmlFor="retained-run">Retained runs for {retainedView.name} (log updated)</label>
+              <select id="retained-run" value={historical?.id ?? ""} disabled={retainedView.loading || !retainedView.runs.length} onChange={(event) => { if (event.target.value) void browseRetained(retainedView.name, event.target.value) }}>
+                <option value="">Choose a run to view</option>
+                {retainedView.runs.map((run) => <option key={run.id} value={run.id}>{run.id} / {new Date(run.modified * 1000).toLocaleString()}</option>)}
+              </select>
+              {retainedView.loading ? <p>Loading retained output...</p> : !retainedView.listed ? <p>Retained-run search did not complete. Retry Browse retained runs.</p> : !retainedView.runs.length && <p>No matching retained logs found. Missing logs cannot be recreated by retrying recovery.</p>}
+              {retainedView.truncated && <p>Search limit reached. This list is incomplete and may omit newer runs.</p>}
+              {historical && <p>Read-only snapshot from run <code>{historical.id}</code>. {fileOutput ? <>This does not replace or resolve the associated run <code>{fileOutput.id}</code> ({fileOutput.status}).</> : "No run is associated with this file."} It may have used different instructions.</p>}
+              <button onClick={() => { retainedRequest.current++; setRetained(null) }}>Return to associated output</button>
+            </div>}
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
             <pre ref={log} className="output" aria-label="Run output">{output ? <LogOutput value={output.output} /> : (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery. To start a new run, open or create a nonempty .optim file and select its tab, then click Optimize. The current editor buffer, including unsaved changes, is uploaded to remote ~/projects and its absolute path is sent to the optimizer. No local save is performed." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
-            {output && outputView === "file" && output.continuable === true && <form className="chat-composer build-feedback" onSubmit={(event) => { event.preventDefault(); void continueRun(message) }}>
+            {!historical && output && outputView === "file" && output.continuable === true && <form className="chat-composer build-feedback" onSubmit={(event) => { event.preventDefault(); void continueRun(message) }}>
               <label htmlFor="build-feedback">Feedback to build session</label>
               <textarea id="build-feedback" aria-describedby="feedback-help feedback-limit" placeholder="Answer the agent or explain what to change..." value={message} disabled={busy} onChange={(event) => setFeedback((items) => ({ ...items, [output.id]: event.target.value }))} />
               <span id="feedback-limit">{new TextEncoder().encode(message).length.toLocaleString()} / 16,384 bytes</span>

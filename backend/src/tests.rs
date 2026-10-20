@@ -13,6 +13,9 @@ mod continuation_tests;
 #[path = "optimization_tests.rs"]
 mod optimization_tests;
 
+#[path = "retained_tests.rs"]
+mod retained_tests;
+
 pub(super) fn app(root: &FsPath) -> App {
     App {
         root: root.to_owned(),
@@ -87,6 +90,8 @@ async fn all_api_routes_require_authentication() {
         ("GET", "/api/files/a.md"),
         ("GET", "/api/files/a.md/run"),
         ("GET", "/api/files/a.md/run/log"),
+        ("GET", "/api/files/a.md/retained-runs"),
+        ("GET", "/api/files/a.md/retained-runs/id/log"),
         ("PUT", "/api/files/a.md"),
         ("GET", "/api/config"),
         ("POST", "/api/completions"),
@@ -937,7 +942,12 @@ async fn output_log_reads_disk_without_replacing_cached_or_attached_output() {
         assert_eq!(response.status(), StatusCode::OK);
         let output = json(response).await;
         assert_eq!(output["output"], "saved output");
-        assert!(output["status"].as_str().unwrap().starts_with("unavailable"));
+        assert!(
+            output["status"]
+                .as_str()
+                .unwrap()
+                .starts_with("unavailable")
+        );
         assert_eq!(output["recoverable"], true);
         assert_eq!(state.jobs.lock().unwrap()[0].output, job.output);
     }
@@ -979,7 +989,11 @@ async fn output_log_missing_run_preserves_cached_output_and_unresolved_status() 
             assert_eq!(output["id"], id);
             assert_eq!(
                 output["output"],
-                if attached { "newer attached output" } else { "saved output" }
+                if attached {
+                    "newer attached output"
+                } else {
+                    "saved output"
+                }
             );
             assert_eq!(output["truncated"], attached);
             assert_eq!(output["recoverable"], true);

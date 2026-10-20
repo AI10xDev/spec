@@ -15,6 +15,18 @@ pub struct RepositoryStatus {
     pub model: &'static str,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct RetainedRun {
+    pub id: String,
+    pub modified: i64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct RetainedRuns {
+    pub runs: Vec<RetainedRun>,
+    pub truncated: bool,
+}
+
 #[derive(Clone)]
 pub struct Remote {
     pub binary: PathBuf,
@@ -333,6 +345,71 @@ impl Remote {
         })
         .await
         .unwrap_or_else(|_| Err("remote repository status timed out".to_owned()));
+        if result.is_err() {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+            let _ = child.kill().await;
+        }
+        result
+    }
+
+    pub async fn retained<T: serde::de::DeserializeOwned>(
+        &self,
+        name: &str,
+        id: Option<&str>,
+    ) -> Result<T, String> {
+        let limit = if id.is_some() {
+            super::MAX_OUTPUT * 6 + 4096
+        } else {
+            16384
+        };
+        let mut child = self
+            .ssh(format!(
+                "timeout --kill-after=1s 10s python3 -I -c {} {} {} {}",
+                quote(include_str!("remote-retained.py")),
+                quote(&self.directory),
+                quote(name),
+                quote(id.unwrap_or("")),
+            ))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let pid = child.id().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            async fn read(
+                pipe: impl tokio::io::AsyncRead + Unpin,
+                limit: usize,
+            ) -> Result<Vec<u8>, String> {
+                let mut bytes = Vec::new();
+                pipe.take((limit + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if bytes.len() > limit {
+                    return Err("remote retained response exceeded limit".to_owned());
+                }
+                Ok(bytes)
+            }
+            let (out, err) = tokio::try_join!(read(stdout, limit), read(stderr, 4096))?;
+            let exit = child.wait().await.map_err(|e| e.to_string())?;
+            if !exit.success() {
+                return Err(format!(
+                    "remote retained lookup {exit}: {}",
+                    String::from_utf8_lossy(&err).trim()
+                ));
+            }
+            serde_json::from_slice(&out).map_err(|_| "invalid remote retained response".to_owned())
+        })
+        .await
+        .unwrap_or_else(|_| Err("remote retained lookup timed out".to_owned()));
         if result.is_err() {
             let _ = nix::sys::signal::killpg(
                 nix::unistd::Pid::from_raw(pid as i32),

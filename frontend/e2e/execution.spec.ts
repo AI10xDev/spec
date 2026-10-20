@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test"
 import { spawn } from "node:child_process"
 import type { ChildProcess } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -341,7 +342,7 @@ test("unavailable polls preserve newer disk output until recovery succeeds", asy
   expect(builds).toEqual([])
 })
 
-test("load nohup output reads the spec-named file and reports missing output without launching", async ({ page }) => {
+test("load nohup output reports a missing directory and browses retained logs without launching", async ({ page }) => {
   await page.goto(url)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole("textbox", { name: "New filename" }).fill("log-file.md")
@@ -377,9 +378,175 @@ test("load nohup output reads the spec-named file and reports missing output wit
   await expect(page.getByRole("alert")).toContainText("remote run directory missing")
   await expect(page.getByRole("alert")).toContainText(id)
   await expect(output).toContainText("Fresh from disk")
+  const cached = await output.textContent()
+  const retainedId = randomUUID()
+  const retainedDirectory = path.join(path.dirname(path.dirname(log)), `run-${retainedId}`)
+  await mkdir(retainedDirectory, { mode: 0o700 })
+  await writeFile(path.join(retainedDirectory, "status"), "0\n", { mode: 0o600 })
+  await writeFile(path.join(retainedDirectory, "log-file.md.out"), "Historical same-name output. <script>alert(1)</script>\n", { mode: 0o600 })
+  const builds: string[] = []
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/api/runs")) builds.push(request.url())
+  })
+  const listed = page.waitForResponse("**/api/files/log-file.md/retained-runs")
+  await page.getByRole("button", { name: "Browse retained runs" }).click()
+  const listing = await listed
+  expect(listing.request().method()).toBe("GET")
+  expect(await listing.json()).toEqual({ runs: [{ id: retainedId, modified: expect.any(Number) }], truncated: false })
+  const picker = page.getByLabel("Retained runs for log-file.md (log updated)")
+  await expect(picker.locator(`option[value="${retainedId}"]`)).toContainText(retainedId)
+  const selected = page.waitForResponse(`**/api/files/log-file.md/retained-runs/${retainedId}/log`)
+  await picker.selectOption(retainedId)
+  const historical = await selected
+  expect(historical.ok()).toBe(true)
+  expect(historical.request().method()).toBe("GET")
+  await expect(output).toHaveText("Historical same-name output. <script>alert(1)</script>\n")
+  const snapshot = page.getByText("Read-only snapshot from run")
+  await expect(snapshot).toContainText(retainedId)
+  await expect(snapshot).toContainText(id)
+  await expect(snapshot).toContainText("remote run directory missing")
+  await expect(page.getByRole("button", { name: "Use recommended & continue" })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Stop run" })).toBeHidden()
+  await expect(page.getByLabel("Feedback to build session")).toBeHidden()
   await expect(editor).toHaveValue("Unsaved editor buffer")
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.getByRole("button", { name: "Return to associated output" }).click()
+  await expect(output).toHaveText(cached!)
+  await expect(snapshot).toBeHidden()
+  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText(/^unavailable.*remote run directory missing/)).toBeVisible()
+  await expect(editor).toHaveValue("Unsaved editor buffer")
+  expect(builds).toEqual([])
   expect(await readFile(path.join(directory, "launches"), "utf8")).toBe(launches)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})
+
+test("retained snapshots cannot resolve an unavailable run and missing selections preserve historical output", async ({ page }) => {
+  await page.goto(url)
+  await page.getByRole("textbox", { name: "New filename" }).fill("retained-poll.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  await page.getByRole("textbox", { name: "Edit retained-poll.md" }).fill("Pending requirement")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(page.getByRole("status")).toHaveText("Saved retained-poll.md")
+  const original = { id: randomUUID(), name: "retained-poll.md", status: "unavailable (remote run directory missing)", output: "Original cached output", truncated: false, recoverable: true, continuable: true }
+  const alternate = { ...original, id: randomUUID(), status: "completed", output: "Historical completed output", recoverable: false }
+  const missing = randomUUID()
+  const endpoint = "**/api/files/retained-poll.md/retained-runs"
+  await page.route("**/api/files/retained-poll.md/run", (route) => route.fulfill({ json: original }))
+  let polls = 0
+  await page.route(`**/api/runs/${original.id}`, (route) => {
+    polls++
+    return route.fulfill({ json: original })
+  })
+  let discoveryAvailable = false
+  await page.route(endpoint, (route) => discoveryAvailable
+    ? route.fulfill({ json: { runs: [alternate.id, missing].map((id) => ({ id, modified: 1700000000 })), truncated: true } })
+    : route.fulfill({ status: 502, json: { error: "SSH unavailable" } }))
+  await page.route(`${endpoint}/${alternate.id}/log`, (route) => route.fulfill({ json: alternate }))
+  await page.route(`${endpoint}/${missing}/log`, (route) => route.fulfill({ status: 404, json: { error: "Selected retained log is missing" } }))
+  const mutations: string[] = []
+  const alternatePolls: string[] = []
+  page.on("request", (request) => {
+    if (request.method() !== "GET" && new URL(request.url()).pathname.startsWith("/api/")) mutations.push(request.url())
+    if (request.url().endsWith(`/api/runs/${alternate.id}`)) alternatePolls.push(request.url())
+  })
+  await page.reload()
+  const output = page.getByLabel("Run output")
+  const run = page.getByRole("button", { name: "Save & run" })
+  await expect(output).toHaveText(original.output)
+  await expect(run).toBeDisabled()
+  await page.getByRole("textbox", { name: "Edit retained-poll.md" }).fill("Unsaved retained-run edits")
+  await page.getByRole("button", { name: "Browse retained runs" }).click()
+  await expect(page.getByRole("alert")).toContainText("SSH unavailable")
+  await page.getByRole("button", { name: "Dismiss error" }).click()
+  await expect(page.getByText("Retained-run search did not complete. Retry Browse retained runs.")).toBeVisible()
+  await expect(page.getByText("No matching retained logs found", { exact: false })).toBeHidden()
+  await expect(output).toHaveText(original.output)
+  discoveryAvailable = true
+  await page.getByRole("button", { name: "Browse retained runs" }).click()
+  const picker = page.getByLabel("Retained runs for retained-poll.md (log updated)")
+  await picker.selectOption(alternate.id)
+  await expect(output).toHaveText(alternate.output)
+  await expect(page.getByText("Search limit reached. This list is incomplete and may omit newer runs.")).toBeVisible()
+  await expect(run).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Use recommended & continue" })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Send & continue" })).toBeHidden()
+  await expect(page.getByRole("button", { name: "Stop run" })).toBeHidden()
+  const before = polls
+  await expect.poll(() => polls, { timeout: 7000 }).toBeGreaterThan(before)
+  await expect(output).toHaveText(alternate.output)
+  await picker.selectOption(missing)
+  await expect(page.getByRole("alert")).toContainText("Selected retained log is missing")
+  await expect(page.getByRole("alert")).toContainText("Existing output was not replaced")
+  await expect(output).toHaveText(alternate.output)
+  await expect(picker).toHaveValue(alternate.id)
+  await expect(run).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Use recommended & continue" })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Stop run" })).toBeHidden()
+  await page.getByRole("button", { name: "Return to associated output" }).click()
+  await expect(output).toHaveText(original.output)
+  await expect(run).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Stop run" })).toBeVisible()
+  await expect(page.getByRole("textbox", { name: "Edit retained-poll.md" })).toHaveValue("Unsaved retained-run edits")
+  expect(mutations).toEqual([])
+  expect(alternatePolls).toEqual([])
+})
+
+test("delayed retained reads cannot replace output after switching tabs or starting a new build", async ({ page }) => {
+  await page.goto(url)
+  await page.getByRole("textbox", { name: "New filename" }).fill("retained-delay.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  await page.getByRole("textbox", { name: "Edit retained-delay.md" }).fill("COMPLETE\nNew build replaces historical request.")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(page.getByRole("status")).toHaveText("Saved retained-delay.md")
+  await page.getByRole("textbox", { name: "New filename" }).fill("retained-other.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  await page.getByRole("textbox", { name: "Edit retained-other.md" }).fill("COMPLETE\nOther tab output.")
+  page.once("dialog", (dialog) => dialog.accept())
+  await page.getByRole("button", { name: "Save & run" }).click()
+  const output = page.getByLabel("Run output")
+  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("completed", { exact: true })).toBeVisible()
+  await expect(output).toContainText("Other tab output.")
+  const otherOutput = await output.textContent()
+  const tabs = page.getByRole("navigation", { name: "Editor tabs" })
+  const id = randomUUID()
+  const endpoint = "**/api/files/retained-delay.md/retained-runs"
+  await page.route(endpoint, (route) => route.fulfill({ json: { runs: [{ id, modified: 1700000000 }], truncated: false } }))
+  for (const action of ["switch tab", "new build"]) {
+    await tabs.getByRole("button", { name: "retained-delay.md", exact: true }).click()
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    await page.route(`${endpoint}/${id}/log`, async (route) => {
+      await held
+      await route.fulfill({ json: { id, name: "retained-delay.md", status: "completed", output: "Stale historical response", truncated: false, recoverable: false, continuable: false } })
+    })
+    try {
+      await page.getByRole("button", { name: "Browse retained runs" }).click()
+      const requested = page.waitForRequest(`${endpoint}/${id}/log`)
+      await page.getByLabel("Retained runs for retained-delay.md (log updated)").selectOption(id)
+      await requested
+      await expect(page.getByText("Loading retained output...")).toBeVisible()
+      if (action === "switch tab") {
+        await tabs.getByRole("button", { name: "retained-other.md", exact: true }).click()
+        await expect(output).toHaveText(otherOutput!)
+      } else {
+        page.once("dialog", (dialog) => dialog.accept())
+        await page.getByRole("button", { name: "Save & run" }).click()
+        await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("completed", { exact: true })).toBeVisible()
+        await expect(output).toContainText("New build replaces historical request.")
+      }
+      const newer = await output.textContent()
+      const responded = page.waitForResponse(`${endpoint}/${id}/log`)
+      release()
+      await (await responded).finished()
+      await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+      await expect(output).toHaveText(newer!)
+      await expect(page.getByText("Read-only snapshot from run")).toBeHidden()
+      await expect(page.getByLabel("Retained runs for retained-delay.md (log updated)")).toBeHidden()
+    } finally {
+      release()
+      await page.unroute(`${endpoint}/${id}/log`)
+    }
+  }
 })
 
 test("slow nohup loading is not discarded by live output polling", async ({ page }) => {

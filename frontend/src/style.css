@@ -115,6 +115,10 @@ h2 { margin: 8px 0 0; font-size: 17px; font-weight: 500; overflow-wrap: anywhere
 .output-selector { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 24px; border-bottom: 1px solid var(--border); }
 .output-selector button { min-width: 0; max-width: 100%; overflow-wrap: anywhere; font-size: 11px; }
 .output-selector button[aria-pressed=true] { background: var(--selected); border-color: var(--selected-border); color: var(--accent); }
+.retained-runs { display: grid; gap: 8px; margin: 0 24px 12px; padding: 12px; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.retained-runs select { width: 100%; min-width: 0; padding: 8px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; }
+.retained-runs p { margin: 0; line-height: 1.6; }
+.retained-runs button { justify-self: start; }
 input[type=checkbox] { accent-color: var(--primary); }
 .output { flex: 1; min-height: 100px; margin: 0; padding: 18px 24px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.85 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--output-text); }
 .log-error { color: var(--error-text); }
