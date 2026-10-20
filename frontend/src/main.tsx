@@ -156,7 +156,15 @@ function App() {
         const next = await api<Output>(`/runs/${output.id}`)
         if (cancelled) return
         if (optimizer) setOptimization((item) => item?.id === next.id ? next : item)
-        else setOutputs((items) => items[next.name]?.id === next.id ? { ...items, [next.name]: next } : items)
+        else setOutputs((items) => {
+          const previous = items[next.name]
+          if (previous?.id !== next.id) return items
+          // Failed recovery can return an older cache than an explicit disk read.
+          const output = next.status.startsWith("unavailable")
+            ? { ...next, output: previous.output, truncated: previous.truncated }
+            : next
+          return { ...items, [next.name]: output }
+        })
         if (next.recoverable) timers.push(setTimeout(() => void poll(next, optimizer), next.status === "running" ? 650 : 2500))
       } catch (error) {
         if (cancelled) return
@@ -204,10 +212,19 @@ function App() {
     try {
       const latest = await api<Output | null>(`/files/${encodeURIComponent(name)}/run${fromLog ? "/log" : ""}`)
       // A slow recovery must not overwrite a newly started run or a fresher poll.
-      if (latest) setOutputs((items) => items[name] === previous ? { ...items, [name]: latest } : items)
-      if (fromLog) setNotice(latest ? `Loaded ${name}.out` : `No saved run output for ${name}. Save & run to create one.`)
+      if (latest) {
+        // An earlier disk read may have shown more output than the server cached.
+        const next = latest.status.startsWith("unavailable") && previous?.id === latest.id
+          ? { ...latest, output: previous.output, truncated: previous.truncated }
+          : latest
+        setOutputs((items) => items[name] === previous ? { ...items, [name]: next } : items)
+      }
+      if (fromLog) {
+        if (latest?.status.startsWith("unavailable")) fail(`Remote output for ${name} is ${latest.status}. Showing cached output, which may be incomplete.`)
+        else setNotice(latest ? `Loaded ${name}.out` : `No saved run output for ${name}. Save & run to create one.`)
+      }
     } catch (error) {
-      fail(`Could not recover output for ${name}: ${error instanceof Error ? error.message : String(error)}. Use Load nohup output to retry.`)
+      fail(`Could not recover output for ${name}: ${error instanceof Error ? error.message : String(error)}.`)
     } finally {
       if (fromLog) setLoadingOutput(null)
     }

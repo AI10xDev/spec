@@ -303,6 +303,44 @@ test("unavailable recovered runs keep polling without permitting duplicate build
   await expect(page.getByRole("button", { name: "Save & run" })).toBeEnabled()
 })
 
+test("unavailable polls preserve newer disk output until recovery succeeds", async ({ page }) => {
+  await page.goto(url)
+  await page.getByRole("textbox", { name: "New filename" }).fill("cached-poll.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  await page.getByRole("textbox", { name: "Edit cached-poll.md" }).fill("Pending requirement")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(page.getByRole("status")).toHaveText("Saved cached-poll.md")
+  const cached = { id: "cached-poll", name: "cached-poll.md", status: "unavailable (remote run directory missing)", output: "old server cache", truncated: false, recoverable: true }
+  await page.route("**/api/files/cached-poll.md/run", (route) => route.fulfill({ json: cached }))
+  let loaded = false
+  let restored = false
+  let unavailablePolls = 0
+  await page.route("**/api/files/cached-poll.md/run/log", (route) => {
+    loaded = true
+    return route.fulfill({ json: { ...cached, status: "detached", output: "newer disk output", truncated: true } })
+  })
+  await page.route("**/api/runs/cached-poll", (route) => {
+    if (loaded && !restored) unavailablePolls++
+    return route.fulfill({ json: restored ? { ...cached, status: "completed", output: "reconnected output", recoverable: false } : cached })
+  })
+  const builds: string[] = []
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/api/runs")) builds.push(request.url())
+  })
+  await page.reload()
+  await expect(page.getByLabel("Run output")).toHaveText("old server cache")
+  await page.getByRole("button", { name: "Load nohup output" }).click()
+  await expect.poll(() => unavailablePolls).toBeGreaterThanOrEqual(2)
+  await expect(page.getByLabel("Run output")).toHaveText("newer disk output")
+  await expect(page.getByText("Older output was truncated; showing the latest 256 KiB.")).toBeVisible()
+  await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+  restored = true
+  await expect(page.getByLabel("Run output")).toHaveText("reconnected output")
+  await expect(page.getByText("Older output was truncated; showing the latest 256 KiB.")).toBeHidden()
+  await expect(page.getByRole("button", { name: "Save & run" })).toBeEnabled()
+  expect(builds).toEqual([])
+})
+
 test("load nohup output reads the spec-named file and reports missing output without launching", async ({ page }) => {
   await page.goto(url)
   await page.setViewportSize({ width: 390, height: 844 })
@@ -331,7 +369,13 @@ test("load nohup output reads the spec-named file and reports missing output wit
   await expect(editor).toHaveValue("Unsaved editor buffer")
   await rm(log)
   await load.click()
-  await expect(page.getByRole("alert")).toContainText("Could not recover output for log-file.md")
+  await expect(page.getByRole("alert")).toContainText("Showing cached output, which may be incomplete.")
+  await expect(page.getByRole("status")).not.toContainText("Loaded")
+  await expect(output).toContainText("Fresh from disk")
+  await rm(path.dirname(log), { recursive: true })
+  await load.click()
+  await expect(page.getByRole("alert")).toContainText("remote run directory missing")
+  await expect(page.getByRole("alert")).toContainText(id)
   await expect(output).toContainText("Fresh from disk")
   await expect(editor).toHaveValue("Unsaved editor buffer")
   expect(await readFile(path.join(directory, "launches"), "utf8")).toBe(launches)

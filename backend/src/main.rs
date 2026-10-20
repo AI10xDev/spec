@@ -754,10 +754,24 @@ async fn output_log(
                 "Remote configuration does not match the saved run".into(),
             )
         })?;
-    let (status, bytes, truncated) = remote
-        .snapshot(&id, false, &name)
-        .await
-        .map_err(|error| Error(StatusCode::BAD_GATEWAY, error))?;
+    let (status, bytes, truncated) = match remote.snapshot(&id, false, &name).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            // A missing or rejected remote log must not hide output we already have.
+            let jobs = app.jobs.lock().unwrap();
+            let cached = jobs.iter().find(|job| job.id == id).unwrap_or(&job);
+            return Ok(Json(Some(Output {
+                id,
+                name,
+                status: format!("unavailable ({error})"),
+                output: String::from_utf8_lossy(&cached.output.iter().copied().collect::<Vec<_>>())
+                    .into_owned(),
+                truncated: cached.truncated,
+                recoverable: cached.recover,
+                continuable: !cached.repository_save && !cached.optimization,
+            })));
+        }
+    };
     // A disk snapshot must not replace the buffer an attached SSH stream is appending to.
     Ok(Json(Some(Output {
         id,

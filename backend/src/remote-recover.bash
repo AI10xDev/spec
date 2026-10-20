@@ -7,13 +7,20 @@ name=$4
 [[ -n $name && $name != .* && $name != *[/\\:]* && ! $name =~ [[:cntrl:]] && ${#name} -le 180 ]] || exit 125
 cd -- "$1"
 private_directory() {
-    [[ -d $1 && ! -L $1 && -O $1 && $(stat -c %a -- "$1") == 700 ]]
+    if [[ ! -e $1 && ! -L $1 ]]; then
+        printf 'remote run directory missing: %s (run %s); it may never have started or may have been removed; verify the configured remote workspace\n' "$1" "$2" >&2
+        exit 125
+    fi
+    [[ -d $1 && ! -L $1 && -O $1 && $(stat -c %a -- "$1") == 700 ]] || {
+        printf 'unsafe remote run directory: %s (run %s); requires an owned, non-symlink directory with mode 0700\n' "$1" "$2" >&2
+        exit 125
+    }
 }
 private_file() {
     [[ -f $1 && ! -L $1 && -O $1 && $(stat -c %a -- "$1") == 600 && $(stat -c %h -- "$1") == 1 ]]
 }
-private_directory .spec-runs || { echo 'unsafe or missing remote run storage' >&2; exit 125; }
-private_directory ".spec-runs/run-$2" || { echo 'unsafe or missing remote run' >&2; exit 125; }
+private_directory .spec-runs "$2"
+private_directory ".spec-runs/run-$2" "$2"
 cd -- ".spec-runs/run-$2"
 # Runs launched before spec-named logs still write output.log after an upgrade.
 log="./$name.out"

@@ -934,9 +934,68 @@ async fn output_log_reads_disk_without_replacing_cached_or_attached_output() {
             symlink(directory.join("status"), &log).unwrap();
         }
         let response = request(state.clone(), "GET", endpoint, serde_json::Value::Null).await;
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.status(), StatusCode::OK);
+        let output = json(response).await;
+        assert_eq!(output["output"], "saved output");
+        assert!(output["status"].as_str().unwrap().starts_with("unavailable"));
+        assert_eq!(output["recoverable"], true);
         assert_eq!(state.jobs.lock().unwrap()[0].output, job.output);
     }
+}
+
+#[tokio::test]
+async fn output_log_missing_run_preserves_cached_output_and_unresolved_status() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = app(root.path());
+    state.remote = Some(remote_fixture(
+        root.path(),
+        &root.path().join("must-not-launch"),
+    ));
+    let id = Uuid::new_v4().to_string();
+    let job = persisted_job(&id, state.remote.as_ref().unwrap().identity(), true);
+    recovery::persist(&state, &job).ok().unwrap();
+    recovery::set_latest(&state, &job).ok().unwrap();
+    let parent = root.path().join(".spec-runs");
+    fs::create_dir(&parent).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    for attached in [false, true] {
+        if attached {
+            let mut live = persisted_job(&id, job.remote_identity.clone(), true);
+            live.attached = true;
+            live.output = b"newer attached output".to_vec().into();
+            live.truncated = true;
+            state.jobs.lock().unwrap().push(live);
+        }
+        for _ in 0..2 {
+            let response = request(
+                state.clone(),
+                "GET",
+                "/api/files/a.md/run/log",
+                serde_json::Value::Null,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let output = json(response).await;
+            assert_eq!(output["id"], id);
+            assert_eq!(
+                output["output"],
+                if attached { "newer attached output" } else { "saved output" }
+            );
+            assert_eq!(output["truncated"], attached);
+            assert_eq!(output["recoverable"], true);
+            assert!(
+                output["status"]
+                    .as_str()
+                    .unwrap()
+                    .contains("remote run directory missing")
+            );
+            assert!(output["status"].as_str().unwrap().contains(&id));
+            assert_eq!(recovery::load(&state, &id).ok().unwrap().output, job.output);
+        }
+    }
+    assert!(!parent.join(format!("run-{id}")).exists());
+    assert!(!root.path().join("must-not-launch").exists());
+    assert_eq!(state.jobs.lock().unwrap()[0].status, "running");
 }
 
 #[tokio::test]

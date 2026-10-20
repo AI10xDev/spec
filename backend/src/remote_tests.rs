@@ -966,6 +966,34 @@ async fn recovery_is_nonlaunching_bounded_and_requires_known_status() {
 }
 
 #[tokio::test]
+async fn recovery_distinguishes_missing_and_unsafe_run_directories() {
+    let root = tempfile::tempdir().unwrap();
+    let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
+    let id = Uuid::new_v4().to_string();
+    let parent = root.path().join(".spec-runs");
+    let directory = parent.join(format!("run-{id}"));
+    for path in [&parent, &directory] {
+        for cancel in [false, true] {
+            let error = remote.snapshot(&id, cancel, "a.md").await.unwrap_err();
+            assert!(error.contains("remote run directory missing"), "{error}");
+            assert!(error.contains(&id), "{error}");
+            assert!(!path.exists());
+        }
+        std::os::unix::fs::symlink(root.path().join("missing"), path).unwrap();
+        let error = remote.snapshot(&id, false, "a.md").await.unwrap_err();
+        assert!(error.contains("unsafe remote run directory"), "{error}");
+        fs::remove_file(path).unwrap();
+        fs::create_dir(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = remote.snapshot(&id, false, "a.md").await.unwrap_err();
+        assert!(error.contains("unsafe remote run directory"), "{error}");
+        assert!(error.contains("0700"), "{error}");
+        assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o755);
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn recovery_rejects_remote_symlinks_nonregular_files_and_public_storage() {
     for kind in [
         "parent",
