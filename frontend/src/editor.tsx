@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react"
 import { completionPrefix } from "./completions"
 import { completionMarker } from "./completion-marker"
+import { highlightSpec } from "./highlighting"
 
 type Props = {
   name: string
@@ -18,6 +19,9 @@ export function Editor({ name, value: content, token, available, enabled, onEnab
   const value = content.replace(/\r\n?/g, "\n")
   const input = useRef<HTMLTextAreaElement>(null)
   const mirror = useRef<HTMLDivElement>(null)
+  const syntax = useRef<HTMLDivElement>(null)
+  const plain = value.length > 256 * 1024 || (value.match(/\n/g)?.length ?? 0) >= 5000
+  const lines = plain ? [] : highlightSpec(value)
   const [selection, setSelection] = useState({ start: 0, end: 0 })
   const [focused, setFocused] = useState(false)
   const [composing, setComposing] = useState(false)
@@ -37,9 +41,12 @@ export function Editor({ name, value: content, token, available, enabled, onEnab
   }
 
   function scroll() {
-    if (!input.current || !mirror.current) return
-    mirror.current.scrollTop = input.current.scrollTop
-    mirror.current.scrollLeft = input.current.scrollLeft
+    if (!input.current) return
+    for (const layer of [mirror.current, syntax.current]) {
+      if (!layer) continue
+      layer.scrollTop = input.current.scrollTop
+      layer.scrollLeft = input.current.scrollLeft
+    }
   }
 
   useEffect(() => {
@@ -68,7 +75,12 @@ export function Editor({ name, value: content, token, available, enabled, onEnab
     return () => { clearTimeout(timer); controller.abort() }
   }, [value, prefix, selection.start, ready, token])
 
-  useEffect(scroll, [value, suffix])
+  useLayoutEffect(scroll, [value, suffix])
+  useEffect(() => {
+    const observer = new ResizeObserver(scroll)
+    if (input.current) observer.observe(input.current)
+    return () => observer.disconnect()
+  }, [])
 
   function accept() {
     const node = input.current
@@ -88,10 +100,14 @@ export function Editor({ name, value: content, token, available, enabled, onEnab
         <input type="checkbox" checked={available && enabled} disabled={!available} onChange={(event) => onEnabled(event.target.checked)} /> Trailing completions
       </label>
       <span id="completion-help" aria-live="polite">{!available ? "Azure not configured: fill in the server .env (see .env.example), restart and reload" : suffix ? "Tab to accept part / Esc to dismiss" : message || "One sentence part at a time"}</span>
+      {plain && <span>Large file: plain-text display (highlighting and line numbers off)</span>}
       {/* Reserve space so showing acceptance does not shrink a scrolled editor. */}
       <button style={{ visibility: suffix ? "visible" : "hidden" }} disabled={!suffix} onPointerDown={(event) => event.preventDefault()} onClick={accept} title={suffix}>Accept part</button>
     </div>
-    <div className="editor-input">
+    <div className={`editor-input${plain ? " plain-editor" : ""}`} style={{ "--editor-gutter": `${plain ? 0 : Math.max(3, String(lines.length).length)}ch` } as CSSProperties}>
+      {!plain && <div ref={syntax} className="code syntax-mirror" aria-hidden="true">
+        {lines.map((line, index) => <span key={index} className={`syntax-line${line.kind ? ` syntax-${line.kind}` : ""}`} data-line={index + 1}>{line.tokens.map((token, part) => <span key={part} className={token.kind ? `syntax-${token.kind}` : undefined}>{token.text}</span>)}{index < lines.length - 1 ? "\n" : ""}</span>)}
+      </div>}
       <div ref={mirror} className="code completion-mirror" aria-hidden="true">
         {value.slice(0, selection.start)}<span className="completion-anchor"><span className="completion-ghost">{suffix}</span></span>{value.slice(selection.start)}{"\n"}
       </div>

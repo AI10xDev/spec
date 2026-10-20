@@ -82,9 +82,20 @@ h2 { margin: 8px 0 0; font-size: 17px; font-weight: 500; overflow-wrap: anywhere
 .code { flex: 1; min-height: 160px; resize: none; border: 0; background: transparent; color: var(--text); font: 14px/1.85 ui-monospace, SFMono-Regular, Consolas, monospace; padding: 26px 24px; tab-size: 2; }
 .code::placeholder { color: var(--subtle); }
 .editor-input { position: relative; flex: 1; min-height: 160px; overflow: hidden; }
-.editor-input .code { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; white-space: pre-wrap; overflow-wrap: break-word; overflow: auto; }
+.editor-input .code { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding-left: calc(var(--editor-gutter) + 24px); white-space: pre-wrap; overflow-wrap: break-word; overflow: auto; }
+.editor-input .syntax-mirror { pointer-events: none; scrollbar-gutter: stable; scrollbar-color: transparent transparent; }
+.syntax-line { display: block; position: relative; min-height: 1lh; }
+.syntax-line::before { content: attr(data-line); position: absolute; top: 0; right: calc(100% + 12px); width: var(--editor-gutter); color: var(--subtle); text-align: right; user-select: none; }
+/* Color only: font metrics must match the textarea and completion mirror. */
+.syntax-completed { color: var(--subtle); }
+.syntax-heading, .syntax-list { color: var(--accent); }
+.syntax-code { color: #88d781; }
+.syntax-emphasis { color: #b59aff; }
+.syntax-link { color: #80d5dc; }
 .editor-input .completion-mirror { pointer-events: none; color: transparent; scrollbar-gutter: stable; overflow-x: hidden; scrollbar-color: transparent transparent; }
-.editor-input textarea { scrollbar-gutter: stable; }
+.editor-input textarea { scrollbar-gutter: stable; color: transparent; caret-color: var(--text); }
+.editor-input textarea::selection { color: transparent; background: #1b4ef580; }
+.plain-editor textarea, .plain-editor textarea::selection { color: var(--text); }
 .completion-anchor { position: relative; }
 .completion-ghost { position: absolute; left: 0; top: 0; color: var(--subtle); white-space: pre; line-height: normal; }
 .completion-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-height: 42px; padding: 8px 16px; color: var(--muted); font-size: 10px; border-bottom: 1px solid var(--border); }
@@ -106,6 +117,11 @@ h2 { margin: 8px 0 0; font-size: 17px; font-weight: 500; overflow-wrap: anywhere
 .output-selector button[aria-pressed=true] { background: var(--selected); border-color: var(--selected-border); color: var(--accent); }
 input[type=checkbox] { accent-color: var(--primary); }
 .output { flex: 1; min-height: 100px; margin: 0; padding: 18px 24px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.85 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--output-text); }
+.log-error { color: var(--error-text); }
+.log-warning { color: #ffd18e; }
+.log-success { color: #88d781; }
+.log-info { color: var(--accent); }
+.log-debug { color: var(--muted); }
 .output-footer { padding: 17px 24px; border-top: 1px solid var(--border); font-size: 10px; color: var(--subtle); }
 .chat-launch { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 24px; border-bottom: 1px solid var(--border); }
 .chat-launch span { color: var(--muted); font-size: 11px; }
@@ -135,6 +151,9 @@ input[type=checkbox] { accent-color: var(--primary); }
 .chat-composer textarea { resize: vertical; min-height: 76px; max-height: 25vh; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
 .chat-composer > div { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .chat-composer span { font-size: 11px; color: var(--muted); margin-right: auto; }
+.build-feedback { flex-shrink: 0; padding: 12px 24px; }
+.build-feedback textarea { min-height: 60px; width: 100%; }
+.build-feedback > div span { flex: 1 1 180px; line-height: 1.5; }
 .chat-space > .hint, .chat-space > .error { margin: 0; }
 .chat-extensions { flex-shrink: 0; max-height: 45vh; overflow: auto; border-top: 1px solid var(--border); padding: 8px 24px; }
 .chat-tools { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
@@ -234,8 +253,14 @@ input::placeholder { color: var(--subtle); opacity: 1; }
   .topbar { padding: 12px 18px; height: auto; min-height: 76px; gap: 12px; }
   .topbar .brand-caption { display: none; }
   .editor-pane { border-right: 0; }
+  .output-pane { max-height: none; }
+  .output-pane .output { max-height: 360px; }
 }
 @media (forced-colors: active) {
+  .editor-input .syntax-mirror { visibility: hidden; }
+  .editor-input .syntax-line::before { visibility: visible; }
+  .editor-input textarea { color: CanvasText; }
+  .editor-input textarea::selection { color: HighlightText; background: Highlight; }
   .rainbow-text { background: none; -webkit-text-fill-color: currentColor; color: CanvasText; }
   .brand-mark, .primary, .empty-editor > span { border-color: ButtonText; }
   .editor-tab.active, .switcher button[aria-selected=true] { border-bottom: 2px solid Highlight; }

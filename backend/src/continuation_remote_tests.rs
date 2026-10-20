@@ -209,6 +209,7 @@ fixture_engine() {{
                 b"ses_Original123",
                 b"--agent",
                 b"build",
+                b"--",
                 PROMPT.as_bytes(),
                 b""
             ]
@@ -251,8 +252,8 @@ process.stdout.write("Recommended option: continue the implementation.");
 '
 }
 opencode-source() {
-    [[ $1 == run && $4 == --session && $5 == ses_InitialRoot && $6 == --agent && $7 == build ]] || return 90
-    printf '%s' "$8"
+    [[ $# == 9 && $1 == run && $4 == --session && $5 == ses_InitialRoot && $6 == --agent && $7 == build && $8 == -- ]] || return 90
+    printf '%s' "$9"
 }
 "#).unwrap();
     let id = Uuid::new_v4().to_string();
@@ -329,6 +330,7 @@ process.stdout.write(JSON.stringify({config, instruction, text:fs.readFileSync(i
                 "ses_Existing123",
                 "--agent",
                 "build",
+                "--",
                 PROMPT
             ])
         );

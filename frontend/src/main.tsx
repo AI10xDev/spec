@@ -4,6 +4,7 @@ import { dirty, openTab, savedTab } from "./tabs"
 import type { Document, Output as RunOutput, Tab } from "./tabs"
 import { Editor } from "./editor"
 import { Chat } from "./chat"
+import { LogOutput } from "./highlighting"
 import "./style.css"
 
 type Entry = { name: string; modified: number; bytes: number }
@@ -40,6 +41,7 @@ function App() {
   const [repository, setRepository] = useState<Repository | null>(null)
   const [repositoryError, setRepositoryError] = useState("")
   const [outputs, setOutputs] = useState<Record<string, Output>>({})
+  const [feedback, setFeedback] = useState<Record<string, string>>({})
   const [optimization, setOptimization] = useState<Output | null>(null)
   const [outputView, setOutputView] = useState<"file" | "optimization">("file")
   const [loadingOutput, setLoadingOutput] = useState<{ id?: string } | null>(null)
@@ -49,6 +51,8 @@ function App() {
   const tab = tabs.find((item) => item.name === active)
   const fileOutput = outputs[active]
   const output = outputView === "optimization" ? optimization : fileOutput
+  const canContinue = !!output && outputView === "file" && execution && !busy && !optimization?.recoverable && output.status === "completed" && !output.recoverable && output.continuable === true
+  const message = output ? feedback[output.id] ?? "" : ""
   const pendingRuns = [...Object.values(outputs), ...(optimization ? [optimization] : [])].filter((item) => item.recoverable).map((item) => item.id).join(",")
 
   async function api<T>(path: string, body?: unknown, method = "POST"): Promise<T> {
@@ -265,18 +269,45 @@ function App() {
     } catch (error) { fail(error) } finally { submitting.current = false; setBusy(false) }
   }
 
-  async function continueRun() {
-    if (busy || submitting.current || !execution || outputView !== "file" || optimization?.recoverable || !output || output.status !== "completed" || output.recoverable || output.continuable !== true) return
+  function requestBuild() {
+    if (!tab || busy || submitting.current || !execution || fileOutput?.recoverable || optimization?.recoverable) return
+    if (window.confirm("Send this saved spec over SSH and run remote spec build? Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.")) void save("build")
+  }
+
+  useEffect(() => {
+    function shortcut(event: KeyboardEvent) {
+      if (!connected || chatName || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key !== "Enter") return
+      const target = event.target as HTMLElement | null
+      if (target?.closest("input, textarea, [contenteditable=true]") && !target.matches(".editor-input textarea")) return
+      event.preventDefault()
+      requestBuild()
+    }
+    window.addEventListener("keydown", shortcut)
+    return () => window.removeEventListener("keydown", shortcut)
+  })
+
+  async function continueRun(message?: string) {
+    if (!canContinue || submitting.current || !output) return
+    if (message !== undefined && (!message.trim() || message.includes("\0") || new TextEncoder().encode(message).length > 16 * 1024)) {
+      setError("Feedback must be nonempty, without NUL bytes, and at most 16 KiB.")
+      return
+    }
     const { id, name } = output
     submitting.current = true
     setBusy(true)
     setError("")
-    setNotice(`Submitting recommendation for ${name}...`)
+    setNotice(`Submitting ${message === undefined ? "recommendation" : "feedback"} for ${name}...`)
     try {
-      const job = await api<{ id: string }>(`/runs/${id}/continue`, {})
+      const job = await api<{ id: string }>(`/runs/${id}/continue`, message === undefined ? {} : { message })
       setOutputs((items) => ({ ...items, [name]: { ...job, name, output: "Starting...", status: "running", truncated: false, recoverable: true, continuable: true } }))
+      if (message !== undefined) setFeedback((items) => {
+        if (items[id] !== message) return items
+        const next = { ...items }
+        delete next[id]
+        return next
+      })
       setFollow(true)
-      setNotice(`Recommended choice submitted to the same session for ${name}. Check Output & logs for the result.`)
+      setNotice(`${message === undefined ? "Recommended choice" : "Feedback"} submitted to the same session for ${name}. Check Output & logs for the result.`)
     } catch (error) { setNotice(""); fail(error) } finally { submitting.current = false; setBusy(false) }
   }
 
@@ -374,9 +405,7 @@ function App() {
             {tab ? <Editor key={tab.name} name={tab.name} value={tab.content} token={token} available={completion} enabled={complete} onEnabled={setComplete} onSave={() => void save()} onChange={(content) => {
               setTabs((items) => items.map((item) => item.name === active ? { ...item, content } : item))
             }} /> : <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
-            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || fileOutput?.recoverable || optimization?.recoverable} onClick={() => {
-              if (window.confirm("Send this saved spec over SSH and run remote spec build? Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.")) void save("build")
-             }}>Save & run ↗</button></div></footer>
+            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || fileOutput?.recoverable || optimization?.recoverable} title="Save & run (Ctrl/Cmd+Enter)" aria-keyshortcuts="Control+Enter Meta+Enter" onClick={requestBuild}>Save & run ↗</button></div></footer>
             {execution && <div className="repository-controls">
               <span>{repositoryError || (repository?.connected ? `${repository.directory} / ${repository.dirty ? "Uncommitted changes" : "No uncommitted changes"}` : repository ? "No repository connected in the remote directory." : "Checking remote repository...")}</span>
               {repository?.connected && repository.dirty && <button disabled={!tab?.content.trim() || busy || !!pendingRuns} title={`Use ${repository.model} with the existing repository workflow`} onClick={() => {
@@ -391,13 +420,19 @@ function App() {
               if (!optimization) { setError(""); void recoverOptimization().catch(fail) }
             }}>Optimization</button></div>
             {tab && outputView === "file" && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>Spec + current nohup output in a separate window</span></div>}
-            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button>}{output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={busy || !execution || !!optimization?.recoverable || output.status !== "completed" || output.recoverable || output.continuable !== true} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
+            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button>}{output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={!canContinue} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
-            <pre ref={log} className="output" aria-label="Run output">{output?.output ?? (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery. To start a new run, open or create a nonempty .optim file and select its tab, then click Optimize. The current editor buffer, including unsaved changes, is uploaded to remote ~/projects and its absolute path is sent to the optimizer. No local save is performed." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
+            <pre ref={log} className="output" aria-label="Run output">{output ? <LogOutput value={output.output} /> : (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery. To start a new run, open or create a nonempty .optim file and select its tab, then click Optimize. The current editor buffer, including unsaved changes, is uploaded to remote ~/projects and its absolute path is sent to the optimizer. No local save is performed." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
+            {output && outputView === "file" && output.continuable === true && <form className="chat-composer build-feedback" onSubmit={(event) => { event.preventDefault(); void continueRun(message) }}>
+              <label htmlFor="build-feedback">Feedback to build session</label>
+              <textarea id="build-feedback" aria-describedby="feedback-help feedback-limit" placeholder="Answer the agent or explain what to change..." value={message} disabled={busy} onChange={(event) => setFeedback((items) => ({ ...items, [output.id]: event.target.value }))} />
+              <span id="feedback-limit">{new TextEncoder().encode(message).length.toLocaleString()} / 16,384 bytes</span>
+              <div><span id="feedback-help">{canContinue ? "Continues the same session with automatic tool approval. Can modify files and incur provider costs. Editor changes are not sent." : "Send after the agent turn finishes. Live input and stopped or failed runs are not supported."}</span><button className="primary" disabled={!canContinue || !message.trim() || message.includes("\0") || new TextEncoder().encode(message).length > 16 * 1024}>Send &amp; continue</button></div>
+            </form>}
             <footer className="output-footer">{output && <span>Harness: {output.status}{output.recoverable ? " (completion not confirmed)" : ""}. CLI success alone does not verify saved changes.<br /></span>}Available output only. No hidden model reasoning is requested.</footer>
           </section>
         </div>
-        <div className="statusbar"><span role="status">{notice || "Ready"}</span><span id="editor-shortcuts">/ toggle completed (outside fenced code); Alt+/ type /</span><span>⌘ / Ctrl + S to save · 2 MiB file limit</span></div>
+        <div className="statusbar"><span role="status">{notice || "Ready"}</span><span id="editor-shortcuts">/ toggle completed (outside fenced code); Alt+/ type /</span><span>Ctrl/Cmd+S save · Ctrl/Cmd+Enter save &amp; run · 2 MiB file limit</span></div>
       </main>
     </div>
   </div>

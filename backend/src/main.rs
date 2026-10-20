@@ -127,10 +127,24 @@ struct Optimize {
     content: String,
 }
 
+#[derive(Deserialize)]
+#[serde(default)]
+struct Continue {
+    message: String,
+}
+
+impl Default for Continue {
+    fn default() -> Self {
+        Self {
+            message: CONTINUE_RECOMMENDED.to_owned(),
+        }
+    }
+}
+
 enum RunInput {
     Build(Run),
     RepositorySave(Run),
-    Continue(String),
+    Continue(String, String),
     Optimize(Optimize),
 }
 
@@ -367,8 +381,17 @@ async fn latest_optimization(State(app): State<App>) -> Result<Json<Option<Outpu
 async fn continue_recommended(
     State(app): State<App>,
     Path(id): Path<String>,
+    Json(input): Json<Continue>,
 ) -> Result<Json<serde_json::Value>> {
-    start_run(app, RunInput::Continue(id)).await
+    if input.message.trim().is_empty()
+        || input.message.contains('\0')
+        || input.message.len() > 16 * 1024
+    {
+        return Err(invalid(
+            "Feedback must be nonempty after trimming, NUL-free, and at most 16 KiB of UTF-8",
+        ));
+    }
+    start_run(app, RunInput::Continue(id, input.message)).await
 }
 
 async fn repository(State(app): State<App>) -> Result<Json<remote::RepositoryStatus>> {
@@ -415,7 +438,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         recovery::refresh(&app, &id, false).await?;
     }
     let parent_id = match &input {
-        RunInput::Continue(id) => Some(id.clone()),
+        RunInput::Continue(id, _) => Some(id.clone()),
         _ => None,
     };
     let mut optimization_spec = String::new();
@@ -446,7 +469,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             }
             (document.name, document.content, None)
         }
-        RunInput::Continue(id) => {
+        RunInput::Continue(id, message) => {
             recovery::restore(&app, &id)?;
             let name = {
                 let jobs = app.jobs.lock().unwrap();
@@ -480,7 +503,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
                 .session_id(&id, &name)
                 .await
                 .map_err(|error| Error(StatusCode::BAD_GATEWAY, error))?;
-            (name, CONTINUE_RECOMMENDED.to_owned(), Some(session))
+            (name, message, Some(session))
         }
     };
     // A changed SSH configuration cannot prove that an old harness finished.
@@ -591,7 +614,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             &app,
             &id,
             if session_id.is_some() {
-                b"[started] Submitting the recommended option and continuing the same build session with automatic tool approval.\n"
+                b"[started] Submitting feedback and continuing the same build session with automatic tool approval.\n"
             } else if repository_save {
                 b"[started] remote repository save over SSH: azure/gpt-6-sol with the saved snapshot as context and the existing repository workflow. Output and logs only.\n"
             } else if optimization {

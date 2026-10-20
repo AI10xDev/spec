@@ -162,7 +162,9 @@ if [[ $spec_build_mode == repository-save ]]; then
 fi
 if [[ -n $session_id ]]; then
     cd -- "$spec_build_workspace" || exit 125
-    opencode-source run --dir "$spec_build_workspace" --session "$session_id" --agent build "$(<"$1")"
+    # A sentinel preserves trailing newlines otherwise stripped by command substitution.
+    spec_build_prompt=$(cat -- "$1" && printf '.') || exit 125
+    opencode-source run --dir "$spec_build_workspace" --session "$session_id" --agent build -- "${spec_build_prompt%.}"
 else
     spec build "$1"
 fi

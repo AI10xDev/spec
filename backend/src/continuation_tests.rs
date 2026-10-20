@@ -16,9 +16,9 @@ console.log("Recommended option: implement the feature.");
 '
 }
 opencode-source() {
-    [[ $# == 8 && $1 == run && $2 == --dir && $3 == "$PWD" && $4 == --session && $5 == ses_Router123 && $6 == --agent && $7 == build ]] || return 91
+    [[ $# == 9 && $1 == run && $2 == --dir && $3 == "$PWD" && $4 == --session && $5 == ses_Router123 && $6 == --agent && $7 == build && $8 == -- ]] || return 91
     printf 'continue\n' >> "$HOME/launches"
-    printf '%s\n' "$8"
+    printf '%s\n' "$9"
     if [[ -f "$HOME/wait" ]]; then sleep 60; fi
 }
 "#).unwrap();
@@ -134,7 +134,7 @@ async fn continuation_after_restart_uses_fixed_prompt_and_preserves_saved_file()
         fresh.clone(),
         "POST",
         &format!("/api/runs/{id}/continue"),
-        Value::Null,
+        body!({}),
     )
     .await;
     assert_eq!(stale.status(), StatusCode::CONFLICT);
@@ -148,6 +148,106 @@ async fn continuation_after_restart_uses_fixed_prompt_and_preserves_saved_file()
         fs::read_to_string(root.path().join("launches")).unwrap(),
         "continue\n"
     );
+}
+
+#[tokio::test]
+async fn continuation_custom_feedback_preserves_exact_text_and_captured_session() {
+    let root = tempfile::tempdir().unwrap();
+    let state = fixture(root.path());
+    let mut id = start_build(&state).await;
+    let saved = fs::read(root.path().join("a.md")).unwrap();
+    for message in [
+        "--session ses_Injected ' \" $(touch injected) `touch injected`; & | < > \\ $HOME\nImplement this instead.\r\n\n".to_owned(),
+        " \tFeedback: \u{1f680}  \n\n".to_owned(),
+        "\u{1f680}".repeat(4096),
+    ] {
+        let response = request(
+            state.clone(),
+            "POST",
+            &format!("/api/runs/{id}/continue"),
+            body!({"message":message, "session":"ses_Injected", "name":"injected.md"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        id = json(response).await["id"].as_str().unwrap().to_owned();
+        let output = terminal(&state, &id, "completed").await;
+        assert_eq!(output["name"], "a.md");
+        let directory = root.path().join(format!(".spec-runs/run-{id}"));
+        assert_eq!(
+            fs::read_to_string(directory.join("a.md.out")).unwrap(),
+            format!("{message}\n")
+        );
+        assert_eq!(
+            fs::read_to_string(directory.join("session-id")).unwrap(),
+            "ses_Router123\n"
+        );
+        assert!(!directory.join("snapshot.md").exists());
+        assert_eq!(fs::read(root.path().join("a.md")).unwrap(), saved);
+        assert!(!root.path().join("injected").exists());
+        assert!(!root.path().join("injected.md").exists());
+    }
+    assert_eq!(
+        fs::read_to_string(root.path().join("launches")).unwrap(),
+        "continue\ncontinue\ncontinue\n"
+    );
+}
+
+#[tokio::test]
+async fn continuation_invalid_feedback_is_rejected_before_ssh_or_persistence() {
+    let root = tempfile::tempdir().unwrap();
+    let state = fixture(root.path());
+    let id = start_build(&state).await;
+    let stored_path = root.path().join(format!(".spec-output/{id}.json"));
+    let stored = fs::read(&stored_path).unwrap();
+    fs::write(
+        &state.remote.as_ref().unwrap().binary,
+        format!(
+            "#!/bin/bash\ntouch '{}/contacted'\nexit 99\n",
+            root.path().display()
+        ),
+    )
+    .unwrap();
+    for message in [
+        String::new(),
+        " \t\r\n\u{2003}".to_owned(),
+        "before\0after".to_owned(),
+        "x".repeat(16 * 1024 + 1),
+        format!("{}x", "\u{1f680}".repeat(4096)),
+    ] {
+        let response = request(
+            state.clone(),
+            "POST",
+            &format!("/api/runs/{id}/continue"),
+            body!({"message":message}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json(response).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("Feedback")
+        );
+    }
+    for message in [Value::Null, body!(42), body!(false), body!([]), body!({})] {
+        let response = request(
+            state.clone(),
+            "POST",
+            &format!("/api/runs/{id}/continue"),
+            body!({"message":message}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    assert!(!root.path().join("contacted").exists());
+    assert!(!root.path().join("launches").exists());
+    assert_eq!(state.jobs.lock().unwrap().len(), 1);
+    assert_eq!(
+        fs::read_dir(root.path().join(".spec-runs")).unwrap().count(),
+        1
+    );
+    assert_eq!(recovery::latest(&state, "a.md").ok().unwrap(), Some(id));
+    assert_eq!(fs::read(stored_path).unwrap(), stored);
 }
 
 #[tokio::test]
@@ -171,7 +271,7 @@ async fn continuation_local_spawn_failure_preserves_parent_and_allows_retry() {
     )
     .unwrap();
     let path = format!("/api/runs/{id}/continue");
-    let response = request(state.clone(), "POST", &path, Value::Null).await;
+    let response = request(state.clone(), "POST", &path, body!({})).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(!binary.exists());
     assert!(!root.path().join("launches").exists());
@@ -213,12 +313,16 @@ async fn continuation_local_spawn_failure_preserves_parent_and_allows_retry() {
         json(request(fresh.clone(), "GET", "/api/files/a.md/run", Value::Null).await).await,
         original
     );
-    let response = request(fresh.clone(), "POST", &path, Value::Null).await;
+    let response = request(fresh.clone(), "POST", &path, body!({})).await;
     assert_eq!(response.status(), StatusCode::OK);
     let next = json(response).await["id"].as_str().unwrap().to_owned();
     assert_ne!(next, id);
     assert_ne!(next, failed_id);
     terminal(&fresh, &next, "completed").await;
+    assert_eq!(
+        fs::read_to_string(root.path().join(format!(".spec-runs/run-{next}/a.md.out"))).unwrap(),
+        format!("{CONTINUE_RECOMMENDED}\n")
+    );
     assert_eq!(recovery::latest(&fresh, "a.md").ok().unwrap(), Some(next));
     assert_eq!(
         fs::read_to_string(root.path().join("launches")).unwrap(),
@@ -234,8 +338,12 @@ async fn continuation_concurrent_duplicate_is_rejected_and_new_run_can_be_polled
     fs::write(root.path().join("wait"), "").unwrap();
     let path = format!("/api/runs/{id}/continue");
     let (first, second) = tokio::join!(
-        request(state.clone(), "POST", &path, Value::Null),
-        request(state.clone(), "POST", &path, Value::Null)
+        request(
+            state.clone(), "POST", &path, body!({"message":"Custom feedback"})
+        ),
+        request(
+            state.clone(), "POST", &path, body!({"message":"Custom feedback"})
+        )
     );
     let (accepted, rejected) = if first.status() == StatusCode::OK {
         (first, second)
@@ -263,7 +371,7 @@ async fn continuation_concurrent_duplicate_is_rejected_and_new_run_can_be_polled
             if output["output"]
                 .as_str()
                 .unwrap()
-                .contains(CONTINUE_RECOMMENDED)
+                .contains("Custom feedback")
             {
                 break;
             }
@@ -276,7 +384,7 @@ async fn continuation_concurrent_duplicate_is_rejected_and_new_run_can_be_polled
         state.clone(),
         "POST",
         &format!("/api/runs/{next}/continue"),
-        Value::Null,
+        body!({"message":"Do not launch while running"}),
     )
     .await;
     assert_eq!(active.status(), StatusCode::CONFLICT);
@@ -295,6 +403,14 @@ async fn continuation_concurrent_duplicate_is_rejected_and_new_run_can_be_polled
     .await;
     assert_eq!(stop.status(), StatusCode::OK);
     terminal(&state, &next, "cancelled").await;
+    let cancelled = request(
+        state.clone(),
+        "POST",
+        &format!("/api/runs/{next}/continue"),
+        body!({"message":"Do not launch after cancellation"}),
+    )
+    .await;
+    assert_eq!(cancelled.status(), StatusCode::CONFLICT);
     assert_eq!(
         fs::read_to_string(root.path().join("launches")).unwrap(),
         "continue\n"
@@ -353,7 +469,7 @@ async fn continuation_rejects_failed_repository_save_remote_mismatch_and_stale_r
             state.clone(),
             "POST",
             &format!("/api/runs/{id}/continue"),
-            Value::Null,
+            body!({"message":"Custom feedback"}),
         )
         .await;
         assert_eq!(response.status(), StatusCode::CONFLICT, "{case}");
@@ -388,7 +504,7 @@ async fn continuation_legacy_missing_session_metadata_does_not_launch_or_overwri
         state.clone(),
         "POST",
         &format!("/api/runs/{id}/continue"),
-        Value::Null,
+        body!({"message":"Custom feedback"}),
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
