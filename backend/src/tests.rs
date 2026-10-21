@@ -511,6 +511,10 @@ wait
     )
     .await;
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    let error = json(duplicate).await["error"].as_str().unwrap().to_owned();
+    assert!(error.contains("for this file"));
+    assert!(error.contains(&id));
+    assert!(!error.contains("limit"));
     fs::write(root.path().join("a.md"), "changed after launch").unwrap();
     fs::write(root.path().join("ready"), "").unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -813,6 +817,114 @@ exit 7
             recovered
         );
     }
+}
+
+#[tokio::test]
+async fn sixteen_runs_are_admitted_and_completion_frees_capacity() {
+    let root = tempfile::tempdir().unwrap();
+    let runner = root.path().join("runner");
+    fs::write(
+        &runner,
+        "#!/bin/sh\nwhile [ ! -f ready ]; do sleep 0.02; done\n",
+    )
+    .unwrap();
+    fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut state = app(root.path());
+    state.remote = Some(remote_fixture(root.path(), &runner));
+    // Restore unresolved records without launching processes or contacting SSH.
+    for index in 0..15 {
+        let mut job = persisted_job(&Uuid::new_v4().to_string(), "0".repeat(64), true);
+        job.name = format!("pending-{index}.md");
+        recovery::persist(&state, &job).ok().unwrap();
+    }
+    let mut documents = Vec::new();
+    for name in ["a.md", "b.md"] {
+        documents.push(
+            save(
+                &state,
+                name,
+                Save {
+                    content: "fixture".into(),
+                    revision: None,
+                },
+            )
+            .ok()
+            .unwrap(),
+        );
+    }
+    let body = |index: usize| {
+        serde_json::json!({
+            "name": documents[index].name,
+            "revision": documents[index].revision,
+        })
+    };
+    let response = request(state.clone(), "POST", "/api/runs", body(0)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let id = json(response).await["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        state
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|job| job.recover)
+            .count(),
+        16
+    );
+
+    let duplicate = request(state.clone(), "POST", "/api/runs", body(0)).await;
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    let error = json(duplicate).await["error"].as_str().unwrap().to_owned();
+    assert!(error.contains("for this file"));
+    assert!(error.contains(&id));
+    assert!(!error.contains("limit"));
+
+    let full = request(state.clone(), "POST", "/api/runs", body(1)).await;
+    assert_eq!(full.status(), StatusCode::CONFLICT);
+    assert!(
+        json(full).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("16-run limit")
+    );
+
+    fs::write(root.path().join("ready"), "").unwrap();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if state
+                .jobs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|job| job.id == id && !job.recover)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let response = request(state.clone(), "POST", "/api/runs", body(1)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let id = json(response).await["id"].as_str().unwrap().to_owned();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if state
+                .jobs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|job| job.id == id && !job.recover)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 fn persisted_job(id: &str, identity: String, recover: bool) -> Job {

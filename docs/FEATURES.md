@@ -81,7 +81,7 @@ A failure to launch the local SSH client is reported immediately. SSH connection
 
 The watchdog and remote log/retention limits below apply to ordinary builds, not [optimization](../README.md#output-and-safety), which has independent output and no overall runtime cap.
 
-- At most one unresolved run per filename and four in total, including recovered or detached sessions whose completion is unconfirmed.
+- At most one unresolved run per filename and 16 in total, including recovered or detached sessions whose completion is unconfirmed. Admission errors distinguish a blocked filename from the total run limit.
 - Latest 256 KiB of output per retained run. Truncation is explicitly indicated.
 - At most 32 runs retained in memory; finished entries can be evicted but durable records remain on disk without automatic pruning.
 - Polling approximately every 650 ms for recoverable file runs, including background tabs, and independently for optimization; slower retry on fetch errors or unavailable/unknown recovered sessions.

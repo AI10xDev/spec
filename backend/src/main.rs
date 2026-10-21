@@ -45,6 +45,7 @@ const MAX_FILE: usize = 2 * 1024 * 1024;
 // The existing spec launcher forwards the prompt as one Linux exec argument.
 const MAX_BUILD_SPEC: usize = 120 * 1024;
 const MAX_OUTPUT: usize = 256 * 1024;
+const MAX_RUNS: usize = 16;
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 #[derive(Clone)]
@@ -531,12 +532,21 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
     let (stop, mut stopped) = watch::channel(RunControl::Running);
     {
         let mut jobs = app.jobs.lock().unwrap();
-        if jobs.iter().filter(|job| job.recover).count() >= 4
-            || jobs.iter().any(|job| job.name == name && job.recover)
-        {
+        if let Some(job) = jobs.iter().find(|job| job.name == name && job.recover) {
             return Err(Error(
                 StatusCode::CONFLICT,
-                "A run is active or its remote status is unresolved for this file, or the four-run limit was reached".into(),
+                format!(
+                    "A run is active or its remote status is unresolved for this file (run {}, status: {}). Load its output or stop it before retrying.",
+                    job.id, job.status
+                ),
+            ));
+        }
+        if jobs.iter().filter(|job| job.recover).count() >= MAX_RUNS {
+            return Err(Error(
+                StatusCode::CONFLICT,
+                format!(
+                    "The {MAX_RUNS}-run limit was reached. Wait for an active run to finish, stop one, or resolve its remote status before retrying."
+                ),
             ));
         }
         if jobs.len() >= 32 {
