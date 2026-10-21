@@ -291,6 +291,12 @@ console.log(JSON.stringify({config, path, instructions: fs.readFileSync(path, "u
     assert_eq!(config["permission"]["edit"], "ask");
     assert_eq!(config["instructions"][0], "AGENTS.md");
     assert_eq!(config["instructions"].as_array().unwrap().len(), 2);
+    assert!(
+        !observed["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Prior-output review is required before planning")
+    );
     for text in [
         "context only",
         "Do not rebuild or implement",

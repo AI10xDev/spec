@@ -353,9 +353,22 @@ process.stdout.write(JSON.stringify({config, instruction, text:fs.readFileSync(i
             "Do not implement completed requirements again",
             "only to the marked line",
             "fenced code blocks",
+            "Prior-output review is required before planning",
+            "including when continuing an existing\nsession",
+            "completed features, completed refactors, validation evidence",
+            "Briefly report this evidence review before presenting next build steps",
+            "Refresh this review",
         ] {
             assert!(text.contains(rule), "missing continuation rule: {rule}");
         }
+        assert!(text.contains(&format!(
+            "Execution workspace (JSON path): {}",
+            serde_json::json!(root.path())
+        )));
+        assert!(text.contains(&format!(
+            "Current run directory to exclude (JSON path): {}",
+            serde_json::json!(root.path())
+        )));
         let instruction = Path::new(observed["instruction"].as_str().unwrap());
         assert_eq!(instruction.parent().unwrap(), root.path());
         assert!(!instruction.exists(), "instructions leaked on nonzero exit");

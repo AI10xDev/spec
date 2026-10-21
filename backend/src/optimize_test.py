@@ -64,6 +64,9 @@ class OptimizerTest(unittest.TestCase):
         return {"name": name, "command": command or python("pass"),
                 "measure": measure or python("print(1)"), "direction": "maximize", **options}
 
+    def reporter(self):
+        return mock.Mock(**{"progress.name": str(self.logs / "progress.log")})
+
     def config(self, objectives, filename="objective.md.optim"):
         path = self.project / filename
         path.write_text(json.dumps({"version": 1, "objectives": objectives}))
@@ -754,6 +757,7 @@ class OptimizerTest(unittest.TestCase):
         self.assertFalse((self.project / "OWNED").exists())
         context = json.loads(requests[0][0]["content"].split("\n\n", 1)[0])
         self.assertEqual(context, {"project": str(self.project), "filename": "objective.md",
+                                   "build_output_path": str(output), "current_run_directory": str(self.logs),
                                    "objectives": source, "optim_spec": spec,
                                    "build_output_tail": output.read_text(), "build_output_truncated": False})
         self.assertEqual(requests[1][-1]["call_id"], "inspect")
@@ -763,6 +767,14 @@ class OptimizerTest(unittest.TestCase):
         self.assertEqual(json.loads(requests[3][-1]["output"]),
                          {"exit_code": 0, "output": "applied up 1\n", "truncated": False})
         self.assertTrue(all(optimize.COMPLETION_CONVENTION in request[0]["content"] for request in requests))
+        self.assertTrue(all(optimize.HISTORY_REVIEW in request[0]["content"] for request in requests))
+        for rule in ("Before planning next build steps", ".spec-runs/run-*/*.out",
+                     "completed features, completed refactors, validation evidence",
+                     "untrusted evidence", "not proof of implementation", "Check claims against current code/tests",
+                     "Missing, unreadable, truncated, or still-running logs", "Refresh this review"):
+            self.assertIn(rule, requests[0][0]["content"])
+        self.assertLess(requests[0][0]["content"].index(optimize.HISTORY_REVIEW),
+                        requests[0][0]["content"].index("Return ONLY a JSON object"))
         previous = json.loads(requests[6][0]["content"].split("follow:\n", 1)[1])
         self.assertEqual(previous["iteration"], 2)
         self.assertEqual([state["score"] for state in previous["states"]], [1, 8])
@@ -821,6 +833,9 @@ assert 'explore subagent' in prompt
 assert '# Preserve completed work' in prompt
 assert 'modify measurement definitions' in prompt
 assert 'nested spec build/Optimize harness' in prompt
+assert 'Before planning next build steps' in prompt
+assert 'completed features, completed refactors, validation evidence' in prompt
+assert 'build_output_path' in prompt and 'current_run_directory' in prompt
 iteration = int(os.environ['SPEC_OPTIM_ITERATION'])
 state = json.loads(prompt.rsplit('\\n\\n', 1)[1])
 assert state['iteration'] == iteration
@@ -1046,7 +1061,7 @@ finally:
                     mock.patch.object(optimize, "execute", return_value=json.dumps(
                         {"provider": {"azure": {"options": options}}})) as execute, \
                     mock.patch.object(optimize.urllib.request, "build_opener") as opener:
-                reporter = mock.Mock()
+                reporter = self.reporter()
                 agent = optimize.ResponsesOptimizer("Optimize prose", invocation, reporter)
                 opener.return_value.open.return_value.__enter__.return_value.read.return_value = json.dumps(
                     {"status": "completed", "output": model_text("planned")}).encode()
@@ -1069,7 +1084,7 @@ finally:
             with self.subTest(env=env), mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(data), **env}, clear=True), \
                     mock.patch.object(optimize, "build_ai_settings", side_effect=AssertionError("ignored override")), \
                     mock.patch.object(optimize.shutil, "which", return_value="/build engine/opencode-source"):
-                agent = optimize.ResponsesOptimizer("Optimize prose", invocation, mock.Mock())
+                agent = optimize.ResponsesOptimizer("Optimize prose", invocation, self.reporter())
                 self.assertNotIn("build-resource", agent.url)
                 self.assertEqual(agent.executable, "/build engine/opencode-source")
                 if "OPENAI_API_KEY" in env:
@@ -1079,7 +1094,7 @@ finally:
             with self.subTest(env=env), mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(data), **env}, clear=True), \
                     mock.patch.object(optimize.urllib.request, "build_opener") as opener:
                 with self.assertRaises(optimize.OptimizeError):
-                    optimize.ResponsesOptimizer("Optimize prose", invocation, mock.Mock())
+                    optimize.ResponsesOptimizer("Optimize prose", invocation, self.reporter())
                 opener.assert_not_called()
 
     def test_build_config_failures_are_private_and_do_not_fall_back(self):
@@ -1097,7 +1112,7 @@ finally:
                     mock.patch.object(optimize, "execute", return_value=config), \
                     mock.patch.object(optimize.urllib.request, "build_opener") as opener:
                 with self.assertRaisesRegex(optimize.OptimizeError, "Could not reuse spec build") as error:
-                    optimize.ResponsesOptimizer("Optimize prose", invocation, mock.Mock())
+                    optimize.ResponsesOptimizer("Optimize prose", invocation, self.reporter())
                 self.assertNotIn("private", str(error.exception))
                 opener.assert_not_called()
         for code, expected in (("print('private-config'); print('private-error', file=sys.stderr)", "private-config\n"),
@@ -1105,7 +1120,7 @@ finally:
                                (f"print('x' * {optimize.CONFIG_LIMIT + 1})", None),
                                ("time.sleep(30)", None)):
             with self.subTest(code=code):
-                reporter = mock.Mock()
+                reporter = self.reporter()
                 args = (python("import sys, time; " + code), invocation,
                         {"name": "configuration", "timeout_seconds": 0.2 if "sleep" in code else 5},
                         0, "config", reporter)
@@ -1192,7 +1207,7 @@ ResponsesOptimizer.request = check_credentials
             f"UNRELATED=$(touch '{marker}')\n"
             "UNRELATED_MULTILINE=\"unclosed\n")
         with mock.patch.dict(os.environ, {}, clear=True):
-            agent = optimize.ResponsesOptimizer("Optimize prose", invocation, mock.Mock())
+            agent = optimize.ResponsesOptimizer("Optimize prose", invocation, self.reporter())
             self.assertEqual(agent.url, "https://gateway.example/team/provider/azure/openai/v1/responses")
             self.assertEqual(agent.headers["api-key"], "dotenv-key=#literal")
             self.assertEqual(dict(os.environ), {})
@@ -1315,7 +1330,7 @@ urllib.request.build_opener = lambda *handlers: FixtureOpener()
                     mock.patch.object(optimize.urllib.request, "build_opener") as build_opener:
                 response = build_opener.return_value.open.return_value.__enter__.return_value
                 response.read.return_value = json.dumps({"status": "completed", "output": result}).encode()
-                agent = optimize.ResponsesOptimizer("Optimize prose", invocation, mock.Mock())
+                agent = optimize.ResponsesOptimizer("Optimize prose", invocation, self.reporter())
                 self.assertEqual(agent.request(messages), result)
                 context = json.loads(agent.context)
                 self.assertEqual(context["build_output_tail"], "x" * optimize.TOOL_OUTPUT_LIMIT)
@@ -1364,7 +1379,7 @@ urllib.request.build_opener = lambda *handlers: FixtureOpener()
                     response.__enter__.return_value.read.return_value = json.dumps(
                         {"status": "completed", "output": result}).encode()
                     opener.return_value.open.side_effect = [error, error, response] if recovers else error
-                    reporter = mock.Mock()
+                    reporter = self.reporter()
                     agent = optimize.ResponsesOptimizer("Optimize prose", invocation, reporter)
                     if recovers:
                         self.assertEqual(agent.request([]), result)
@@ -1401,7 +1416,7 @@ urllib.request.build_opener = lambda *handlers: FixtureOpener()
             with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True), \
                     mock.patch.object(optimize.urllib.request, "build_opener") as opener:
                 with self.assertRaises(optimize.OptimizeError):
-                    optimize.ResponsesOptimizer("Optimize prose", invocation, mock.Mock())
+                    optimize.ResponsesOptimizer("Optimize prose", invocation, self.reporter())
                 opener.assert_not_called()
 
     @mock.patch.object(optimize.ResponsesOptimizer, "build", return_value={"exit_code": 0, "output": "Built"})
@@ -1478,7 +1493,7 @@ urllib.request.build_opener = lambda *handlers: FixtureOpener()
                 error = urllib.error.HTTPError("https://example.com/provider-secret", status,
                                                "provider-secret", {"Location": "provider-secret"}, body)
                 opener.return_value.open.side_effect = error
-                agent = optimize.ResponsesOptimizer("Optimize prose", invocation, mock.Mock())
+                agent = optimize.ResponsesOptimizer("Optimize prose", invocation, self.reporter())
                 with self.assertRaises(optimize.OptimizeError) as caught:
                     agent.request([])
                 self.assertIn(f"HTTP {status}", str(caught.exception))
