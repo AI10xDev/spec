@@ -30,6 +30,7 @@ use tower_http::services::ServeDir;
 use uuid::Uuid;
 
 mod ai_settings;
+mod analytics;
 mod azure_realtime;
 mod chat;
 mod completion;
@@ -844,7 +845,7 @@ async fn retained_runs(
 ) -> Result<Json<remote::RetainedRuns>> {
     let remote = retained_remote(&app, &name)?;
     remote
-        .retained(&name, None)
+        .retained(&name, None, false)
         .await
         .map(Json)
         .map_err(|error| Error(StatusCode::BAD_GATEWAY, error))
@@ -859,7 +860,7 @@ async fn retained_log(
     }
     let remote = retained_remote(&app, &name)?;
     remote
-        .retained(&name, Some(&id))
+        .retained(&name, Some(&id), false)
         .await
         .map(Json)
         .map_err(|error| Error(StatusCode::BAD_GATEWAY, error))
@@ -880,6 +881,7 @@ fn router(app: App) -> Router {
             }),
         )
         .route("/api/files", get(list))
+        .route("/api/analytics", post(analytics::report))
         .route(
             "/api/realtime",
             post(realtime::call).layer(DefaultBodyLimit::max(realtime::MAX_BODY)),

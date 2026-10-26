@@ -9,6 +9,7 @@ import sys
 import time
 
 MAX_OUTPUT = 262144
+MAX_REPORT = 8388608
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 
 
@@ -29,7 +30,7 @@ def private(parent, name, directory=False):
         os.close(fd)
 
 
-def candidate(root, workspace, run_id, name, historical):
+def candidate(root, workspace, run_id, name, historical, full_report=False):
     with private(root, "run-" + run_id, True) as run:
         if name == "optimization":
             # Optimizers use this synthetic name too. Only an initial build's
@@ -64,21 +65,37 @@ def candidate(root, workspace, run_id, name, historical):
             # A terminal status is published after the final log writes. Sample
             # size afterwards so a finishing run cannot lose its final bytes.
             info = os.fstat(log)
-            if info.st_size > 8388608:
+            if info.st_size > MAX_REPORT and not full_report:
                 raise ValueError("retained log exceeds size limit")
             if not historical:
                 return {"id": run_id, "modified": info.st_mtime_ns // 1000000000}
-            count = min(info.st_size, MAX_OUTPUT)
-            output = os.pread(log, count, info.st_size - count)
+            limit = MAX_REPORT if full_report else MAX_OUTPUT
+            count = min(info.st_size, limit)
+            output = os.pread(log, count, 0 if full_report else info.st_size - count)
             if len(output) != count:
                 raise ValueError("retained log changed during read")
-            return {"id": run_id, "name": name, "output": output.decode("utf-8", "replace"),
-                    "status": status, "truncated": info.st_size > MAX_OUTPUT,
+            after = os.fstat(log)
+            changed = full_report and (info.st_size != after.st_size
+                                       or info.st_mtime_ns != after.st_mtime_ns)
+            lossy = False
+            try:
+                text = output.decode("utf-8")
+            except UnicodeDecodeError:
+                text = output.decode("utf-8", "replace")
+                lossy = full_report
+            # The supervisor may already have discarded bytes at exactly MAX_REPORT.
+            truncated = info.st_size >= limit if full_report else info.st_size > limit
+            return {"id": run_id, "name": name, "output": text,
+                    "status": status, "truncated": truncated or changed or lossy,
                     "recoverable": False, "continuable": False}
 
 
 def main():
-    workspace, name, run_id = sys.argv[1:]
+    workspace, name, run_id = sys.argv[1:4]
+    mode = sys.argv[4] if len(sys.argv) == 5 else "tail"
+    if len(sys.argv) not in (4, 5) or mode not in ("tail", "full"):
+        raise ValueError("invalid retained read mode")
+    full_report = mode == "full"
     if (not name or name.startswith(".") or name.strip() != name
             or len(name.encode("utf-8")) > 180
             or any(c in "/\\:" or ord(c) < 32 or 127 <= ord(c) <= 159 for c in name)
@@ -88,9 +105,15 @@ def main():
     # All storage below this opened workspace still requires O_NOFOLLOW.
     workspace_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        with private(workspace_fd, ".spec-runs", True) as root:
+        with contextlib.ExitStack() as stack:
+            try:
+                root = stack.enter_context(private(workspace_fd, ".spec-runs", True))
+            except FileNotFoundError:
+                if full_report and not run_id:
+                    return {"runs": [], "truncated": False}
+                raise
             if run_id:
-                return candidate(root, workspace, run_id, name, True)
+                return candidate(root, workspace, run_id, name, True, full_report)
             runs = []
             truncated = False
             deadline = time.monotonic() + 5
@@ -104,8 +127,12 @@ def main():
                     if not entry.name.startswith("run-") or not UUID.fullmatch(entry.name[4:]):
                         continue
                     try:
-                        runs.append(candidate(root, workspace, entry.name[4:], name, False))
-                    except (OSError, ValueError):
+                        runs.append(candidate(root, workspace, entry.name[4:], name, False, full_report))
+                    except (OSError, ValueError) as error:
+                        # Analytics must not misrepresent unreadable storage as no history.
+                        if full_report and not (isinstance(error, FileNotFoundError)
+                                                and error.filename in (entry.name, name + ".out")):
+                            raise
                         continue
             runs.sort(key=lambda run: (-run["modified"], run["id"]))
             return {"runs": runs, "truncated": truncated}

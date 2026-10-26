@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 const LIST: &str = "/api/files/a.md/retained-runs";
 
-fn fixture() -> (tempfile::TempDir, App) {
+pub(super) fn fixture() -> (tempfile::TempDir, App) {
     let root = tempfile::tempdir().unwrap();
     let mut state = app(root.path());
     fs::write(root.path().join("a.md"), "local spec").unwrap();
@@ -14,7 +14,7 @@ fn fixture() -> (tempfile::TempDir, App) {
     (root, state)
 }
 
-fn retained(root: &FsPath, id: &str, name: &str) -> PathBuf {
+pub(super) fn retained(root: &FsPath, id: &str, name: &str) -> PathBuf {
     let directory = root.join(format!(".spec-runs/run-{id}"));
     fs::create_dir_all(&directory).unwrap();
     for path in [directory.parent().unwrap(), directory.as_path()] {

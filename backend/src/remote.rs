@@ -359,19 +359,25 @@ impl Remote {
         &self,
         name: &str,
         id: Option<&str>,
+        full_report: bool,
     ) -> Result<T, String> {
         let limit = if id.is_some() {
-            super::MAX_OUTPUT * 6 + 4096
+            (if full_report {
+                super::analytics::MAX_REPORT
+            } else {
+                super::MAX_OUTPUT
+            }) * 6 + 4096
         } else {
             16384
         };
         let mut child = self
             .ssh(format!(
-                "timeout --kill-after=1s 10s python3 -I -c {} {} {} {}",
+                "timeout --kill-after=1s 10s python3 -I -c {} {} {} {} {}",
                 quote(include_str!("remote-retained.py")),
                 quote(&self.directory),
                 quote(name),
                 quote(id.unwrap_or("")),
+                if full_report { "full" } else { "tail" },
             ))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

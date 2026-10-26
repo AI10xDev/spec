@@ -5,6 +5,8 @@ import type { Document, Output as RunOutput, Tab } from "./tabs"
 import { Editor } from "./editor"
 import { Chat } from "./chat"
 import { LogOutput } from "./highlighting"
+import { Analytics } from "./analytics"
+import { BuildProgress } from "./progress"
 import "./style.css"
 
 type Entry = { name: string; modified: number; bytes: number }
@@ -44,6 +46,7 @@ function App() {
   const [outputs, setOutputs] = useState<Record<string, Output>>({})
   const [feedback, setFeedback] = useState<Record<string, string>>({})
   const [optimization, setOptimization] = useState<Output | null>(null)
+  const [analytics, setAnalytics] = useState(false)
   const [outputView, setOutputView] = useState<"file" | "optimization">("file")
   const [loadingOutput, setLoadingOutput] = useState<{ id?: string } | null>(null)
   const [retained, setRetained] = useState<(RetainedRuns & { name: string; output?: Output; loading: boolean; listed: boolean }) | null>(null)
@@ -366,7 +369,7 @@ function App() {
     if (busy || submitting.current || !execution || pendingRuns) return
     if (!tab || !tab.name.endsWith(".optim") || !tab.content.trim()) {
       setNotice("")
-      setError("Open or create a file with a name ending in .optim, enter your optimization instructions, and select that tab before clicking Optimize.")
+      setError("Open or create a file with a name ending in .optim, enter your optimization instructions, and select that tab before clicking Performance.")
       return
     }
     submitting.current = true
@@ -421,7 +424,8 @@ function App() {
   if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} realtime={realtime} azureRealtime={azureRealtime} />
 
   return <div className="app">
-    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ workspace</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Optimization: {optimization.status}</span>}<button className="primary" disabled={!execution || busy || !!pendingRuns} onClick={() => void optimize()}>Optimize</button></div></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ workspace</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Optimization: {optimization.status}</span>}<div className="analysis-actions"><button title="analytics" onClick={() => setAnalytics(true)}>Analytics</button><button className="primary" title="performance" disabled={!execution || busy || !!pendingRuns} onClick={() => void optimize()}>Performance</button></div></div></header>
+    {analytics && <Analytics api={api} active={active} onClose={() => setAnalytics(false)} />}
     <div className="workspace">
       <aside>
         <div className="sidebar-heading">YOUR WORKSPACE <button title="Refresh file list" aria-label="Refresh file list" onClick={() => void refresh().catch(fail)}>↻</button></div>
@@ -483,8 +487,9 @@ function App() {
               {historical && <p>Read-only snapshot from run <code>{historical.id}</code>. {fileOutput ? <>This does not replace or resolve the associated run <code>{fileOutput.id}</code> ({fileOutput.status}).</> : "No run is associated with this file."} It may have used different instructions.</p>}
               <button onClick={() => { retainedRequest.current++; setRetained(null) }}>Return to associated output</button>
             </div>}
+            {!historical && outputView === "file" && output?.continuable && <BuildProgress key={output.id} output={output} />}
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
-            <pre ref={log} className="output" aria-label="Run output">{output ? <LogOutput value={output.output} /> : (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery. To start a new run, open or create a nonempty .optim file and select its tab, then click Optimize. The current editor buffer, including unsaved changes, is uploaded to remote ~/projects and its absolute path is sent to the optimizer. No local save is performed." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
+            <pre ref={log} className="output" aria-label="Run output">{output ? <LogOutput value={output.output} /> : (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery. To start a new run, open or create a nonempty .optim file and select its tab, then click Performance. The current editor buffer, including unsaved changes, is uploaded to remote ~/projects and its absolute path is sent to the optimizer. No local save is performed." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
             {!historical && output && outputView === "file" && output.continuable === true && <form className="chat-composer build-feedback" onSubmit={(event) => { event.preventDefault(); void continueRun(message) }}>
               <label htmlFor="build-feedback">Feedback to build session</label>
               <textarea id="build-feedback" aria-describedby="feedback-help feedback-limit" placeholder="Answer the agent or explain what to change..." value={message} disabled={busy} onChange={(event) => setFeedback((items) => ({ ...items, [output.id]: event.target.value }))} />

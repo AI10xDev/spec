@@ -14,7 +14,7 @@ the project owner.
 
 ## Integration Contract
 
-The top-right **Optimize** button uploads the active, nonempty `.optim` editor
+The top-right **Performance** button uploads the active, nonempty `.optim` editor
 buffer through the existing authenticated SSH harness, including unsaved changes.
 It does not save the file locally or change the editor's saved revision. Confirm
 execution only for trusted commands. View live progress under **Optimization** in Output & logs; **Stop run**
@@ -184,7 +184,7 @@ If selection fails, the final failure report includes the discovered `project`,
 the expected paths; an ambiguity error also lists the competing candidates.
 For standalone lookup, create the intended config in that project on the
 **execution host**, or supply an absolute `CONFIG_PATH`. In the UI, select the
-`.optim` tab and click Optimize to upload its current contents instead.
+`.optim` tab and click Performance to upload its current contents instead.
 No older build is selected to work around missing config.
 
 The discovered project is the execution directory recorded in the selected build
@@ -286,7 +286,7 @@ No nested `spec build` is launched: it would contend with the optimizer's projec
 lock. Planned commands should perform project process work and correctness
 validation rather than launch another locking harness.
 
-By default, Optimize reuses the connected Azure API provider on the **remote
+By default, Performance reuses the connected Azure API provider on the **remote
 execution host** (or the local execution host for direct runs), as used by the
 installed `spec build` launcher. It reads `azure` in
 `${XDG_DATA_HOME:-~/.local/share}/opencode/auth.json` and asks OpenCode for its
@@ -369,7 +369,7 @@ DNS, TLS/certificate, timeout, connection, and invalid-JSON failures. Provider e
 bodies, URLs, and headers are not logged because they may contain credentials.
 An HTTP 404 can indicate either a wrong Responses route or an unavailable
 `gpt-6-sol` deployment; HTTP 401/403 indicates authentication or access checks,
-and HTTP 429 requires checking rate limits/quota. Build and Optimize use separate
+and HTTP 429 requires checking rate limits/quota. Build and Performance use separate
 provider clients and may select different models, even when sharing the connected
 Azure endpoint and API authentication. A working build therefore does not verify
 that the optimizer's model is deployed or its Responses payload is supported.
@@ -384,11 +384,11 @@ accepted the request. Read the complete `final` record in that run's `report.jso
 for the failure reason. A trailing `/openai/v1/` is supported and is expanded to
 `/openai/v1/responses`; do not change it solely because planning failed. If the
 error still lacks the request diagnostics above, rebuild and restart the Spec
-server (`./run.sh`), reload the browser, and start a new Optimize run. The server
+server (`./run.sh`), reload the browser, and start a new Performance run. The server
 embeds `optimize.py` at compile time and uploads a snapshot for each run; updating
 the source or retrying an old snapshot alone does not update that embedded code.
 For DNS failures, verify the configured endpoint hostname using
-`getent ahosts HOSTNAME` on the execution host. If it resolves but Optimize still reports DNS
+`getent ahosts HOSTNAME` on the execution host. If it resolves but Performance still reports DNS
 errors, check the execution process's proxy settings and proxy hostname as well.
 Use the Azure resource's published endpoint; do not hard-code a resolved IP,
 disable TLS verification, or switch providers to work around DNS failures.

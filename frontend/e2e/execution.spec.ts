@@ -41,6 +41,17 @@ fs.appendFileSync(${JSON.stringify(path.join(directory, "launches"))}, "launch\\
       process.exit(0)
     }, 50)
     setTimeout(() => process.exit(2), 15_000)
+  } else if (content.startsWith("PROGRESS\\n")) {
+    let previous = "0"
+    setInterval(() => {
+      const phase = fs.readFileSync(${JSON.stringify(path.join(directory, "progress-phase"))}, "utf8")
+      if (phase === previous) return
+      previous = phase
+      if (phase === "3") process.exit(0)
+      const rows = phase === "1" ? ["[\\u2713] Implement", "[\\u2022] Verify", "[ ] Document"] : ["[\\u2713] Implement", "[\\u2713] Verify", "[\\u2713] Document"]
+      process.stdout.write("\\x1b[0m# \\x1b[0mTodos\\n" + rows.join("\\n") + "\\n\\n")
+    }, 50)
+    setTimeout(() => process.exit(2), 60_000)
   } else if (content.startsWith("WAIT\\n")) {
     let tick = 0
     setInterval(() => process.stdout.write("fixture progress " + ++tick + ": " + content + "\\n"), 100)
@@ -119,6 +130,60 @@ test.afterAll(async () => {
   } finally {
     if (directory) await rm(directory, { recursive: true, force: true })
   }
+})
+
+test("rainbow completion follows live task reports and resets across runs and tabs", async ({ page }) => {
+  await writeFile(path.join(directory, "progress-phase"), "0")
+  await page.goto(url)
+  await page.getByRole("textbox", { name: "New filename" }).fill("progress.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  const editor = page.getByRole("textbox", { name: "Edit progress.md", exact: true })
+  await editor.fill("PROGRESS\nReport task completion.")
+  const run = page.getByRole("button", { name: "Save & run" })
+  page.once("dialog", (dialog) => dialog.accept())
+  await run.click()
+  const section = page.getByRole("region", { name: "Build progress for progress.md", exact: true })
+  const bar = section.getByRole("progressbar")
+  await expect(bar).toBeVisible()
+  await expect(bar).not.toHaveAttribute("aria-valuenow")
+  await expect(bar).toHaveClass(/indeterminate/)
+  await page.emulateMedia({ reducedMotion: "reduce" })
+  await expect(bar.locator("div")).toHaveCSS("animation-name", "none")
+  await expect(page.getByLabel("Run output")).toContainText("fixture stdout")
+
+  await writeFile(path.join(directory, "progress-phase"), "1")
+  await expect(bar).toHaveAttribute("aria-valuenow", "33")
+  await expect(section).toContainText("1 of 3 tasks reported complete")
+  expect(await bar.locator("div").evaluate((element) => getComputedStyle(element).backgroundImage)).toContain("linear-gradient")
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+  await editor.fill("Unsaved edits do not change measured progress.")
+  await expect(bar).toHaveAttribute("aria-valuenow", "33")
+
+  await page.getByRole("textbox", { name: "New filename" }).fill("other-progress.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  await expect(page.getByRole("progressbar")).toHaveCount(0)
+  await page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button", { name: /^progress\.md/ }).click()
+  await expect(bar).toHaveAttribute("aria-valuenow", "33")
+
+  await writeFile(path.join(directory, "progress-phase"), "2")
+  await expect(bar).toHaveAttribute("aria-valuenow", "100")
+  await expect(section).toContainText("Build in progress")
+  await writeFile(path.join(directory, "progress-phase"), "3")
+  await expect(section).toContainText("Build turn ended")
+  await expect(bar).toHaveAttribute("aria-valuenow", "100")
+  await expect(run).toBeEnabled()
+
+  await writeFile(path.join(directory, "progress-phase"), "0")
+  await editor.fill("PROGRESS\nA fresh session.")
+  page.once("dialog", (dialog) => dialog.accept())
+  await run.click()
+  await expect(bar).not.toHaveAttribute("aria-valuenow")
+  await expect(section).toContainText("Waiting for reported task counts")
+  await page.getByRole("button", { name: "Stop run" }).click()
+  await expect(section).toContainText("Build cancelled")
+  await expect(bar).not.toHaveClass(/indeterminate/)
+  await expect(bar).not.toHaveAttribute("aria-valuenow")
 })
 
 test("enabled execution: confirmation, saved snapshot, per-file polling, completion and cancellation", async ({ page }) => {

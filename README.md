@@ -6,7 +6,7 @@ This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/A
 
 ## Latest release: v0.1.11
 
-[Spec v0.1.11](https://github.com/AI10xDev/spec/releases/tag/v0.1.11) fixes Optimize rejecting Azure Responses endpoints with gateway routing prefixes. URLs ending in `/openai/v1` or `/openai/v1/responses` now preserve those prefixes, while resource-root endpoints and endpoint security checks remain supported. The uploaded `.optim` absolute-path handoff from v0.1.9 and execution-host dotenv credential loading from v0.1.10 are unchanged; config location and execution project remain separate. Optimization still uses independently measured convergence; a plateau is not proof of an upper bound or global optimum.
+[Spec v0.1.11](https://github.com/AI10xDev/spec/releases/tag/v0.1.11) fixes Performance rejecting Azure Responses endpoints with gateway routing prefixes. URLs ending in `/openai/v1` or `/openai/v1/responses` now preserve those prefixes, while resource-root endpoints and endpoint security checks remain supported. The uploaded `.optim` absolute-path handoff from v0.1.9 and execution-host dotenv credential loading from v0.1.10 are unchanged; config location and execution project remain separate. Optimization still uses independently measured convergence; a plateau is not proof of an upper bound or global optimum.
 
 Rebuild and restart the local server, then reload the browser to use the updated optimizer. Prose mode needs the additional execution-host setup under [Optimization](#optimization). Releases are versioned by Git tags; package manifests retain `0.1.0`, following the existing source-release convention.
 
@@ -26,9 +26,11 @@ Rebuild and restart the local server, then reload the browser to use the updated
 - **Completed spec lines:** press `/` to toggle the current line's `# ` completion marker; Alt+/ inserts a literal slash. The build agent is instructed to retain completed lines as context and implement only pending requirements.
 - **Trailing completions:** optional Azure-powered ghost text for the current sentence part; Tab or **Accept part** inserts it, Escape dismisses it.
 - **Optional Save & run:** explicit confirmation, immutable saved-spec input, live output polling, follow toggle, cancellation, concurrency limits, and a 15-minute timeout.
+- **Rainbow build progress:** the selected build's latest complete CLI task list drives a live completion bar; missing counts show indeterminate activity, never a made-up percentage. See [progress reporting](#build-progress-reporting).
 - **Continue completed builds:** **Use recommended & continue** resumes the same captured engine session with a fixed recommended-choice prompt, without saving or uploading editor changes.
 - **History-aware planning:** initial builds, continuations, and prose optimization agents are instructed to read relevant previous `.out` spec outputs before planning. They reconcile completed features/refactors and validation evidence with the current code, avoid repeating confirmed work, and flag missing or uncertain evidence. This is an agent-driven review using file tools, not a completion flag inferred from a successful run; snapshots and completion markers remain unchanged.
-- **Optimize:** recursively improves a trusted project using explicit `.optim` commands or free-form instructions with OpenCode builder execution and Responses-based review. Independent measurements determine when all objectives plateau; gain reports, separate recoverable output, and manual cancellation make progress inspectable. Unlike builds, optimization has no overall iteration or runtime limit. See [optimization](#optimization) below.
+- **Analytics:** select a saved spec's `.out` report for read-only metric charts and optional validated `.eval` checks, with missing-report and incomplete-evidence warnings. See the [format and limitations](docs/ANALYTICS.md); local snapshots have no verified terminal status.
+- **Performance:** recursively improves a trusted project using explicit `.optim` commands or free-form instructions with OpenCode builder execution and Responses-based review. Independent measurements determine when all objectives plateau; gain reports, separate recoverable output, and manual cancellation make progress inspectable. Unlike builds, optimization has no overall iteration or runtime limit. See [optimization](#optimization) below.
 - **Save repo changes:** shown only when the configured remote directory belongs to a Git worktree with uncommitted changes. Uses `azure/gpt-6-sol` with the existing repository workflow and the saved spec as context.
 - **Recoverable output:** reopening a saved spec restores its latest build output after browser or server restart, without rerunning the build.
 - **Separate session chat:** ask about the current nohup output, written spec, or general topics in a dedicated browser window, without adding chat to the editor/output panes.
@@ -74,7 +76,7 @@ Files are limited to 2 MiB and filenames to 180 UTF-8 bytes; the workspace is fl
 
 ### Remote execution through `spec build` (local web server)
 
-The **browser, Rust web backend, and editable workspace run on your local computer**. **Save & run** executes `spec build <snapshot-file>` remotely over SSH; **Optimize** runs the remote Python optimizer, and continuation uses `opencode-source`. No remote web backend, HTTP port forwarding, or remote frontend build is needed.
+The **browser, Rust web backend, and editable workspace run on your local computer**. **Save & run** executes `spec build <snapshot-file>` remotely over SSH; **Performance** runs the remote Python optimizer, and continuation uses `opencode-source`. No remote web backend, HTTP port forwarding, or remote frontend build is needed.
 
 `./run.sh` configures remote execution automatically using the defaults above. To choose another host and directory, start the app on your **local computer** like this:
 
@@ -130,6 +132,25 @@ Open the full localhost URL printed by the **local** Rust server, including its 
 **Ctrl/Cmd+Enter** invokes **Save & run** from the editor with the same confirmation and busy/run guards as the button. **Ctrl/Cmd+S** still saves without running. The editor displays wrapping-aware line numbers and source syntax colors, including completed `# ` lines, headings, lists, inline code, and fenced code. These are display-only: saved text is unchanged. Output uses severity colors and ANSI text styling; terminal control commands and embedded HTML are never executed.
 
 For responsiveness, files over 256 Ki characters or 5,000 lines use a labeled plain-text editor, and lines over 1,024 characters skip inline coloring. Dense logs (over 2,000 line breaks or 4,000 ANSI text segments) also fall back to sanitized plain text. These display limits do not truncate content or lower the existing save limits.
+
+#### Build progress reporting
+
+The rainbow bar above the associated build output updates with the existing live
+poll (normally every 650 ms). It counts completed tasks in the latest complete
+OpenCode CLI `# Todos` block, ignoring ANSI styling and fenced examples. Cancelled
+tasks stay in the total but do not count as completed. A revised task list can
+lower the percentage; these are agent-reported tasks, not independently verified
+requirements, elapsed-time estimates, or progress inferred from editor `# ` markers.
+
+Before task counts arrive, unsupported log formats and partially streamed lists
+show indeterminate activity while the build runs. Truncated output also has no
+percentage because the complete task-list context is unavailable. Activity stops
+on terminal or unavailable states; unavailable states label any last reported
+counts as potentially stale. A successful CLI exit alone never fills the bar.
+New runs and continuations start fresh, and switching files follows that file's
+run. Retained historical views, repository-save jobs, and Performance output do
+not display this build-task bar. Reduced-motion and forced-colors settings are
+supported, with textual counts and accessible progress values.
 
 #### Save edited repository changes
 
@@ -210,7 +231,7 @@ Builds are capped at **120 KiB** because some existing launchers forward the pro
 
 ### Optimization
 
-Open or create a nonempty `.optim` file, select its editor tab, and click **Optimize** in the top-right header to improve the **latest discovered initial build**. The current buffer, including unsaved changes, is uploaded to a unique private `.optim` file under the remote host's `~/projects/`; no local save occurs. Discovery still uses recorded build invocation metadata and narrowly supported nohup history, with a legacy fallback; it can select a project outside `SPEC_SSH_WORKSPACE`. Missing or ambiguous targets fail with diagnostics instead of inventing objectives.
+Open or create a nonempty `.optim` file, select its editor tab, and click **Performance** in the top-right header to improve the **latest discovered initial build**. The current buffer, including unsaved changes, is uploaded to a unique private `.optim` file under the remote host's `~/projects/`; no local save occurs. Discovery still uses recorded build invocation metadata and narrowly supported nohup history, with a legacy fallback; it can select a project outside `SPEC_SSH_WORKSPACE`. Missing or ambiguous targets fail with diagnostics instead of inventing objectives.
 
 The optimizer receives the uploaded spec's **absolute remote path** and loads it directly, without searching the discovered project root. The discovered build project remains the execution directory. No project objectives or benchmarks are bundled. See [OPTIMIZE.md](OPTIMIZE.md) for complete discovery rules, schema, and examples.
 
@@ -221,7 +242,7 @@ Two modes share the same measurement scheduler:
 - **Explicit JSON v1:** provide one-step command argv, fixed read-only scalar measurement argv, direction, tolerances, patience, and optional command timeouts for each objective. The scheduler executes these commands directly without model requests.
 - **Free-form prose:** describe the improvements and real measurements to use. Responses planning with `gpt-6-sol` creates a validated plan. Each active-objective iteration runs the OpenCode **build** agent for a focused improvement, then Responses-based review, repair, and the planned validation/process command. Completed spec requirements and unrelated edits must be preserved. A model's assertion of convergence cannot stop the scheduler.
 
-Both modes require **Python 3.10+ on Linux**, subreaper support, and readable procfs on the execution host. Prose mode additionally needs authenticated OpenCode (`SPEC_OPTIM_OPENCODE`, otherwise `opencode-source` when available, then `opencode`) and Responses access to `gpt-6-sol`. By default, Optimize reuses the connected Azure API credentials/resource and resolved OpenCode provider configuration used by `spec build`, rather than an old editor dotenv. Override this with complete exported credentials (`AZURE_OPENAI_ENDPOINT` plus `AZURE_OPENAI_API_KEY`, or `OPENAI_API_KEY` with Azure variables unset), or select a dotenv using `SPEC_AI_ENV_FILE` or `KIBI_ENV_FILE`. Without a connected Azure API entry or explicit credentials, the nearest build-project/ancestor `.env`, then `~/code.dev/.env`, remains the fallback. See [configuration precedence and syntax](OPTIMIZE.md#free-form-responses-mode) for details and supported routing. Existing OpenCode configuration selects the builder's model; Optimize still requires the `gpt-6-sol` deployment. Local chat/voice dotenv settings are not transferred over SSH, and optimization does not source `~/.bash_aliases`.
+Both modes require **Python 3.10+ on Linux**, subreaper support, and readable procfs on the execution host. Prose mode additionally needs authenticated OpenCode (`SPEC_OPTIM_OPENCODE`, otherwise `opencode-source` when available, then `opencode`) and Responses access to `gpt-6-sol`. By default, Performance reuses the connected Azure API credentials/resource and resolved OpenCode provider configuration used by `spec build`, rather than an old editor dotenv. Override this with complete exported credentials (`AZURE_OPENAI_ENDPOINT` plus `AZURE_OPENAI_API_KEY`, or `OPENAI_API_KEY` with Azure variables unset), or select a dotenv using `SPEC_AI_ENV_FILE` or `KIBI_ENV_FILE`. Without a connected Azure API entry or explicit credentials, the nearest build-project/ancestor `.env`, then `~/code.dev/.env`, remains the fallback. See [configuration precedence and syntax](OPTIMIZE.md#free-form-responses-mode) for details and supported routing. Existing OpenCode configuration selects the builder's model; Performance still requires the `gpt-6-sol` deployment. Local chat/voice dotenv settings are not transferred over SSH, and optimization does not source `~/.bash_aliases`.
 
 #### Measured stopping
 

@@ -16,6 +16,9 @@ mod optimization_tests;
 #[path = "retained_tests.rs"]
 mod retained_tests;
 
+#[path = "analytics_tests.rs"]
+mod analytics_tests;
+
 pub(super) fn app(root: &FsPath) -> App {
     App {
         root: root.to_owned(),
@@ -95,6 +98,7 @@ async fn all_api_routes_require_authentication() {
         ("PUT", "/api/files/a.md"),
         ("GET", "/api/config"),
         ("POST", "/api/completions"),
+        ("POST", "/api/analytics"),
         ("POST", "/api/realtime"),
         ("POST", "/api/realtime/azure"),
         ("POST", "/api/runs"),

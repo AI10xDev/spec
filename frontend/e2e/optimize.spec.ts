@@ -80,11 +80,11 @@ async function workspace(page: Page, options: { latest?: typeof completed | null
     return route.fulfill({ status: 404, json: { error: `Unexpected request: ${pathname}` } })
   })
   await page.goto(url)
-  await expect(page.getByRole("button", { name: "Optimize", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeVisible()
   return { writes, dialogs, errors, auth }
 }
 
-test("Optimize uploads the active .optim buffer, confirms risks, prevents same-tick duplicates, and polls reports", async ({ page }) => {
+test("Performance uploads the active .optim buffer, confirms risks, prevents same-tick duplicates, and polls reports", async ({ page }) => {
   const { writes, dialogs, errors, auth } = await workspace(page)
   await page.getByRole("tabpanel").getByRole("button", { name: /objectives\.optim/ }).click()
   await expect(page.getByRole("textbox", { name: "Edit objectives.optim", exact: true })).toHaveValue("Saved objectives.optim")
@@ -96,7 +96,7 @@ test("Optimize uploads the active .optim buffer, confirms risks, prevents same-t
   })
   let polls = 0
   await page.route("**/api/runs/optimizer", (route) => route.fulfill({ json: ++polls === 1 ? running : completed }))
-  const button = page.getByRole("button", { name: "Optimize", exact: true })
+  const button = page.getByRole("button", { name: "Performance", exact: true })
   await page.getByLabel("Follow output").uncheck()
   await button.evaluate((element: HTMLButtonElement) => { element.click(); element.click() })
   await expect(button).toBeDisabled()
@@ -113,7 +113,7 @@ test("Optimize uploads the active .optim buffer, confirms risks, prevents same-t
   release()
   await expect(page.getByLabel("Run output")).toHaveText(running.output)
   await expect(page.locator(".topbar .badge")).toHaveText("Optimization: running")
-  await expect(button).toHaveText("Optimize")
+  await expect(button).toHaveText("Performance")
   await expect(button).toBeDisabled()
   await expect(page.getByLabel("Follow output")).toBeChecked()
   await expect(page.getByLabel("Run output")).toHaveText(completed.output)
@@ -126,9 +126,9 @@ test("Optimize uploads the active .optim buffer, confirms risks, prevents same-t
   expect(polls).toBe(2)
 })
 
-test("Optimize requires a selected nonempty .optim tab without confirming or writing", async ({ page }) => {
+test("Performance requires a selected nonempty .optim tab without confirming or writing", async ({ page }) => {
   const { writes, dialogs } = await workspace(page)
-  const button = page.getByRole("button", { name: "Optimize", exact: true })
+  const button = page.getByRole("button", { name: "Performance", exact: true })
   await page.getByRole("button", { name: "Optimization", exact: true }).click()
   await expect(page.getByLabel("Run output")).toContainText("current editor buffer, including unsaved changes, is uploaded to remote ~/projects")
   await expect(page.getByLabel("Run output")).toContainText("No local save is performed")
@@ -148,7 +148,7 @@ test("Optimize requires a selected nonempty .optim tab without confirming or wri
     await page.getByRole("button", { name: "Create file", exact: true }).click()
     await page.getByRole("textbox", { name: `Edit ${name}`, exact: true }).fill("Not an .optim file")
     await button.click()
-    await expect(page.getByRole("alert")).toContainText("select that tab before clicking Optimize")
+    await expect(page.getByRole("alert")).toContainText("select that tab before clicking Performance")
     await expect(button).toBeEnabled()
   }
   expect(dialogs).toEqual([])
@@ -164,7 +164,7 @@ test("a newly created unsaved .optim uploads without creating a local file or re
   const editor = page.getByRole("textbox", { name: `Edit ${name}`, exact: true })
   await editor.fill(content)
   await page.route("**/api/runs/optimizer", (route) => route.fulfill({ json: completed }))
-  await page.getByRole("button", { name: "Optimize", exact: true }).click()
+  await page.getByRole("button", { name: "Performance", exact: true }).click()
   await expect(page.getByLabel("Run output")).toHaveText(completed.output)
   await expect(editor).toHaveValue(content)
   await expect(page.locator(".editor-pane .badge")).toHaveText("Unsaved")
@@ -184,8 +184,8 @@ test("dismissing confirmation submits nothing", async ({ page }) => {
   page.removeAllListeners("dialog")
   let confirmations = 0
   page.on("dialog", (dialog) => { confirmations++; return dialog.dismiss() })
-  await page.getByRole("button", { name: "Optimize", exact: true }).click()
-  await expect(page.getByRole("button", { name: "Optimize", exact: true })).toBeEnabled()
+  await page.getByRole("button", { name: "Performance", exact: true }).click()
+  await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeEnabled()
   await expect(editor).toHaveValue("Unsaved instructions")
   await expect(page.locator(".editor-pane .badge")).toHaveText("Unsaved")
   expect(confirmations).toBe(1)
@@ -207,7 +207,7 @@ test("optimization is separate from a same-named file and preserves unsaved tabs
   await page.route("**/api/optimize", async (route) => { await held; await route.fulfill({ json: { id: running.id } }) })
   let finish = false
   await page.route("**/api/runs/optimizer", (route) => route.fulfill({ json: finish ? completed : running }))
-  await page.getByRole("button", { name: "Optimize", exact: true }).click()
+  await page.getByRole("button", { name: "Performance", exact: true }).click()
   await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled()
   await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
   await expect(page.getByRole("button", { name: "Save repo changes" })).toBeDisabled()
@@ -225,7 +225,7 @@ test("optimization is separate from a same-named file and preserves unsaved tabs
   await page.getByRole("tabpanel").getByRole("button", { name: /second\.md/ }).click()
   await page.getByRole("textbox", { name: "Edit second.md" }).fill("Unsaved second tab")
   finish = true
-  await expect(page.getByRole("button", { name: "Optimize", exact: true })).toBeEnabled()
+  await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeEnabled()
   await page.getByRole("button", { name: "Optimization", exact: true }).click()
   await expect(page.getByLabel("Run output")).toHaveText(completed.output)
   await expect(page.getByRole("textbox", { name: "Edit second.md" })).toHaveValue("Unsaved second tab")
@@ -256,7 +256,7 @@ test("Stop run cancels optimization through the shared endpoint and polls final 
   await expect(page.getByLabel("Run output")).toHaveText("Stopped manually")
   await expect(page.locator(".output-pane .badge")).toHaveText("cancelled")
   await expect(page.getByRole("button", { name: "Stop run", exact: true })).toBeHidden()
-  await expect(page.getByRole("button", { name: "Optimize", exact: true })).toBeEnabled()
+  await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeEnabled()
   expect(writes).toEqual([{ path: "/api/runs/optimizer/cancel", method: "POST", body: {} }])
 })
 
@@ -265,13 +265,13 @@ test("submission errors retain previous logs and allow retry", async ({ page }) 
   await page.getByRole("tabpanel").getByRole("button", { name: /objectives\.optim/ }).click()
   await page.getByRole("button", { name: "Optimization", exact: true }).click()
   await page.route("**/api/optimize", (route) => route.fulfill({ status: 409, json: { error: "No trusted .optim file found" } }))
-  await page.getByRole("button", { name: "Optimize", exact: true }).click()
+  await page.getByRole("button", { name: "Performance", exact: true }).click()
   await expect(page.getByRole("alert")).toContainText("No trusted .optim file found")
   await expect(page.getByLabel("Run output")).toHaveText(completed.output)
-  await expect(page.getByRole("button", { name: "Optimize", exact: true })).toBeEnabled()
+  await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeEnabled()
   await page.route("**/api/optimize", (route) => route.fulfill({ json: { id: running.id } }))
   await page.route("**/api/runs/optimizer", (route) => route.fulfill({ json: running }))
-  await page.getByRole("button", { name: "Optimize", exact: true }).click()
+  await page.getByRole("button", { name: "Performance", exact: true }).click()
   await expect(page.getByLabel("Run output")).toHaveText(running.output)
   await expect(page.getByRole("alert")).toBeHidden()
   expect(writes).toHaveLength(2)
@@ -285,7 +285,7 @@ test("poll and cancellation errors leave the optimizer recoverable", async ({ pa
     : route.fulfill({ json: { ...running, output: "Polling recovered" } }))
   await expect(page.getByRole("alert")).toContainText("Temporary poll failure")
   await expect(page.getByLabel("Run output")).toHaveText(running.output)
-  await expect(page.getByRole("button", { name: "Optimize", exact: true })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeDisabled()
   await expect(page.getByLabel("Run output")).toHaveText("Polling recovered")
   await page.route("**/api/runs/optimizer/cancel", (route) => route.fulfill({ status: 500, json: { error: "Cancellation unavailable" } }))
   await page.getByRole("button", { name: "Stop run" }).click()
@@ -299,7 +299,7 @@ test("reload restores the latest optimizer and resumes polling without opening a
   await page.reload()
   await expect(page.getByRole("button", { name: "Optimization", exact: true })).toHaveAttribute("aria-pressed", "true")
   await expect(page.getByLabel("Run output")).toHaveText(running.output)
-  await expect(page.getByRole("button", { name: "Optimize", exact: true })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeDisabled()
   await page.route("**/api/runs/optimizer", (route) => route.fulfill({ json: completed }))
   await expect(page.getByLabel("Run output")).toHaveText(completed.output)
   await expect(page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button")).toHaveCount(0)
@@ -323,31 +323,31 @@ test("failed initial recovery can be retried to restore polling and cancellation
   await expect(page.getByLabel("Run output")).toHaveText(running.output)
   await expect(page.getByRole("alert")).toBeHidden()
   await expect(page.getByRole("button", { name: "Stop run", exact: true })).toBeEnabled()
-  await expect(page.getByRole("button", { name: "Optimize", exact: true })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeDisabled()
   expect(writes).toEqual([])
 })
 
-test("Optimize is disabled when execution is off", async ({ page }) => {
+test("Performance is disabled when execution is off", async ({ page }) => {
   const { writes } = await workspace(page, { execution: false, latest: completed })
-  await expect(page.getByRole("button", { name: "Optimize", exact: true })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeDisabled()
   await page.getByRole("button", { name: "Optimization", exact: true }).click()
   await expect(page.getByLabel("Run output")).toHaveText(completed.output)
   expect(writes).toEqual([])
 })
 
-test("any recoverable file run blocks Optimize even after its tab closes", async ({ page }) => {
+test("any recoverable file run blocks Performance even after its tab closes", async ({ page }) => {
   await workspace(page, { fileRun: { ...fileOutput, recoverable: true } })
   await page.getByRole("tabpanel").getByRole("button", { name: /optimization/ }).click()
-  await expect(page.getByRole("button", { name: "Optimize", exact: true })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeDisabled()
   await page.getByRole("button", { name: "Close optimization", exact: true }).click()
-  await expect(page.getByRole("button", { name: "Optimize", exact: true })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeDisabled()
 })
 
 test("header and output controls fit narrow mobile screens", async ({ page }) => {
   await workspace(page, { latest: running })
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 844 })
-    for (const name of ["Optimize", "Optimization", "Stop run"]) {
+    for (const name of ["Performance", "Optimization", "Stop run"]) {
       const button = page.getByRole("button", { name, exact: true })
       await button.scrollIntoViewIfNeeded()
       await expect(button).toBeVisible()
