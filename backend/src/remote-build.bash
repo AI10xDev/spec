@@ -11,6 +11,7 @@ name=$6
 log="$name.out"
 mode=${7:-build}
 [[ $mode == build || $mode == repository-save || $mode == continue || $mode == optimize ]] || exit 125
+run_kind=$mode
 repository_probe=${8:-}
 session_id=${9:-}
 config_bytes=${10:-0}
@@ -64,6 +65,9 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 125' HUP INT TERM
 : > "$directory/$log"
+# Separate report identity from initial-build invocation evidence used by discovery.
+printf '%s\0%s\0%s\0%s\0' "$PWD" "$run_kind" "$name" "$directory/$log" > "$directory/provenance.tmp"
+mv -T -- "$directory/provenance.tmp" "$directory/provenance"
 [[ -z $session_id ]] || printf '%s\n' "$session_id" > "$directory/session-id"
 reject() {
     printf '[remote] %s\n' "$1" >> "$directory/$log"

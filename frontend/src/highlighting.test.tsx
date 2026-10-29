@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { renderToStaticMarkup } from "react-dom/server"
 import { highlightLog, highlightSpec, LogOutput } from "./highlighting"
+import { completionMarker } from "./completion-marker"
 
 describe("spec highlighting", () => {
   it("preserves every source character and logical line, including empty final lines", () => {
@@ -36,6 +37,37 @@ describe("spec highlighting", () => {
   it("distinguishes indented code blocks from ordinary task indentation", () => {
     const lines = highlightSpec("Example:\n\n    # shell comment\n    echo ok\n\nPending\n    # indented completed task")
     expect(lines.map((line) => line.kind)).toEqual([undefined, undefined, "code", "code", "code", undefined, "completed"])
+  })
+
+  it("agrees with marker eligibility on every line without changing source text", () => {
+    for (const value of [
+      "Example:\n\n    # comment\n\n\tmore code\nPending\n    # completed task",
+      "\t# code at start\nPending\n \tTask\n  # Done",
+      "````json\r\n# code\r\n```\r\n~~~~\r\n```` trailing\r\n````\r\n# Done",
+      "~~~\n\n    # code\n~~~\nPending",
+      "Example:\n\n    ```\nPending\n```bad`info\n# Done",
+      "## Example\n    # code\nPending\n    # Done",
+      "---\n    code\nPending\n* * *\n    code\nPending\n___\n    code",
+      "Example\n===\n    code\nPending\n--\n    code",
+      "```\n```\n    code\nPending\n~~~\n~~~\n\tcode",
+    ]) {
+      let offset = 0
+      const lines = highlightSpec(value)
+      lines.forEach((line) => {
+        const text = line.tokens.map((token) => token.text).join("")
+        expect(completionMarker(value, offset) === null).toBe(line.kind === "code")
+        expect(completionMarker(value, offset + text.length) === null).toBe(line.kind === "code")
+        offset += text.length + 1
+      })
+      expect(lines.map((line) => line.tokens.map((token) => token.text).join("")).join("\n")).toBe(value)
+    }
+  })
+
+  it("colors indented code after completed Markdown blocks without absorbing later tasks", () => {
+    for (const prefix of ["## Example", "---", "* * *", "___", "Example\n===", "Example\n--", "```\n```", "~~~\n~~~"]) {
+      const lines = highlightSpec(`${prefix}\n    # comment\nTasks:\n    # Done`)
+      expect(lines.slice(-3).map((line) => line.kind)).toEqual(["code", undefined, "completed"])
+    }
   })
 
   it("keeps very long unmatched inline syntax as a single plain token", () => {

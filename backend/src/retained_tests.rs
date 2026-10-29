@@ -487,6 +487,16 @@ async fn retained_optimization_requires_private_exact_initial_build_invocation()
             get(&state, &format!("{endpoint}/{good}/log")).await["output"],
             "hello"
         );
+        // Shipped initial builds have only invocation, not the new provenance file.
+        fs::remove_file(
+            root.path()
+                .join(format!(".spec-runs/run-{good}/provenance")),
+        )
+        .unwrap();
+        assert_eq!(
+            get(&state, &format!("{endpoint}/{good}/log")).await["output"],
+            "hello"
+        );
 
         for kind in [
             "optimizer",
@@ -600,6 +610,278 @@ async fn retained_optimization_requires_private_exact_initial_build_invocation()
         );
         assert!(!root.path().join(".spec-output").exists());
         assert!(state.jobs.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn retained_actual_run_kinds_keep_optimization_spec_separate_from_optimizer() {
+    for linked_workspace in [false, true] {
+        let (root, mut state) = fixture();
+        fs::write(root.path().join("optimization"), "spec").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        if linked_workspace {
+            let link = root.path().join("workspace-link");
+            symlink(root.path(), &link).unwrap();
+            state.remote.as_mut().unwrap().directory = link.to_str().unwrap().into();
+        }
+        fs::write(root.path().join(".bash_aliases"),
+            "spec() { printf 'ordinary report'; }\nopencode-source() { printf 'continued report'; }\n").unwrap();
+        let remote = state.remote.as_ref().unwrap();
+        let mut ordinary = Vec::new();
+        for kind in ["build", "continue", "repository-save", "optimize"] {
+            let id = Uuid::new_v4().to_string();
+            let payload = if kind == "optimize" {
+                "print('optimizer report')\n"
+            } else {
+                "context"
+            };
+            let mut command = match kind {
+                "build" => remote.command(payload.len(), &id, "optimization"),
+                "continue" => remote.continuation_command(
+                    payload.len(),
+                    &id,
+                    "optimization",
+                    "ses_Original123",
+                ),
+                "repository-save" => remote.repository_command(payload.len(), &id, "optimization"),
+                _ => remote.optimization_command(payload.len(), &id, "optimization", 2),
+            };
+            let mut child = command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(payload.as_bytes()).await.unwrap();
+            if kind == "optimize" {
+                stdin.write_all(b"{}").await.unwrap();
+            }
+            let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(stdin);
+            assert!(output.status.success(), "{kind}: {output:?}");
+            let directory = root.path().join(format!(".spec-runs/run-{id}"));
+            let record = directory.join("provenance");
+            assert_eq!(
+                fs::metadata(&record).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::read(&record).unwrap(),
+                format!(
+                    "{}\0{kind}\0optimization\0{}/.spec-runs/run-{id}/optimization.out\0",
+                    remote.directory, remote.directory
+                )
+                .as_bytes()
+            );
+            assert_eq!(directory.join("invocation").exists(), kind == "build");
+            let response = request(
+                state.clone(),
+                "POST",
+                "/api/analytics",
+                json!({"name": "optimization", "runId": id}),
+            )
+            .await;
+            if kind == "optimize" {
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+                assert!(
+                    super::json(response).await["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("optimizer output")
+                );
+            } else {
+                assert_eq!(response.status(), StatusCode::OK);
+                let report = super::json(response).await;
+                assert_eq!(
+                    report["report"]["output"],
+                    if kind == "continue" {
+                        "continued report"
+                    } else {
+                        "ordinary report"
+                    }
+                );
+                assert_eq!(report["report"]["continuable"], false);
+                assert_eq!(report["report"]["recoverable"], false);
+                ordinary.push(id.clone());
+                if kind == "continue" {
+                    let mut job = persisted_job(&id, remote.identity(), false);
+                    job.name = "optimization".into();
+                    recovery::persist(&state, &job).ok().unwrap();
+                    recovery::set_latest(&state, &job).ok().unwrap();
+                    let response = request(
+                        state.clone(),
+                        "POST",
+                        "/api/analytics",
+                        json!({"name": "optimization"}),
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::OK);
+                    assert_eq!(super::json(response).await["report"]["id"], id);
+                }
+            }
+        }
+        // An unrelated legacy run has no invocation or provenance and is not an error.
+        retained(root.path(), &Uuid::new_v4().to_string(), "other.md");
+        let response = request(
+            state.clone(),
+            "POST",
+            "/api/analytics",
+            json!({"name": "optimization", "browse": true}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let choices = super::json(response).await;
+        assert_eq!(choices["report"], Value::Null);
+        assert_eq!(choices["runs"].as_array().unwrap().len(), 3);
+        for id in ordinary {
+            assert!(
+                choices["runs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|run| run["id"] == id)
+            );
+        }
+        assert!(state.jobs.lock().unwrap().is_empty());
+        assert!(!*state.recovered.lock().unwrap());
+        assert!(!root.path().join("must-not-launch").exists());
+    }
+}
+
+#[tokio::test]
+async fn retained_ambiguous_legacy_optimization_warns_on_browse_and_rejects_selection() {
+    let (root, state) = fixture();
+    fs::write(root.path().join("optimization"), "spec").unwrap();
+    for marker in ["session-id", "report.jsonl"] {
+        let id = Uuid::new_v4().to_string();
+        let directory = retained(root.path(), &id, "optimization");
+        fs::write(directory.join(marker), "legacy metadata").unwrap();
+        let response = request(
+            state.clone(),
+            "POST",
+            "/api/analytics",
+            json!({"name": "optimization", "runId": id}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let error = super::json(response).await;
+        let message = error["error"].as_str().unwrap();
+        assert!(message.contains(&id));
+        assert!(message.contains("ambiguous legacy provenance"));
+        assert!(message.contains("inspect the original retained log manually"));
+    }
+    retained(root.path(), &Uuid::new_v4().to_string(), "unrelated.md");
+    fs::write(
+        root.path().join("optimization.out"),
+        "must not silently substitute",
+    )
+    .unwrap();
+    for input in [
+        json!({"name": "optimization"}),
+        json!({"name": "optimization", "browse": true}),
+    ] {
+        let response = request(state.clone(), "POST", "/api/analytics", input).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let choices = super::json(response).await;
+        assert_eq!(choices["report"], Value::Null);
+        assert_eq!(choices["runs"], json!([]));
+        assert!(choices["warnings"][0].as_str().unwrap().contains("omitted"));
+    }
+    assert!(!root.path().join(".spec-output").exists());
+}
+
+#[tokio::test]
+async fn retained_provenance_is_private_exact_and_never_bypassed_by_legacy_invocation() {
+    for name in ["optimization", "a.md"] {
+        for kind in [
+            "workspace",
+            "name",
+            "log",
+            "kind",
+            "trailing",
+            "large",
+            "mode",
+            "symlink",
+            "hardlink",
+            "fifo",
+            "directory",
+        ] {
+            let (root, state) = fixture();
+            fs::write(root.path().join(name), "spec").unwrap();
+            let id = Uuid::new_v4().to_string();
+            let directory = retained(root.path(), &id, name);
+            let mut fields = [
+                root.path().to_str().unwrap().to_owned(),
+                "build".into(),
+                name.into(),
+                directory
+                    .join(format!("{name}.out"))
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                String::new(),
+            ];
+            let invocation = directory.join("invocation");
+            fs::write(&invocation, fields.join("\0")).unwrap();
+            fs::set_permissions(&invocation, fs::Permissions::from_mode(0o600)).unwrap();
+            match kind {
+                "workspace" => fields[0].push_str("/other"),
+                "name" => fields[2] = "other".into(),
+                "log" => fields[3].push_str(".other"),
+                "kind" => fields[1] = "unknown".into(),
+                "trailing" => fields[4] = "extra".into(),
+                _ => {}
+            }
+            let record = directory.join("provenance");
+            fs::write(&record, fields.join("\0")).unwrap();
+            fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
+            match kind {
+                "large" => File::options()
+                    .write(true)
+                    .open(&record)
+                    .unwrap()
+                    .set_len(16385)
+                    .unwrap(),
+                "mode" => fs::set_permissions(&record, fs::Permissions::from_mode(0o644)).unwrap(),
+                "symlink" => {
+                    fs::remove_file(&record).unwrap();
+                    symlink(&invocation, &record).unwrap();
+                }
+                "hardlink" => fs::hard_link(&record, directory.join("linked")).unwrap(),
+                "fifo" => {
+                    fs::remove_file(&record).unwrap();
+                    nix::unistd::mkfifo(
+                        &record,
+                        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+                    )
+                    .unwrap();
+                }
+                "directory" => {
+                    fs::remove_file(&record).unwrap();
+                    fs::create_dir(&record).unwrap();
+                }
+                _ => {}
+            }
+            for input in [
+                json!({"name": name, "runId": id}),
+                json!({"name": name, "browse": true}),
+            ] {
+                let response = request(state.clone(), "POST", "/api/analytics", input).await;
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{name}: {kind}");
+            }
+        }
     }
 }
 

@@ -25,6 +25,8 @@ pub struct RetainedRun {
 pub struct RetainedRuns {
     pub runs: Vec<RetainedRun>,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -366,7 +368,8 @@ impl Remote {
                 super::analytics::MAX_REPORT
             } else {
                 super::MAX_OUTPUT
-            }) * 6 + 4096
+            }) * 6
+                + 4096
         } else {
             16384
         };

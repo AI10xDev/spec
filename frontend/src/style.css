@@ -329,6 +329,11 @@ input::placeholder { color: var(--subtle); opacity: 1; }
 .chart-axis { stroke: var(--subtle); fill: none; }
 .chart-line { stroke: var(--accent); stroke-width: 2; fill: none; }
 .chart-dot, .diagnostic-chart rect { fill: var(--accent); }
+@media (forced-colors: active) {
+  .analytics-dashboard svg text { fill: CanvasText; }
+  .analytics-dashboard .chart-axis, .analytics-dashboard .chart-line { stroke: CanvasText; }
+  .analytics-dashboard .chart-dot, .analytics-dashboard .diagnostic-chart rect { fill: CanvasText; }
+}
 .analytics-dashboard details { font-size: 12px; color: var(--muted); }
 .analytics-dashboard summary { cursor: pointer; }
 .analytics-dashboard code { overflow-wrap: anywhere; }

@@ -40,7 +40,7 @@ Rebuild and restart the local server, then reload the browser to use the updated
 
 The output pane displays available stdout/stderr and explanations. It does **not** request or expose hidden model chain-of-thought.
 
-Read the [original workspace feature guide](docs/FEATURES.md), [code review](docs/REVIEW.md), [security notes](docs/SECURITY.md), and [source collection notes](archive/README.md). This README and the linked workflow guides cover the newer execution and AI features.
+Read the [current code review and feature report (2026-10-28)](docs/CODE_REVIEW_2026-10-28.md), [original workspace feature guide](docs/FEATURES.md), [historical code review](docs/REVIEW.md), [security notes](docs/SECURITY.md), and [source collection notes](archive/README.md). This README and the linked workflow guides cover the newer execution and AI features.
 
 ## Quick start
 

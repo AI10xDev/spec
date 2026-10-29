@@ -268,7 +268,14 @@ opencode-source() {
     names.sort();
     assert_eq!(
         names,
-        ["a.md.out", "invocation", "lease", "session-id", "status"]
+        [
+            "a.md.out",
+            "invocation",
+            "lease",
+            "provenance",
+            "session-id",
+            "status"
+        ]
     );
     let session = remote.session_id(&id, "a.md").await.unwrap();
     assert_eq!(session, "ses_InitialRoot");

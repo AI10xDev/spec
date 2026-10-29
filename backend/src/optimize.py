@@ -281,12 +281,30 @@ def config_path(invocation):
 
 @contextmanager
 def project_lock(project):
+    @contextmanager
+    def private(path, directory=False, parent=None, limit=16384):
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        if directory:
+            flags |= os.O_DIRECTORY
+        handle = os.open(path, flags, dir_fd=parent)
+        try:
+            info = os.fstat(handle)
+            if (info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != (0o700 if directory else 0o600)
+                    or (not directory and (not stat.S_ISREG(info.st_mode)
+                                           or info.st_nlink != 1 or info.st_size > limit))):
+                raise ValueError(f"unsafe prior harness storage: {path}")
+            yield handle
+        finally:
+            os.close(handle)
+
     # Match remote-build.bash: Git subdirectories share a worktree registry;
     # linked worktrees and non-Git projects have separate lock scopes.
     env = os.environ.copy()
     for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
         env.pop(key, None)
     directory = project / ".spec-runs"
+    registry = False
     try:
         probe = subprocess.run(["git", "rev-parse", "--is-inside-work-tree", "--absolute-git-dir"],
                                cwd=project, env=env, stdout=subprocess.PIPE,
@@ -296,6 +314,7 @@ def project_lock(project):
     else:
         if probe.returncode == 0 and probe.stdout.startswith(b"true\n"):
             directory = Path(os.fsdecode(probe.stdout[5:].rstrip(b"\n"))).resolve(strict=True) / "spec-harness"
+            registry = True
     directory.mkdir(mode=0o700, exist_ok=True)
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
@@ -309,6 +328,46 @@ def project_lock(project):
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:
                 raise OptimizeError(f"another harness is active for target project: {project}") from error
+            # A free lock does not prove completion after a supervisor crash.
+            # Lock reuse skips this scan: the launcher already checked admission,
+            # and its own current run is intentionally still unresolved.
+            roots = [(directory, registry)]
+            if registry:
+                roots.append((project / ".spec-runs", False))
+            for root, records in roots:
+                try:
+                    with private(root, directory=True) as parent, os.scandir(parent) as entries:
+                        for entry in entries:
+                            if not entry.name.startswith("run-"):
+                                continue
+                            record = root / entry.name
+                            try:
+                                prior = record
+                                if records:
+                                    with private(entry.name, parent=parent) as handle:
+                                        fields = os.read(handle, 16385).split(b"\0")
+                                    if (len(fields) not in (2, 3) or fields[-1] != b""
+                                            or not fields[0].startswith(b"/")
+                                            or (len(fields) == 3 and fields[1] not in
+                                                (b"build", b"repository-save", b"optimize"))):
+                                        raise ValueError("invalid harness registry record")
+                                    prior = os.fsdecode(fields[0])
+                                with private(prior, directory=True) as run:
+                                    with private("status", parent=run, limit=4) as handle:
+                                        status = os.read(handle, 5)
+                                if (not re.fullmatch(rb"(0|[1-9][0-9]{0,2})\n?", status)
+                                        or int(status) > 255):
+                                    raise ValueError("invalid terminal status")
+                            except (OSError, ValueError) as error:
+                                # A completing supervisor may retire its record.
+                                if not os.path.lexists(record):
+                                    continue
+                                raise OptimizeError(
+                                    f"prior harness completion is unresolved at {record}; "
+                                    f"inspect that session before retrying ({error})") from error
+                except FileNotFoundError:
+                    if os.path.lexists(root):
+                        raise OptimizeError(f"unsafe target run storage: {root}")
         yield
     finally:
         os.close(fd)

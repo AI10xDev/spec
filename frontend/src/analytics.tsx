@@ -44,6 +44,7 @@ export function Analytics({ api, active, onClose }: { api: Api; active: string; 
   const [source, setSource] = useState<Report | null>(null)
   const [dashboard, setDashboard] = useState<Dashboard | null>(null)
   const [error, setError] = useState("")
+  const [browseError, setBrowseError] = useState("")
   const [loading, setLoading] = useState(true)
   const specs = files.filter((file) => !file.endsWith(".out") && !file.endsWith(".eval") && !file.endsWith(".optim"))
 
@@ -70,17 +71,18 @@ export function Analytics({ api, active, onClose }: { api: Api; active: string; 
 
   useEffect(() => { if (dashboard) heading.current?.focus() }, [dashboard])
 
-  async function analyse(event: React.FormEvent) {
-    event.preventDefault()
+  async function analyse(browse = false) {
     if (!name || submitting.current) return
     submitting.current = true
     const current = ++request.current
     setLoading(true)
-    setError("")
+    if (browse) setBrowseError("")
+    else setError("")
     try {
-      const source = await api<Report>("/analytics", { name, ...(runId ? { runId } : {}) })
+      const source = await api<Report>("/analytics", { name, ...(browse ? { browse: true } : runId ? { runId } : {}) })
       if (current !== request.current) return
       setSource(source)
+      if (browse) { setRunId(""); return }
       if (!source.report) return
       const report = source.report
       const warnings = [...source.warnings]
@@ -106,7 +108,7 @@ export function Analytics({ api, active, onClose }: { api: Api; active: string; 
       if (current !== request.current) return
       setDashboard({ name, report, metrics, checks, warnings, evalName, revision, digest: Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("") })
     } catch (error) {
-      if (current === request.current) setError(error instanceof Error ? error.message : String(error))
+      if (current === request.current) (browse ? setBrowseError : setError)(error instanceof Error ? error.message : String(error))
     } finally {
       if (current === request.current) { submitting.current = false; setLoading(false) }
     }
@@ -114,21 +116,23 @@ export function Analytics({ api, active, onClose }: { api: Api; active: string; 
 
   return <dialog ref={dialog} className={`analytics-dialog ${dashboard ? "analytics-wide" : ""}`} aria-labelledby="analytics-title" onCancel={onClose}>
     <header className="analytics-heading"><div><span className="eyebrow">READ-ONLY / EVALUATION</span><h2 id="analytics-title" ref={heading} tabIndex={-1}>{dashboard ? `Analytics: ${dashboard.name}` : "Which spec would you like to analyse?"}</h2></div><button type="button" onClick={onClose} aria-label="Close analytics">Close</button></header>
-    {!dashboard ? <form className="analytics-select" onSubmit={(event) => void analyse(event)} aria-busy={loading}>
+    {!dashboard ? <form className="analytics-select" onSubmit={(event) => { event.preventDefault(); void analyse() }} aria-busy={loading}>
       <p>Review a saved spec's .out report. Analytics never reruns the spec or executes .eval instructions. Unsaved editor changes are not included.</p>
       <label htmlFor="analytics-spec">Spec to analyse</label>
       <select id="analytics-spec" required disabled={loading} value={name} onChange={(event) => {
         const name = event.target.value
-        setName(name); setEvalName(files.includes(`${name}.eval`) ? `${name}.eval` : ""); setRunId(""); setSource(null); setError("")
+        setName(name); setEvalName(files.includes(`${name}.eval`) ? `${name}.eval` : ""); setRunId(""); setSource(null); setError(""); setBrowseError("")
       }}><option value="">Choose a saved spec</option>{specs.map((file) => <option key={file}>{file}</option>)}</select>
       {!loading && !specs.length && <p>No saved specs available. Save a spec before opening analytics.</p>}
       <label htmlFor="analytics-eval">Evaluation spec (.eval, optional)</label>
       <select id="analytics-eval" disabled={loading} value={evalName} onChange={(event) => setEvalName(event.target.value)}><option value="">Dashboard only</option>{files.filter((file) => file.endsWith(".eval")).map((file) => <option key={file}>{file}</option>)}</select>
       <p>Defaults to &lt;spec filename&gt;.eval when present. Only version 1 JSON with kind "eval" and a matching spec is accepted.</p>
+      <button type="button" disabled={loading || !name} onClick={() => void analyse(true)}>Browse retained runs</button>
       {!!source?.runs.length && <><label htmlFor="analytics-run">Retained run</label><select id="analytics-run" required disabled={loading} value={runId} onChange={(event) => setRunId(event.target.value)}><option value="">Choose a session report</option>{source.runs.map((run) => <option key={run.id} value={run.id}>{run.id} / {new Date(run.modified * 1000).toLocaleString()}</option>)}</select></>}
       {source?.warnings.map((warning, index) => <p key={index} role="alert" className="analytics-warning">{warning}</p>)}
       {source && !source.report && !source.runs.length && <p role="alert" className="analytics-warning">No report available. If this spec has never been run, run it first; otherwise check the output location or retained logs.</p>}
       {error && <p role="alert" className="error">{error}</p>}
+      {browseError && <p role="alert" className="error">{browseError}</p>}
       <button className="primary" disabled={loading || !name}>{loading ? "Loading analytics..." : "Open analytics"}</button>
     </form> : <div className="analytics-dashboard">
       <div className="analytics-source"><p><strong>{dashboard.name}.out</strong><br />Run: {dashboard.report.id} / {dashboard.report.status}</p><button onClick={() => { setDashboard(null); setSource(null); setRunId("") }}>Choose another spec or run</button></div>

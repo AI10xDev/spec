@@ -7,6 +7,8 @@ pub(super) const MAX_REPORT: usize = 8 * 1024 * 1024;
 pub(super) struct Input {
     name: String,
     run_id: Option<String>,
+    #[serde(default)]
+    browse: bool,
 }
 
 #[derive(Serialize)]
@@ -20,8 +22,15 @@ pub(super) async fn report(
     State(app): State<App>,
     Json(input): Json<Input>,
 ) -> Result<Json<Analysis>> {
-    let Input { name, run_id } = input;
+    let Input {
+        name,
+        run_id,
+        browse,
+    } = input;
     validate(&name)?;
+    if browse && run_id.is_some() {
+        return Err(invalid("Choose either retained browsing or a run ID"));
+    }
     if let Some(id) = &run_id
         && !Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == *id)
     {
@@ -37,7 +46,7 @@ pub(super) async fn report(
     };
     if app.remote.is_some() || associated.is_some() || run_id.is_some() {
         let remote = retained_remote(&app, &name)?;
-        if let Some(id) = run_id.or(associated) {
+        if let Some(id) = run_id.or(associated).filter(|_| !browse) {
             result.report = Some(
                 remote
                     .retained(&name, Some(&id), true)
@@ -50,19 +59,27 @@ pub(super) async fn report(
                 .await
                 .map_err(|error| Error(StatusCode::BAD_GATEWAY, error))?;
             result.runs = listed.runs;
+            result.warnings = listed.warnings;
             if listed.truncated {
                 result.warnings.push(
                     "Retained run choices are incomplete because the lookup limit was reached."
                         .into(),
                 );
             }
-            if !result.runs.is_empty() || listed.truncated {
+            if browse || !result.runs.is_empty() || listed.truncated || !result.warnings.is_empty()
+            {
                 result.warnings.push(
-                    "No associated run; select a retained run to evaluate its report.".into(),
+                    "Select a retained run to evaluate its report; this does not change the associated run.".into(),
                 );
                 return Ok(Json(result));
             }
         }
+    }
+    if browse {
+        result.warnings.push(
+            "No remote retained reports available. Default report selection is unchanged.".into(),
+        );
+        return Ok(Json(result));
     }
     if result.report.is_none() {
         let path = app.root.join(format!("{name}.out"));

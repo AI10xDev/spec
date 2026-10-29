@@ -13,6 +13,14 @@ MAX_REPORT = 8388608
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 
 
+class NotSpecReport(ValueError):
+    pass
+
+
+class AmbiguousProvenance(ValueError):
+    pass
+
+
 @contextlib.contextmanager
 def private(parent, name, directory=False):
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -32,18 +40,34 @@ def private(parent, name, directory=False):
 
 def candidate(root, workspace, run_id, name, historical, full_report=False):
     with private(root, "run-" + run_id, True) as run:
-        if name == "optimization":
-            # Optimizers use this synthetic name too. Only an initial build's
-            # existing invocation record proves this is the ordinary spec.
-            workspace = os.path.normpath(workspace)
-            expected = b"\0".join(map(os.fsencode, (
-                workspace, "build", name,
-                os.path.join(workspace, ".spec-runs", "run-" + run_id, name + ".out"), "")))
-            with private(run, "invocation") as invocation:
-                if os.fstat(invocation).st_size > 16384 or os.read(invocation, 16385) != expected:
-                    raise ValueError("retained log lacks matching initial-build invocation")
         # Never substitute output.log, including when the selected log disappears.
         with private(run, name + ".out") as log:
+            workspace = os.path.normpath(workspace)
+            expected = [os.fsencode(workspace), b"build", os.fsencode(name),
+                        os.fsencode(os.path.join(workspace, ".spec-runs", "run-" + run_id, name + ".out")), b""]
+            try:
+                with private(run, "provenance") as provenance:
+                    fields = os.read(provenance, 16385).split(b"\0")
+                    if (os.fstat(provenance).st_size > 16384 or len(fields) != 5
+                            or fields[1] not in (b"build", b"continue", b"repository-save", b"optimize")
+                            or fields[0] != expected[0] or fields[2:] != expected[2:]):
+                        raise ValueError("retained log lacks matching name/run-kind provenance")
+                    if fields[1] == b"optimize":
+                        raise NotSpecReport("optimizer output is not an ordinary spec report")
+            except FileNotFoundError:
+                if name == "optimization":
+                    # Shipped initial builds have concrete invocation evidence.
+                    # A session ID alone cannot distinguish old continuations.
+                    try:
+                        with private(run, "invocation") as invocation:
+                            if (os.fstat(invocation).st_size > 16384
+                                    or os.read(invocation, 16385) != b"\0".join(expected)):
+                                raise ValueError("retained log lacks matching initial-build invocation")
+                    except FileNotFoundError:
+                        raise AmbiguousProvenance(
+                            "Retained run " + run_id + " has ambiguous legacy provenance for optimization. "
+                            "Choose a report with verified name/run-kind provenance or a legacy initial-build invocation; "
+                            "inspect the original retained log manually. A session ID is not sufficient proof.") from None
             try:
                 with private(run, "status") as status:
                     code = os.read(status, 5)
@@ -115,6 +139,7 @@ def main():
             if run_id:
                 return candidate(root, workspace, run_id, name, True, full_report)
             runs = []
+            warnings = []
             truncated = False
             deadline = time.monotonic() + 5
             # scandir is lazy: neither directory size nor invalid entries can cause
@@ -128,6 +153,12 @@ def main():
                         continue
                     try:
                         runs.append(candidate(root, workspace, entry.name[4:], name, False, full_report))
+                    except NotSpecReport:
+                        continue
+                    except AmbiguousProvenance as error:
+                        if full_report and not warnings:
+                            warnings.append("Some retained reports were omitted: " + str(error))
+                        continue
                     except (OSError, ValueError) as error:
                         # Analytics must not misrepresent unreadable storage as no history.
                         if full_report and not (isinstance(error, FileNotFoundError)
@@ -135,7 +166,7 @@ def main():
                             raise
                         continue
             runs.sort(key=lambda run: (-run["modified"], run["id"]))
-            return {"runs": runs, "truncated": truncated}
+            return {"runs": runs, "truncated": truncated, **({"warnings": warnings} if warnings else {})}
     finally:
         os.close(workspace_fd)
 

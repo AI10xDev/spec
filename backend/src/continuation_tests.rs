@@ -243,7 +243,9 @@ async fn continuation_invalid_feedback_is_rejected_before_ssh_or_persistence() {
     assert!(!root.path().join("launches").exists());
     assert_eq!(state.jobs.lock().unwrap().len(), 1);
     assert_eq!(
-        fs::read_dir(root.path().join(".spec-runs")).unwrap().count(),
+        fs::read_dir(root.path().join(".spec-runs"))
+            .unwrap()
+            .count(),
         1
     );
     assert_eq!(recovery::latest(&state, "a.md").ok().unwrap(), Some(id));
@@ -339,10 +341,16 @@ async fn continuation_concurrent_duplicate_is_rejected_and_new_run_can_be_polled
     let path = format!("/api/runs/{id}/continue");
     let (first, second) = tokio::join!(
         request(
-            state.clone(), "POST", &path, body!({"message":"Custom feedback"})
+            state.clone(),
+            "POST",
+            &path,
+            body!({"message":"Custom feedback"})
         ),
         request(
-            state.clone(), "POST", &path, body!({"message":"Custom feedback"})
+            state.clone(),
+            "POST",
+            &path,
+            body!({"message":"Custom feedback"})
         )
     );
     let (accepted, rejected) = if first.status() == StatusCode::OK {

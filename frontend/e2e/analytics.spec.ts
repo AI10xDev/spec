@@ -272,6 +272,68 @@ test("an eval read failure remains retryable rather than being classified as a n
   await state.unchanged()
 })
 
+for (const missing of [false, true]) {
+  test(`explicit retained browsing works with ${missing ? "a missing" : "an available"} associated report without replacing it`, async ({ page }) => {
+    const state = await workspace(page)
+    const alternative = "22222222-2222-4222-8222-222222222222"
+    await page.route("**/api/analytics", (route) => {
+      const body = route.request().postDataJSON()
+      if (body.browse) return route.fulfill({ json: { report: null, runs: [{ id: alternative, modified: 1_700_000_000 }], warnings: ["Select a retained run; this does not change the associated run."] } })
+      if (body.runId === alternative) return route.fulfill({ json: { report: { ...report, id: alternative }, runs: [], warnings: [] } })
+      if (missing) return route.fulfill({ status: 502, json: { error: "Associated report missing; retained lookup failed" } })
+      return route.fulfill({ json: { report, runs: [], warnings: [] } })
+    })
+    let dialog = await chooser(page)
+    await dialog.getByRole("button", { name: "Open analytics", exact: true }).click()
+    if (missing) {
+      await expect(dialog.getByRole("alert")).toContainText("Associated report missing")
+    } else {
+      const dashboard = await charts(page)
+      await expect(dashboard).toContainText(`Run: ${report.id} / completed`)
+      await dashboard.getByRole("button", { name: "Choose another spec or run" }).click()
+      dialog = page.getByRole("dialog", { name: "Which spec would you like to analyse?", exact: true })
+    }
+    await dialog.getByRole("button", { name: "Browse retained runs", exact: true }).click()
+    const select = dialog.getByLabel("Retained run", { exact: true })
+    await expect(select).toHaveValue("")
+    await expect(select.locator("option")).toHaveCount(2)
+    await expect(dialog.getByRole("img")).toHaveCount(0)
+    if (missing) await expect(dialog.getByRole("alert").filter({ hasText: "Associated report missing" })).toBeVisible()
+    await select.selectOption(alternative)
+    await dialog.getByRole("button", { name: "Open analytics", exact: true }).click()
+    const dashboard = await charts(page)
+    await expect(dashboard).toContainText(`Run: ${alternative} / completed`)
+    await dashboard.getByRole("button", { name: "Choose another spec or run" }).click()
+    await dialog.getByRole("button", { name: "Open analytics", exact: true }).click()
+    if (missing) await expect(dialog.getByRole("alert")).toContainText("Associated report missing")
+    else await expect(await charts(page)).toContainText(`Run: ${report.id} / completed`)
+    expect(state.requests.map((request) => request.body)).toEqual([
+      { name: "foo.md" }, { name: "foo.md", browse: true },
+      { name: "foo.md", runId: alternative }, { name: "foo.md" },
+    ])
+    await state.unchanged()
+  })
+}
+
+test("retained browsing failures stay visible and retry does not select a report", async ({ page }) => {
+  const state = await workspace(page)
+  let attempts = 0
+  await page.route("**/api/analytics", (route) => ++attempts === 1
+    ? route.fulfill({ status: 502, json: { error: "Retained storage is unavailable" } })
+    : route.fulfill({ json: { report: null, runs: [], warnings: ["Some retained reports were omitted: ambiguous legacy provenance. Inspect the original retained log manually."] } }))
+  const dialog = await chooser(page)
+  const browse = dialog.getByRole("button", { name: "Browse retained runs", exact: true })
+  await browse.click()
+  await expect(dialog.getByRole("alert")).toContainText("Retained storage is unavailable")
+  await browse.click()
+  await expect(dialog.getByRole("alert").filter({ hasText: "ambiguous legacy provenance" })).toBeVisible()
+  await expect(dialog.getByRole("alert").filter({ hasText: "Retained storage is unavailable" })).toHaveCount(0)
+  await expect(dialog.getByRole("img")).toHaveCount(0)
+  await expect(dialog.getByLabel("Spec to analyse", { exact: true })).toHaveValue("foo.md")
+  expect(state.requests.map((request) => request.body)).toEqual([{ name: "foo.md", browse: true }, { name: "foo.md", browse: true }])
+  await state.unchanged()
+})
+
 for (const variant of [
   { name: "truncated", truncated: true, status: "completed" },
   { name: "active", truncated: false, status: "running" },

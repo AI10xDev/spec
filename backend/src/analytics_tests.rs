@@ -100,6 +100,7 @@ async fn analytics_rejects_unsafe_names_ids_and_files_before_ssh() {
         json!({"name": "a.md", "runId": "local"}),
         json!({"name": "a.md", "runId": "../../bad"}),
         json!({"name": "a.md", "runId": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"}),
+        json!({"name": "a.md", "runId": Uuid::new_v4().to_string(), "browse": true}),
     ] {
         assert_eq!(
             request(state.clone(), "POST", ENDPOINT, input)
@@ -213,6 +214,11 @@ async fn analytics_prefers_verified_association_without_mutating_it() {
     let report = evaluate(&state, json!({"name": "a.md"})).await;
     assert_eq!(report["report"]["id"], id);
     assert_eq!(report["report"]["output"], "retained output");
+    let choices = evaluate(&state, json!({"name": "a.md", "browse": true})).await;
+    assert_eq!(choices["report"], Value::Null);
+    let runs = choices["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().any(|run| run["id"] == other));
     assert_eq!(
         evaluate(&state, json!({"name": "a.md", "runId": other})).await["report"]["id"],
         other
@@ -248,6 +254,60 @@ async fn analytics_prefers_verified_association_without_mutating_it() {
             .await
             .status(),
         StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[tokio::test]
+async fn analytics_missing_association_can_browse_without_fallback_or_relinking() {
+    let (root, state) = fixture();
+    let missing = Uuid::new_v4().to_string();
+    let other = Uuid::new_v4().to_string();
+    retained(root.path(), &other, "a.md");
+    fs::write(root.path().join("a.md.out"), "not a replacement").unwrap();
+    let job = persisted_job(&missing, state.remote.as_ref().unwrap().identity(), false);
+    recovery::persist(&state, &job).ok().unwrap();
+    recovery::set_latest(&state, &job).ok().unwrap();
+    let record = root.path().join(format!(".spec-output/{missing}.json"));
+    let before = fs::read(&record).unwrap();
+    for _ in 0..2 {
+        let failure = request(state.clone(), "POST", ENDPOINT, json!({"name": "a.md"})).await;
+        assert_eq!(failure.status(), StatusCode::BAD_GATEWAY);
+        assert!(
+            super::json(failure).await["error"]
+                .as_str()
+                .unwrap()
+                .contains(&missing)
+        );
+        let choices = evaluate(&state, json!({"name": "a.md", "browse": true})).await;
+        assert_eq!(choices["report"], Value::Null);
+        assert_eq!(choices["runs"][0]["id"], other);
+        assert_eq!(
+            evaluate(&state, json!({"name": "a.md", "runId": other})).await["report"]["id"],
+            other
+        );
+    }
+    assert_eq!(
+        recovery::latest(&state, "a.md").ok().flatten().unwrap(),
+        missing
+    );
+    assert_eq!(fs::read(record).unwrap(), before);
+    assert!(state.jobs.lock().unwrap().is_empty());
+    assert!(!*state.recovered.lock().unwrap());
+    assert!(!root.path().join("must-not-launch").exists());
+}
+
+#[tokio::test]
+async fn analytics_local_browsing_never_selects_a_local_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("a.md"), "spec").unwrap();
+    fs::write(root.path().join("a.md.out"), "local").unwrap();
+    let state = app(root.path());
+    let choices = evaluate(&state, json!({"name": "a.md", "browse": true})).await;
+    assert_eq!(choices["report"], Value::Null);
+    assert_eq!(choices["runs"], json!([]));
+    assert_eq!(
+        evaluate(&state, json!({"name": "a.md"})).await["report"]["id"],
+        "local"
     );
 }
 

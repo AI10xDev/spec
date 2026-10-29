@@ -1,3 +1,5 @@
+import { codeBlockClassifier } from "./code-block"
+
 export type Metric = { name: string; samples: { line: number; value: number }[] }
 export type Metrics = { metrics: Metric[]; lines: number; errors: number; warnings: number; diagnostics: string[]; incomplete: boolean }
 export type Check = { name: string; metric: string; aggregate: "last" | "mean" | "min" | "max" | "sum" | "count"; operator: ">=" | "<=" | ">" | "<" | "=="; threshold: number }
@@ -37,6 +39,7 @@ export function extractMetrics(output: string): Metrics {
   let samples = 0
   let invalid = 0
   let limited = false
+  const inCodeBlock = codeBlockClassifier()
   const add = (name: string, value: unknown, line: number) => {
     if (typeof value !== "number" || !Number.isFinite(value) || !name.trim() || name.length > 160) { invalid++; return }
     if (samples >= 100_000 || (!metrics.has(name) && metrics.size >= 32)) { limited = true; return }
@@ -46,12 +49,14 @@ export function extractMetrics(output: string): Metrics {
     samples++
   }
   for (const raw of output.split("\n")) {
-    const line = raw.replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").trim()
+    const text = raw.replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "")
+    const quoted = inCodeBlock(text)
+    const line = text.trim()
     if (!line) continue
     result.lines++
     if (/\b(?:error|failed|failure|fatal)\b/i.test(line)) result.errors++
     if (/\b(?:warn|warning)\b/i.test(line)) result.warnings++
-    if (!line.startsWith("{")) continue
+    if (quoted || !line.startsWith("{")) continue
     if (line.length > 64 * 1024) { limited = true; continue }
     let event: unknown
     try { event = JSON.parse(line) } catch { invalid++; continue }

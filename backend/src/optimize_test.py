@@ -273,6 +273,142 @@ class OptimizerTest(unittest.TestCase):
                 self.assertIn("command exited 7", event["error"])
                 subprocess.run(["flock", "--exclusive", "--nonblock", str(directory), "true"], check=True)
 
+    def test_external_target_unresolved_registry_prevents_work(self):
+        subprocess.run(["git", "init", "-q", str(self.project)], check=True)
+        self.record()
+        self.config([self.objective(
+            measure=python("from pathlib import Path; Path('measured').touch(); print(1)"),
+            command=python("from pathlib import Path; Path('changed').touch()"), patience=2)])
+        registry = self.project / ".git/spec-harness"
+        registry.mkdir(mode=0o700)
+        # A worktree registry may point into a different workspace/subdirectory.
+        prior = self.workspace / "prior session"
+        prior.mkdir(mode=0o700)
+        record = registry / "run-prior"
+        for mode in (b"build\0", b"repository-save\0", b"optimize\0", b""):
+            with self.subTest(mode=mode):
+                record.write_bytes(os.fsencode(prior) + b"\0" + mode)
+                record.chmod(0o600)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(optimize.run(self.logs, self.workspace, self.history), 1)
+                event = json.loads((self.logs / "report.jsonl").read_text().splitlines()[-1])
+                self.assertEqual(event["outcome"], "failed")
+                self.assertIn("completion is unresolved", event["error"])
+                self.assertIn(str(record), event["error"])
+                self.assertFalse((self.project / "measured").exists())
+                self.assertFalse((self.project / "changed").exists())
+                self.assertTrue(record.exists())
+        # Terminal failure is resolved too; success is not required for admission.
+        (prior / "status").write_bytes(b"130\n")
+        (prior / "status").chmod(0o600)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(optimize.run(self.logs, self.workspace, self.history), 0)
+        self.assertTrue((self.project / "measured").exists())
+        self.assertTrue((self.project / "changed").exists())
+        self.assertTrue(record.exists(), "admission must not delete prior evidence")
+
+    def test_external_target_rejects_unsafe_registry_records(self):
+        subprocess.run(["git", "init", "-q", str(self.project)], check=True)
+        registry = self.project / ".git/spec-harness"
+        registry.mkdir(mode=0o700)
+        prior = self.workspace / "prior session"
+        prior.mkdir(mode=0o700)
+        (prior / "status").write_bytes(b"0\n")
+        (prior / "status").chmod(0o600)
+        valid = os.fsencode(prior) + b"\0build\0"
+        cases = {"empty": b"", "relative": b"relative\0build\0",
+                 "missing-terminator": os.fsencode(prior),
+                 "unknown-mode": os.fsencode(prior) + b"\0unknown\0",
+                 "unterminated-mode": os.fsencode(prior) + b"\0build",
+                 "trailing": valid + b"extra\0", "oversized": b"x" * 16385,
+                 "public": valid, "symlink": valid, "hardlink": valid,
+                 "fifo": valid, "directory": valid}
+        for kind, content in cases.items():
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(dir=registry) as temp:
+                source = Path(temp) / "record"
+                source.write_bytes(content)
+                source.chmod(0o600)
+                record = registry / "run-prior"
+                if kind == "symlink":
+                    record.symlink_to(source)
+                elif kind == "hardlink":
+                    os.link(source, record)
+                elif kind == "fifo":
+                    os.mkfifo(record, 0o600)
+                elif kind == "directory":
+                    record.mkdir(mode=0o700)
+                else:
+                    source.rename(record)
+                    if kind == "public":
+                        record.chmod(0o644)
+                try:
+                    with self.assertRaisesRegex(optimize.OptimizeError, "completion is unresolved"):
+                        with optimize.project_lock(self.project):
+                            self.fail("unsafe registry record admitted")
+                finally:
+                    record.rmdir() if kind == "directory" else record.unlink()
+        with optimize.project_lock(self.project):
+            pass
+
+    def test_external_target_validates_legacy_run_completion(self):
+        for git in (False, True):
+            with self.subTest(git=git):
+                project = self.workspace / f"legacy-target-{git}"
+                project.mkdir()
+                if git:
+                    subprocess.run(["git", "init", "-q", str(project)], check=True)
+                runs = project / ".spec-runs"
+                runs.mkdir(mode=0o700)
+                prior = runs / "run-prior"
+                prior.mkdir(mode=0o700)
+                status = prior / "status"
+                for content in (None, b"", b"256\n", b"-1", b"00\n", b"0\nx", b"0" * 5):
+                    with self.subTest(content=content):
+                        if content is not None:
+                            status.write_bytes(content)
+                            status.chmod(0o600)
+                        with self.assertRaisesRegex(optimize.OptimizeError, "completion is unresolved"):
+                            with optimize.project_lock(project):
+                                self.fail("unresolved legacy run admitted")
+                for content in (b"0\n", b"1", b"124\n", b"125\n", b"130\n", b"255\n"):
+                    status.write_bytes(content)
+                    with optimize.project_lock(project):
+                        pass
+                for kind in ("public-status", "public-run", "symlink-status", "hardlink-status",
+                             "fifo-status", "symlink-run", "missing-run"):
+                    with self.subTest(kind=kind):
+                        saved = self.workspace / f"saved-{git}-{kind}"
+                        if kind == "public-status":
+                            status.chmod(0o644)
+                        elif kind == "public-run":
+                            prior.chmod(0o755)
+                        elif kind in ("symlink-run", "missing-run"):
+                            prior.rename(saved)
+                            prior.symlink_to(saved if kind == "symlink-run" else saved / "missing")
+                        else:
+                            status.rename(saved)
+                            if kind == "symlink-status":
+                                status.symlink_to(saved)
+                            elif kind == "hardlink-status":
+                                os.link(saved, status)
+                            else:
+                                os.mkfifo(status, 0o600)
+                        try:
+                            with self.assertRaisesRegex(optimize.OptimizeError, "completion is unresolved"):
+                                with optimize.project_lock(project):
+                                    self.fail("unsafe completion evidence admitted")
+                        finally:
+                            if kind == "public-status":
+                                status.chmod(0o600)
+                            elif kind == "public-run":
+                                prior.chmod(0o700)
+                            elif kind in ("symlink-run", "missing-run"):
+                                prior.unlink()
+                                saved.rename(prior)
+                            else:
+                                status.unlink()
+                                saved.rename(status)
+
     def test_supervisor_lock_reused_for_same_workspace_or_worktree(self):
         for scope in ("non-git", "git", "git-subdirectory"):
             with self.subTest(scope=scope):

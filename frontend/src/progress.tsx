@@ -39,8 +39,8 @@ export function taskProgress(output: string): Counts | null {
 export function BuildProgress({ output }: { output: Output }) {
   const counts = output.truncated ? null : taskProgress(output.output)
   const percent = counts ? Math.floor(100 * counts.completed / counts.total) : undefined
-  const running = output.status === "running"
-  const unavailable = output.status.startsWith("unavailable")
+  const unavailable = output.transportUnavailable || output.status.startsWith("unavailable")
+  const running = output.status === "running" && !unavailable
   const state = unavailable ? "Connection unavailable; progress may be stale."
     : running ? "Build in progress."
     : output.status === "completed" ? "Build turn ended."

@@ -52,12 +52,27 @@ project; contention fails without running project commands. Git overrides
 `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, and `GIT_COMMON_DIR` are ignored for
 lock scope resolution, as in the build harness.
 
+After acquiring an external target's lock, the optimizer also checks that
+worktree's persistent `spec-harness/run-*` records and the target project's legacy
+`.spec-runs/run-*` directories. A free lock alone is not completion evidence.
+Each prior session must have an owned, private, regular, single-link `status`
+file containing a terminal exit code in `0..255`; nonzero terminal exits are
+resolved too. Malformed records, missing status, symlinks, unsafe permissions,
+and oversized evidence refuse admission before config loading, model planning,
+measurements, or commands. Registry records support current operation modes and
+the older path-only format. Admission does not delete records or run evidence.
+An unresolved-session error identifies the offending record or run directory;
+inspect that session and establish that its work stopped before retrying. Do not
+delete evidence or invent a successful status merely to bypass this guard.
+
 The harness sets the internal `SPEC_OPTIM_WORKSPACE_LOCK` environment variable to
 the device/inode identity of the exclusive lock retained by its supervisor. A
 matching target reuses that protection instead of conflicting with its own
 supervisor; other targets acquire an additional lock. Do not set this variable
 for standalone invocations. It is removed from objective subprocess environments,
 and lock descriptors are not passed to those subprocesses.
+For a matching supervisor lock, the launcher has already checked admission, so
+the optimizer skips the prior-run scan rather than rejecting its own active run.
 Locks are advisory, not a sandbox. Normal completion, command failure, timeout,
 and handled cancellation finish command-descendant cleanup before releasing the
 target lock. An external target's additional lock is owned by the optimizer

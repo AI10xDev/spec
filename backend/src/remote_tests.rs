@@ -501,7 +501,7 @@ spec() {
     assert_eq!(fs::read_to_string(directory.join("status")).unwrap(), "7\n");
     assert!(root.path().join("wrote-all").exists());
     assert!(!snapshot.exists());
-    assert_eq!(fs::read_dir(directory).unwrap().count(), 4);
+    assert_eq!(fs::read_dir(directory).unwrap().count(), 5);
     let log = fs::read(directory.join("a.md.out")).unwrap();
     assert_eq!(log.len(), 8 * 1024 * 1024);
     assert!(log.starts_with(b"output after disconnect\n"));
@@ -988,7 +988,10 @@ async fn recovery_distinguishes_missing_and_unsafe_run_directories() {
         let error = remote.snapshot(&id, false, "a.md").await.unwrap_err();
         assert!(error.contains("unsafe remote run directory"), "{error}");
         assert!(error.contains("0700"), "{error}");
-        assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 }
@@ -1144,6 +1147,7 @@ async fn named_logs_preserve_and_quote_original_filenames_and_recover_without_me
             format!("{name}.out"),
             "invocation".into(),
             "lease".into(),
+            "provenance".into(),
             "status".into(),
         ];
         expected.sort();

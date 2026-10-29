@@ -61,4 +61,21 @@ describe("reported build progress", () => {
     expect(html).not.toContain("aria-valuenow")
     expect(html).toContain("truncated output")
   })
+
+  it("marks transport failures stale independently of harness status without discarding counts", () => {
+    for (const status of ["running", "completed", "unavailable", "failed (7)"]) {
+      const stale = { ...output, status, transportUnavailable: true }
+      const html = renderToStaticMarkup(<BuildProgress output={stale} />)
+      expect(html).toContain("progress may be stale")
+      expect(html).toContain('aria-valuenow="33"')
+      expect(html).not.toContain("Build in progress")
+      const unknown = renderToStaticMarkup(<BuildProgress output={{ ...stale, output: "Starting..." }} />)
+      expect(unknown).not.toContain("indeterminate")
+      expect(unknown).toContain('width:0%')
+      expect(stale.recoverable).toBe(true)
+    }
+    const recovered = renderToStaticMarkup(<BuildProgress output={{ ...output, transportUnavailable: false, output: "Starting..." }} />)
+    expect(recovered).toContain("indeterminate")
+    expect(recovered).not.toContain("progress may be stale")
+  })
 })

@@ -57,6 +57,43 @@ describe("evaluation spec validation", () => {
 })
 
 describe("report metric extraction", () => {
+  it.each([
+    (event: string) => `Example only; no benchmark was run.\n\`\`\`json\n${event}\n\`\`\``,
+    (event: string) => `  ~~~~json\r\n${event}\r\n  ~~~~\r`,
+    (event: string) => `Example:\n\n    ${event}\n`,
+    (event: string) => `\t${event}\n`,
+    (event: string) => `\x1b[32m\`\`\`json\x1b[0m\n${event}\n\`\`\``,
+    (event: string) => `> ${event}`,
+    ...["# Example", "## Example", "---", "* * *", "___", "Example\n===", "Example\n--", "```\n```", "~~~\n~~~"].map((prefix) => (event: string) => `${prefix}\n    ${event}`),
+  ])("never treats quoted examples as evidence or overrides the last real record %#", (quote) => {
+    const example = quote(record({ quality: 1 }))
+    const only = extractMetrics(example)
+    expect(only.metrics).toEqual([])
+    expect(only.incomplete).toBe(false)
+    expect(evaluate(suite, only, false)[0]).toMatchObject({ value: null, status: "inconclusive" })
+    const real = record({ quality: 0.5 })
+    const metrics = extractMetrics(`${example}\n${real}\n\n${example}`)
+    expect(metrics.metrics[0].samples.map(({ value }) => value)).toEqual([0.5])
+    expect(evaluate({ ...suite, checks: [{ ...check, aggregate: "last" }] }, metrics, false)[0]).toMatchObject({ value: 0.5, status: "fail" })
+    expect(metrics.incomplete).toBe(false)
+  })
+
+  it("ignores unclosed fences, short/mismatched closers and quoted optimizer events", () => {
+    const real = JSON.stringify({ event: "baseline", objective: "speed", score: 10 })
+    const example = JSON.stringify({ event: "final", objective: "speed", score: 99 })
+    for (const closer of ["```", "~~~~", "```` trailing"]) {
+      const metrics = extractMetrics(`${real}\n\`\`\`\`json\n${example}\n${closer}\n${record({ quality: 1 })}`)
+      expect(metrics.metrics).toEqual([{ name: "speed.score", samples: [{ line: 1, value: 10 }] }])
+      expect(metrics.incomplete).toBe(false)
+    }
+  })
+
+  it("preserves raw whitespace-padded records and text diagnostics, ignoring invalid quoted JSON", () => {
+    const metrics = extractMetrics(`  ${record({ quality: 0.8 })}  \r\nReport:\n    ${record({ quality: 1 })}\n\`\`\`json\n{broken ERROR WARNING\n${record({ quality: null })}\n${"{".padEnd(64 * 1024 + 1, "x")}\n\`\`\``)
+    expect(metrics.metrics).toEqual([{ name: "quality", samples: [{ line: 1, value: 0.8 }, { line: 3, value: 1 }] }])
+    expect(metrics).toMatchObject({ lines: 8, errors: 1, warnings: 1, diagnostics: [], incomplete: false })
+  })
+
   it("extracts explicit JSON measurements in nonempty-line order, stripping ANSI CSI styling", () => {
     const metrics = extractMetrics(`\nquality: 100; success; exit 0\n\n\x1b[32m${record({ quality: 0.8 })}\x1b[0m\nERROR and WARNING\n${record({ quality: 1, latency_ms: 10 })}\n`)
     expect(metrics).toEqual({

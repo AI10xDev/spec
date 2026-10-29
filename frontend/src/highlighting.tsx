@@ -1,30 +1,15 @@
 import type { CSSProperties } from "react"
+import { codeBlockClassifier } from "./code-block"
 
 type SpecToken = { text: string; kind?: string }
 type SpecLine = { tokens: SpecToken[]; kind?: string }
 
 // A source highlighter, not a Markdown renderer: delimiters and whitespace stay intact.
 export function highlightSpec(value: string): SpecLine[] {
-  let fence = ""
-  let indented = false
-  let previousBlank = true
+  const inCodeBlock = codeBlockClassifier()
   let inlineBudget = 4000
   return value.split("\n").map((text) => {
-    const blank = !text.trim()
-    const codeIndent = /^(?: {4}| {0,3}\t)/.test(text)
-    const inIndentedCode = !fence && ((codeIndent && (previousBlank || indented)) || (blank && indented))
-    previousBlank = blank
-    indented = inIndentedCode
-    if (inIndentedCode) return { tokens: [{ text }], kind: "code" }
-    const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)\r?$/.exec(text)
-    if (fence) {
-      if (delimiter && delimiter[1][0] === fence[0] && delimiter[1].length >= fence.length && /^[ \t\r]*$/.test(delimiter[2])) fence = ""
-      return { tokens: [{ text }], kind: "code" }
-    }
-    if (delimiter && (delimiter[1][0] !== "`" || !delimiter[2].includes("`"))) {
-      fence = delimiter[1]
-      return { tokens: [{ text }], kind: "code" }
-    }
+    if (inCodeBlock(text)) return { tokens: [{ text }], kind: "code" }
     if (/^[ \t]*#(?: |\r?$)/.test(text)) return { tokens: [{ text }], kind: "completed" }
     const kind = /^[ \t]*#{2,6}(?:[ \t]|\r?$)/.test(text) ? "heading" : undefined
     // Bound inline regex work on generated/minified lines; keep their text intact.

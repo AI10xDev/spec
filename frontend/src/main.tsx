@@ -34,6 +34,7 @@ function App() {
   const [files, setFiles] = useState<Entry[]>([])
   const [tabs, setTabs] = useState<Tab[]>([])
   const [active, setActive] = useState("")
+  const navigation = useRef(0)
   const [section, setSection] = useState("history")
   const [query, setQuery] = useState("")
   const [filename, setFilename] = useState("")
@@ -176,6 +177,10 @@ function App() {
         if (next.recoverable) timers.push(setTimeout(() => void poll(next, optimizer), next.status === "running" ? 650 : 2500))
       } catch (error) {
         if (cancelled) return
+        if (optimizer) setOptimization((item) => item?.id === output.id ? { ...item, transportUnavailable: true } : item)
+        else setOutputs((items) => items[output.name]?.id === output.id
+          ? { ...items, [output.name]: { ...items[output.name], transportUnavailable: true } }
+          : items)
         fail(error)
         timers.push(setTimeout(() => void poll(output, optimizer), 2500))
       }
@@ -275,13 +280,19 @@ function App() {
   }
 
   async function open(name: string) {
+    const intent = ++navigation.current
     setError("")
     if (!tabs.some((item) => item.name === name)) {
       const document = await api<Document>(`/files/${encodeURIComponent(name)}`)
       setTabs((items) => openTab(items, document))
     }
-    setActive(name)
+    if (intent === navigation.current) setActive(name)
     void recoverOutput(name)
+  }
+
+  function selectTab(name: string) {
+    navigation.current++
+    setActive(name)
   }
 
   function create(event: React.FormEvent) {
@@ -293,20 +304,21 @@ function App() {
     }
     if (files.some((file) => file.name === name)) { void open(name).catch(fail); setFilename(""); return }
     setTabs((items) => items.some((item) => item.name === name) ? items : [...items, { name, content: "", saved: "", revision: null }])
-    setActive(name)
+    selectTab(name)
     setFilename("")
     setError("")
   }
 
   function close(item: Tab) {
     if (dirty(item) && !window.confirm(`Discard unsaved changes to ${item.name}?`)) return
+    navigation.current++
     const remaining = tabs.filter((tab) => tab.name !== item.name)
     setTabs(remaining)
     if (active === item.name) setActive(remaining.at(-1)?.name ?? "")
   }
 
   async function save(mode: "file" | "build" | "repository" = "file") {
-    if (!tab || busy || submitting.current || (mode !== "file" && optimization?.recoverable)) return
+    if (analytics || !tab || busy || submitting.current || (mode !== "file" && optimization?.recoverable)) return
     submitting.current = true
     setBusy(true)
     setError("")
@@ -324,14 +336,15 @@ function App() {
   }
 
   function requestBuild() {
-    if (!tab || busy || submitting.current || !execution || fileOutput?.recoverable || optimization?.recoverable) return
+    if (analytics || !tab || busy || submitting.current || !execution || fileOutput?.recoverable || optimization?.recoverable) return
     if (window.confirm("Send this saved spec over SSH and run remote spec build? Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.")) void save("build")
   }
 
   useEffect(() => {
     function shortcut(event: KeyboardEvent) {
-      if (!connected || chatName || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key !== "Enter") return
+      if (analytics || !connected || chatName || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key !== "Enter") return
       const target = event.target as HTMLElement | null
+      if (target?.closest("[inert]")) return
       if (target?.closest("input, textarea, [contenteditable=true]") && !target.matches(".editor-input textarea")) return
       event.preventDefault()
       requestBuild()
@@ -433,22 +446,30 @@ function App() {
           <input aria-label="New filename" placeholder="New file, e.g. idea.md" value={filename} onChange={(event) => setFilename(event.target.value)} required />
           <button aria-label="Create file" title="Create file">＋</button>
         </form>
-        <div className="switcher" role="tablist" aria-label="File navigation">
-          <button role="tab" aria-selected={section === "history"} onClick={() => setSection("history")}>Saved files</button>
-          <button role="tab" aria-selected={section === "tabs"} onClick={() => setSection("tabs")}>Open tabs ({tabs.length})</button>
+        <div className="switcher" role="tablist" aria-label="File navigation" onKeyDown={(event) => {
+          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return
+          event.preventDefault()
+          const next = event.key === "Home" ? "history" : event.key === "End" ? "tabs" : section === "history" ? "tabs" : "history"
+          setSection(next)
+          document.getElementById(`navigation-${next}`)?.focus()
+        }}>
+          <button id="navigation-history" role="tab" aria-controls="navigation-history-panel" tabIndex={section === "history" ? 0 : -1} aria-selected={section === "history"} onClick={() => setSection("history")}>Saved files</button>
+          <button id="navigation-tabs" role="tab" aria-controls="navigation-tabs-panel" tabIndex={section === "tabs" ? 0 : -1} aria-selected={section === "tabs"} onClick={() => setSection("tabs")}>Open tabs ({tabs.length})</button>
         </div>
         <input className="search" aria-label="Filter files" placeholder="Filter files…" value={query} onChange={(event) => setQuery(event.target.value)} />
-        <div className="file-list" role="tabpanel">
-          {section === "history" && files.filter((file) => file.name.toLowerCase().includes(query.toLowerCase())).map((file) => <button key={file.name} className={`file ${active === file.name ? "selected" : ""}`} onClick={() => void open(file.name).catch(fail)}><span>▤ <strong>{file.name}</strong></span><small>{new Date(file.modified).toLocaleString()} · {file.bytes} B</small></button>)}
-          {section === "history" && !files.length && <p className="hint">Previously written files appear here after saving. This list persists across server restarts.</p>}
-          {section === "tabs" && tabs.filter((item) => item.name.toLowerCase().includes(query.toLowerCase())).map((item) => <button key={item.name} className={`file ${active === item.name ? "selected" : ""}`} onClick={() => setActive(item.name)}>{item.name}{dirty(item) ? " •" : ""}</button>)}
+        <div id="navigation-history-panel" className="file-list" role="tabpanel" aria-labelledby="navigation-history" tabIndex={0} hidden={section !== "history"}>
+          {files.filter((file) => file.name.toLowerCase().includes(query.toLowerCase())).map((file) => <button key={file.name} className={`file ${active === file.name ? "selected" : ""}`} onClick={() => void open(file.name).catch(fail)}><span>▤ <strong>{file.name}</strong></span><small>{new Date(file.modified).toLocaleString()} · {file.bytes} B</small></button>)}
+          {!files.length && <p className="hint">Previously written files appear here after saving. This list persists across server restarts.</p>}
+        </div>
+        <div id="navigation-tabs-panel" className="file-list" role="tabpanel" aria-labelledby="navigation-tabs" tabIndex={0} hidden={section !== "tabs"}>
+          {tabs.filter((item) => item.name.toLowerCase().includes(query.toLowerCase())).map((item) => <button key={item.name} className={`file ${active === item.name ? "selected" : ""}`} onClick={() => selectTab(item.name)}>{item.name}{dirty(item) ? " •" : ""}</button>)}
         </div>
         <div className="sidebar-footer">One workspace. Many ideas.<br /><span>Files are saved locally, not in the browser.</span></div>
       </aside>
       <main className="editor-area">
         <nav className="editor-tabs" aria-label="Editor tabs">
           {tabs.map((item) => <div className={`editor-tab ${item.name === active ? "active" : ""}`} key={item.name}>
-            <button onClick={() => setActive(item.name)} aria-current={item.name === active ? "page" : undefined}>{item.name}{dirty(item) ? " •" : ""}</button>
+            <button onClick={() => selectTab(item.name)} aria-current={item.name === active ? "page" : undefined}>{item.name}{dirty(item) ? " •" : ""}</button>
             <button className="close" aria-label={`Close ${item.name}`} onClick={() => close(item)}>×</button>
           </div>)}
           {!tabs.length && <span className="empty-tabs">Open a saved file or create something new</span>}
@@ -457,9 +478,10 @@ function App() {
         <div className="panes">
           <section className="editor-pane" aria-label="Spec editing pane">
             <div className="pane-heading"><div><span className="eyebrow">01 / SPEC</span><h2>{tab?.name ?? "Your next idea"}</h2></div><span className="badge">{tab ? dirty(tab) ? "Unsaved" : "Saved" : "Editor"}</span></div>
-            {tab ? <Editor key={tab.name} name={tab.name} value={tab.content} token={token} available={completion} enabled={complete} onEnabled={setComplete} onSave={() => void save()} onChange={(content) => {
-              setTabs((items) => items.map((item) => item.name === active ? { ...item, content } : item))
-            }} /> : <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
+            {tabs.map((editor) => <Editor key={editor.name} active={editor.name === active} name={editor.name} value={editor.content} token={token} available={completion} enabled={complete} onEnabled={setComplete} onSave={() => void save()} onChange={(content) => {
+              setTabs((items) => items.map((item) => item.name === editor.name ? { ...item, content } : item))
+            }} />)}
+            {!tab && <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
             <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || fileOutput?.recoverable || optimization?.recoverable} title="Save & run (Ctrl/Cmd+Enter)" aria-keyshortcuts="Control+Enter Meta+Enter" onClick={requestBuild}>Save & run ↗</button></div></footer>
             {execution && <div className="repository-controls">
               <span>{repositoryError || (repository?.connected ? `${repository.directory} / ${repository.dirty ? "Uncommitted changes" : "No uncommitted changes"}` : repository ? "No repository connected in the remote directory." : "Checking remote repository...")}</span>
@@ -469,7 +491,7 @@ function App() {
             </div>}
           </section>
           <section className="output-pane" aria-label="Output and logs pane">
-            <div className="pane-heading"><div><span className="eyebrow">02 / OUTPUT</span><h2>Output & logs</h2></div><span className="badge">{output?.status ?? "Idle"}</span></div>
+            <div className="pane-heading"><div><span className="eyebrow">02 / OUTPUT</span><h2>Output & logs</h2></div><span className="badge">{output?.transportUnavailable ? `${output.status} (connection unavailable)` : output?.status ?? "Idle"}</span></div>
             <div className="output-selector" role="group" aria-label="Output view"><button aria-pressed={outputView === "file"} onClick={() => setOutputView("file")}>Current file{tab ? `: ${tab.name}` : " output"}</button><button aria-pressed={outputView === "optimization"} disabled={!optimization && !execution} onClick={() => {
               setOutputView("optimization")
               if (!optimization) { setError(""); void recoverOptimization().catch(fail) }

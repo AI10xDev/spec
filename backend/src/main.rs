@@ -16,7 +16,7 @@ use std::{
     collections::VecDeque,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path as FsPath, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
@@ -60,6 +60,8 @@ struct App {
     files: Arc<Mutex<()>>,
     jobs: Arc<Mutex<Vec<Job>>>,
     recovered: Arc<Mutex<bool>>,
+    recovery_runs: Arc<recovery::RunGates>,
+    // Serializes admission and latest-pointer changes, never polling or cancellation.
     recovery_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -426,7 +428,6 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         if repository_save { StatusCode::FORBIDDEN } else { StatusCode::BAD_REQUEST },
         "Remote execution is disabled. Set SPEC_SSH_TARGET and SPEC_SSH_WORKSPACE on the local Rust server, then restart it.".into(),
     ))?;
-    let _recovery_guard = app.recovery_gate.lock().await;
     recovery::initialize(&app)?;
     let pending: Vec<_> = app
         .jobs
@@ -439,6 +440,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
     for id in pending {
         recovery::refresh(&app, &id, false).await?;
     }
+    let _recovery_guard = app.recovery_gate.lock().await;
     let parent_id = match &input {
         RunInput::Continue(id, _) => Some(id.clone()),
         _ => None,
@@ -472,9 +474,8 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             (document.name, document.content, None)
         }
         RunInput::Continue(id, message) => {
-            recovery::restore(&app, &id)?;
             let name = {
-                let jobs = app.jobs.lock().unwrap();
+                let jobs = recovery::restore(&app, &id)?;
                 let job = jobs.iter().find(|job| job.id == id).unwrap();
                 if job.recover
                     || job.attached
@@ -698,7 +699,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             }
         }
         append(&app, &id, format!("\n[{status}]\n").as_bytes());
-        let _guard = app.recovery_gate.lock().await;
+        let _guard = recovery::run_gate(&app, &id).await;
         if let Some(job) = app.jobs.lock().unwrap().iter_mut().find(|job| job.id == id) {
             job.status = status;
             job.attached = false;
@@ -706,7 +707,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         }
         recovery::checkpoint(&app, &id);
         // An SSH exit alone is not authoritative remote completion evidence.
-        if let Err(error) = recovery::refresh(&app, &id, false).await {
+        if let Err(error) = recovery::refresh_locked(&app, &id, false).await {
             eprintln!("Run {id} recovery: {}", error.1);
         }
     });
@@ -714,9 +715,8 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
 }
 
 async fn output(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Output>> {
-    let _guard = app.recovery_gate.lock().await;
     recovery::initialize(&app)?;
-    recovery::restore(&app, &id)?;
+    drop(recovery::restore(&app, &id)?);
     recovery::refresh(&app, &id, false).await?;
     let jobs = app.jobs.lock().unwrap();
     let job = jobs
@@ -796,27 +796,19 @@ async fn output_log(
 }
 
 async fn cancel(State(app): State<App>, Path(id): Path<String>) -> Result<Json<serde_json::Value>> {
-    let _guard = app.recovery_gate.lock().await;
     recovery::initialize(&app)?;
-    recovery::restore(&app, &id)?;
-    let attached = app
-        .jobs
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|job| job.id == id)
-        .unwrap()
-        .attached;
-    if !attached {
-        recovery::refresh(&app, &id, true).await?;
-        return Ok(Json(serde_json::json!({"ok": true})));
+    {
+        let jobs = recovery::restore(&app, &id)?;
+        let job = jobs
+            .iter()
+            .find(|job| job.id == id)
+            .ok_or_else(|| Error(StatusCode::NOT_FOUND, "Run not found".into()))?;
+        if job.attached {
+            let _ = job.stop.send(RunControl::Cancel);
+            return Ok(Json(serde_json::json!({"ok": true})));
+        }
     }
-    let jobs = app.jobs.lock().unwrap();
-    let job = jobs
-        .iter()
-        .find(|job| job.id == id)
-        .ok_or_else(|| Error(StatusCode::NOT_FOUND, "Run not found".into()))?;
-    let _ = job.stop.send(RunControl::Cancel);
+    recovery::refresh(&app, &id, true).await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -923,7 +915,10 @@ fn router(app: App) -> Router {
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let root =
         PathBuf::from(std::env::var("SPEC_WORKSPACE").unwrap_or_else(|_| "../workspace".into()));
-    fs::create_dir_all(&root)?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&root)?;
     let root = root.canonicalize()?;
     // Do not silently change permissions on an existing directory chosen by the user.
     if fs::metadata(&root)?.permissions().mode() & 0o022 != 0 {
@@ -958,6 +953,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         files: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(Vec::new())),
         recovered: Arc::new(Mutex::new(false)),
+        recovery_runs: Arc::default(),
         recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
     };
     let port: u16 = std::env::var("SPEC_PORT")

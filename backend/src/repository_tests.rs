@@ -250,7 +250,7 @@ console.log(JSON.stringify({config, path, instructions: fs.readFileSync(path, "u
     wait_for_file(&directory.join("status")).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let _guard = state.recovery_gate.lock().await;
+            let _guard = recovery::run_gate(&state, id).await;
             if !state.jobs.lock().unwrap()[0].recover {
                 break;
             }
@@ -813,7 +813,7 @@ async fn repository_api_rejections_are_terminal_after_restart_but_missing_sessio
         let id = json(response).await["id"].as_str().unwrap().to_owned();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let _guard = state.recovery_gate.lock().await;
+                let _guard = recovery::run_gate(&state, &id).await;
                 if !state.jobs.lock().unwrap()[0].attached {
                     break;
                 }
@@ -879,7 +879,7 @@ async fn repository_api_rejections_are_terminal_after_restart_but_missing_sessio
             wait_for_file(&repo.path().join(format!(".spec-runs/run-{id}/status"))).await;
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
-                    let _guard = fresh.recovery_gate.lock().await;
+                    let _guard = recovery::run_gate(&fresh, &id).await;
                     if fresh.jobs.lock().unwrap().iter().all(|job| !job.attached) {
                         break;
                     }

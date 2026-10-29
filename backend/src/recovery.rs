@@ -1,8 +1,21 @@
 use super::*;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::{collections::HashMap, os::unix::fs::MetadataExt};
 
 const DIRECTORY: &str = ".spec-output";
 const MAX_RECORD: usize = MAX_OUTPUT * 4 + 64 * 1024;
+
+#[derive(Default)]
+pub(super) struct RunGates(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
+
+pub(super) async fn run_gate(app: &App, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let gate = {
+        let mut gates = app.recovery_runs.0.lock().unwrap();
+        // Keep gates with holders or waiters, without retaining every historical ID.
+        gates.retain(|_, gate| Arc::strong_count(gate) > 1);
+        gates.entry(id.to_owned()).or_default().clone()
+    };
+    gate.lock_owned().await
+}
 
 fn valid_id(id: &str) -> Result<()> {
     if !Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id) {
@@ -210,7 +223,8 @@ pub(super) fn initialize(app: &App) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn restore(app: &App, id: &str) -> Result<()> {
+// Keep restoration and the caller's state capture atomic with cache eviction.
+pub(super) fn restore<'a>(app: &'a App, id: &str) -> Result<std::sync::MutexGuard<'a, Vec<Job>>> {
     valid_id(id)?;
     let mut jobs = app.jobs.lock().unwrap();
     if !jobs.iter().any(|job| job.id == id) {
@@ -222,7 +236,7 @@ pub(super) fn restore(app: &App, id: &str) -> Result<()> {
         }
         jobs.push(job);
     }
-    Ok(())
+    Ok(jobs)
 }
 
 pub(super) fn checkpoint(app: &App, id: &str) {
@@ -243,8 +257,15 @@ pub(super) fn checkpoint(app: &App, id: &str) {
     }
 }
 
-// Caller holds recovery_gate, so concurrent polls/cancels cannot publish stale snapshots.
 pub(super) async fn refresh(app: &App, id: &str, cancel: bool) -> Result<()> {
+    // Serialize network reads through publication for this run only. Admission,
+    // attached streams and cancellation of other runs never wait on its remote IO.
+    let _guard = run_gate(app, id).await;
+    refresh_locked(app, id, cancel).await
+}
+
+// Caller holds this run's gate, including when finalizing its SSH attachment.
+pub(super) async fn refresh_locked(app: &App, id: &str, cancel: bool) -> Result<()> {
     let retry = app
         .jobs
         .lock()
@@ -256,7 +277,10 @@ pub(super) async fn refresh(app: &App, id: &str, cancel: bool) -> Result<()> {
     }
     let (identity, name) = {
         let jobs = app.jobs.lock().unwrap();
-        let job = jobs.iter().find(|job| job.id == id).unwrap();
+        let Some(job) = jobs.iter().find(|job| job.id == id) else {
+            // A resolved run may have been evicted while this refresh was queued.
+            return Ok(());
+        };
         if let Some(error) = &job.persistence_error {
             return Err(Error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -276,7 +300,12 @@ pub(super) async fn refresh(app: &App, id: &str, cancel: bool) -> Result<()> {
         return Err(Error(StatusCode::BAD_GATEWAY, error.clone()));
     }
     let mut jobs = app.jobs.lock().unwrap();
-    let job = jobs.iter_mut().find(|job| job.id == id).unwrap();
+    let Some(job) = jobs.iter_mut().find(|job| job.id == id) else {
+        return Ok(());
+    };
+    if job.attached || !job.recover || job.remote_identity != identity {
+        return Ok(());
+    }
     let before = (
         job.status.clone(),
         job.output.clone(),

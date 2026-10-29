@@ -19,6 +19,9 @@ mod retained_tests;
 #[path = "analytics_tests.rs"]
 mod analytics_tests;
 
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
+
 pub(super) fn app(root: &FsPath) -> App {
     App {
         root: root.to_owned(),
@@ -30,6 +33,7 @@ pub(super) fn app(root: &FsPath) -> App {
         files: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(Vec::new())),
         recovered: Arc::new(Mutex::new(false)),
+        recovery_runs: Arc::default(),
         recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
     }
 }
@@ -674,7 +678,7 @@ exit 7
             .unwrap();
         tokio::time::timeout(Duration::from_secs(8), async {
             loop {
-                let _guard = state.recovery_gate.lock().await;
+                let _guard = recovery::run_gate(&state, &id).await;
                 if !state.jobs.lock().unwrap()[0].attached {
                     break;
                 }
@@ -686,7 +690,7 @@ exit 7
         .unwrap();
         // Wait for the old task's final recovery write before simulating a new process.
         {
-            let _guard = state.recovery_gate.lock().await;
+            let _guard = recovery::run_gate(&state, &id).await;
         }
         drop(state);
         // Produce fresh output with no backend attached, not just a cached checkpoint.

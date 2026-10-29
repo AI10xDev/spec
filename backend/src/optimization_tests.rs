@@ -600,7 +600,7 @@ async fn optimization_mutual_exclusion_restart_and_cancellation_kill_descendants
         .unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            let guard = state.recovery_gate.lock().await;
+            let guard = recovery::run_gate(&state, &id).await;
             if !state
                 .jobs
                 .lock()
