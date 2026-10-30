@@ -42,12 +42,13 @@ trap cleanup EXIT
 trap '' HUP
 trap 'exit 125' INT TERM
 mkfifo "$directory/pipe"
-# Builds keep the first 8 MiB, then drain without breaking the build pipe.
+# Builds keep the first 8 MiB of agent output, then drain without breaking the pipe.
 # Optimization progress must keep streaming for the entire unbounded run.
 # Only the supervisor retains the repository lock, never escaped build descendants.
 log_command='stdbuf -o0 head -c 8388608; cat >/dev/null'
 [[ $mode != optimize ]] || log_command='cat'
-setsid bash --noprofile --norc -c "$log_command" 9<&- < "$directory/pipe" > "$directory/$3" &
+# Both writers append so agent output cannot overwrite supervisor keep-alives.
+setsid bash --noprofile --norc -c "$log_command" 9<&- < "$directory/pipe" >> "$directory/$3" &
 logger=$!
 setsid bash --noprofile --norc -c "$2" -- "$directory/snapshot.md" "$directory/ready" "${4:-build}" "${5:-}" 9<&- </dev/null > "$directory/pipe" 2>&1 &
 pid=$!
@@ -60,14 +61,17 @@ while [[ ! -f "$directory/ready" ]] && kill -0 "$pid" 2>/dev/null; do
     fi
     sleep 0.01
 done
+keep_alive_interval=60
+next_keep_alive=$((SECONDS + keep_alive_interval))
 while kill -0 "$pid" 2>/dev/null; do
     if [[ -f "$directory/cancel" ]]; then
         result=130
         exit "$result"
     fi
-    if [[ ${4:-build} != optimize ]] && (( SECONDS >= 7200 )); then
-        result=124
-        exit "$result"
+    if (( SECONDS >= next_keep_alive )); then
+        # Bypass the capped agent pipe without blocking cancellation on its readers.
+        printf '\n[remote] keep-alive: %s still running (%ss elapsed); no execution timeout.\n' "$mode" "$SECONDS" >> "$directory/$3"
+        next_keep_alive=$((SECONDS + keep_alive_interval))
     fi
     sleep 0.1
 done

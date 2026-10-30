@@ -331,7 +331,7 @@ exit {status}
 }
 
 #[tokio::test]
-async fn detached_builds_survive_eof_hup_and_attachment_kill_then_watchdog_cleans_descendants() {
+async fn detached_builds_keep_alive_after_two_hours_and_disconnect_until_cancelled() {
     for disconnect in ["connected", "eof", "unknown", "hup", "kill"] {
         let root = tempfile::tempdir().unwrap();
         fs::write(
@@ -346,9 +346,17 @@ spec() {
 "#,
         )
         .unwrap();
-        // Shorten only the test watchdog; production remains two hours.
-        let supervisor =
-            include_str!("remote-supervisor.bash").replace("SECONDS >= 7200", "SECONDS >= 3");
+        // Advance only after readiness; bound cleanup if a test assertion fails.
+        let supervisor = include_str!("remote-supervisor.bash")
+            .replace(
+                "keep_alive_interval=60",
+                "SECONDS=7201\nkeep_alive_interval=1",
+            )
+            .replace(
+                "while kill -0 \"$pid\" 2>/dev/null; do",
+                "while kill -0 \"$pid\" 2>/dev/null; do\n    (( SECONDS < 7216 )) || exit 125",
+            );
+        assert!(supervisor.contains("SECONDS=7201"));
         let attachment = include_str!("remote-build.bash").replace(
             "reader=$!",
             "reader=$!\nprintf '%s' \"$reader\" > control-reader-pid",
@@ -369,6 +377,7 @@ spec() {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
@@ -390,7 +399,7 @@ spec() {
         if disconnect == "unknown" {
             stdin.write_all(b"?").await.unwrap();
         }
-        let lease = if disconnect == "eof" {
+        let mut lease = if disconnect == "eof" {
             drop(stdin);
             None
         } else {
@@ -405,6 +414,36 @@ spec() {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(snapshot.exists(), "{disconnect}");
         assert!(!directory.join("status").exists(), "{disconnect}");
+        let log = directory.join("a.md.out");
+        let before = fs::read_to_string(&log).unwrap();
+        let heartbeats = before.matches("[remote] keep-alive:").count();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                assert!(!directory.join("status").exists(), "{disconnect}");
+                let output = fs::read_to_string(&log).unwrap();
+                if output.matches("[remote] keep-alive:").count() >= heartbeats + 2 {
+                    for line in output.lines().filter(|line| !line.is_empty()) {
+                        let elapsed = line
+                            .strip_prefix("[remote] keep-alive: build still running (")
+                            .unwrap()
+                            .strip_suffix("s elapsed); no execution timeout.")
+                            .unwrap()
+                            .parse::<u64>()
+                            .unwrap();
+                        assert!(elapsed > 7200, "{line}");
+                    }
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if disconnect == "connected" {
+            lease.as_mut().unwrap().write_all(b"C").await.unwrap();
+        } else {
+            fs::write(directory.join("cancel"), "").unwrap();
+        }
         let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
             .await
             .unwrap()
@@ -422,7 +461,7 @@ spec() {
         .unwrap();
         drop(lease);
         if disconnect == "connected" {
-            assert_eq!(output.status.code(), Some(124));
+            assert_eq!(output.status.code(), Some(130));
         } else if disconnect != "kill" {
             assert_eq!(output.status.code(), Some(125));
         }
@@ -435,7 +474,7 @@ spec() {
         .unwrap();
         assert_eq!(
             fs::read_to_string(directory.join("status")).unwrap(),
-            "124\n"
+            "130\n"
         );
         assert!(!snapshot.exists());
         let pid = fs::read_to_string(root.path().join("descendant-pid")).unwrap();
@@ -522,13 +561,21 @@ spec() {
 }
 
 #[tokio::test]
-async fn optimizer_bypasses_build_timeout_and_keeps_output_beyond_build_cap() {
+async fn builds_and_optimizers_complete_without_timeout_and_keep_alive_beyond_build_cap() {
     for mode in ["build", "optimize"] {
         let root = tempfile::tempdir().unwrap();
         let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
         let id = Uuid::new_v4().to_string();
-        let supervisor =
-            include_str!("remote-supervisor.bash").replace("SECONDS >= 7200", "SECONDS >= 1");
+        let supervisor = include_str!("remote-supervisor.bash")
+            .replace(
+                "keep_alive_interval=60",
+                "SECONDS=7201\nkeep_alive_interval=1",
+            )
+            .replace(
+                "while kill -0 \"$pid\" 2>/dev/null; do",
+                "while kill -0 \"$pid\" 2>/dev/null; do\n    (( SECONDS < 7216 )) || exit 125",
+            );
+        assert!(supervisor.contains("SECONDS=7201"));
         let mut child = tokio::process::Command::new("bash")
             .args([
                 "-c",
@@ -537,7 +584,7 @@ async fn optimizer_bypasses_build_timeout_and_keeps_output_beyond_build_cap() {
                 root.path().to_str().unwrap(),
                 "0",
                 // Exercise the real attachment/supervisor without launching an engine.
-                ": > \"$2\"; if [[ $3 == optimize ]]; then : > \"${1%/*}/report.jsonl\"; fi; head -c 9000000 /dev/zero; sleep 2; printf 'fresh report\n'",
+                ": > \"$2\"; if [[ $3 == optimize ]]; then : > \"${1%/*}/report.jsonl\"; fi; head -c 9000000 /dev/zero; for ((attempt=0; attempt<500; attempt++)); do [[ ! -f \"${1%/*}/finish\" ]] || break; sleep 0.02; done; printf 'fresh report\n'",
                 &supervisor,
                 &id,
                 "optimization",
@@ -557,49 +604,73 @@ async fn optimizer_bypasses_build_timeout_and_keeps_output_beyond_build_cap() {
         if mode == "optimize" {
             stdin.write_all(b"C").await.unwrap();
         }
-        let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        let directory = root.path().join(format!(".spec-runs/run-{id}"));
+        let log = directory.join("optimization.out");
+        let drain = tokio::spawn(child.wait_with_output());
+        let before_completion = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                assert!(!directory.join("status").exists(), "{mode}");
+                if let Ok(bytes) = fs::read(&log)
+                    && String::from_utf8_lossy(&bytes)
+                        .matches(&format!("[remote] keep-alive: {mode} still running ("))
+                        .count()
+                        >= 2
+                {
+                    break bytes;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        fs::write(directory.join("finish"), "").unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(10), drain)
             .await
+            .unwrap()
             .unwrap()
             .unwrap();
         drop(stdin);
-        let directory = root.path().join(format!(".spec-runs/run-{id}"));
-        let expected_status = if mode == "optimize" { 0 } else { 124 };
-        assert_eq!(output.status.code(), Some(expected_status), "{mode}");
-        assert_eq!(
-            fs::read_to_string(directory.join("status")).unwrap(),
-            format!("{expected_status}\n")
-        );
-        let log = directory.join("optimization.out");
+        assert_eq!(output.status.code(), Some(0), "{mode}");
+        assert_eq!(fs::read_to_string(directory.join("status")).unwrap(), "0\n");
         assert_eq!(fs::read(&log).unwrap(), output.stdout);
-        if mode == "optimize" {
-            assert_eq!(output.stdout.len(), 9000000 + b"fresh report\n".len());
-            assert!(output.stdout.ends_with(b"fresh report\n"));
+        assert!(
+            output.stdout.starts_with(&before_completion),
+            "{mode}: logger overwrote keep-alive output"
+        );
+        let payload_len = if mode == "optimize" {
+            9000000
         } else {
-            assert_eq!(output.stdout.len(), 8 * 1024 * 1024);
+            8 * 1024 * 1024
+        };
+        assert_eq!(
+            output.stdout.iter().filter(|&&byte| byte == 0).count(),
+            payload_len
+        );
+        let messages: Vec<_> = output
+            .stdout
+            .iter()
+            .copied()
+            .filter(|&byte| byte != 0)
+            .collect();
+        let messages = String::from_utf8(messages).unwrap();
+        assert!(
+            messages.matches("no execution timeout.").count() >= 2,
+            "{mode}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout[payload_len..]).contains("[remote] keep-alive:")
+        );
+        if mode == "optimize" {
+            assert!(messages.contains("fresh report\n"));
+        } else {
+            assert!(!messages.contains("fresh report\n"));
         }
         for cancel in [false, true] {
             let (status, bytes, truncated) =
                 remote.snapshot(&id, cancel, "optimization").await.unwrap();
-            assert_eq!(
-                status,
-                if mode == "optimize" {
-                    "completed"
-                } else {
-                    "timed out"
-                }
-            );
+            assert_eq!(status, "completed");
             assert!(truncated);
             assert_eq!(bytes, output.stdout[output.stdout.len() - MAX_OUTPUT..]);
-        }
-        if mode == "build" {
-            // An ordinary build named optimization must retain the size limit.
-            File::options()
-                .write(true)
-                .open(log)
-                .unwrap()
-                .set_len(8388609)
-                .unwrap();
-            assert!(remote.snapshot(&id, false, "optimization").await.is_err());
         }
     }
 }
@@ -711,8 +782,10 @@ spec() {
     )
     .unwrap();
     // Bound remote cleanup even if the test fails before it can send cancellation.
-    let supervisor =
-        include_str!("remote-supervisor.bash").replace("SECONDS >= 7200", "SECONDS >= 10");
+    let supervisor = include_str!("remote-supervisor.bash").replace(
+        "while kill -0 \"$pid\" 2>/dev/null; do",
+        "while kill -0 \"$pid\" 2>/dev/null; do\n    (( SECONDS < 10 )) || exit 125",
+    );
     let mut child = tokio::process::Command::new("bash")
         .env("HOME", root.path())
         .args([
@@ -997,6 +1070,37 @@ async fn recovery_distinguishes_missing_and_unsafe_run_directories() {
 }
 
 #[tokio::test]
+async fn recovery_reads_bounded_tail_of_oversized_named_and_legacy_logs() {
+    for name in ["a.md.out", "output.log"] {
+        let root = tempfile::tempdir().unwrap();
+        let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
+        let id = Uuid::new_v4().to_string();
+        let parent = root.path().join(".spec-runs");
+        let directory = parent.join(format!("run-{id}"));
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&directory).unwrap();
+        for path in [&parent, &directory] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut content = vec![b'x'; 8 * 1024 * 1024 + 1];
+        content.extend_from_slice(b"final output\n");
+        fs::write(directory.join(name), &content).unwrap();
+        fs::write(directory.join("status"), "0\n").unwrap();
+        for file in [name, "status"] {
+            fs::set_permissions(directory.join(file), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        for cancel in [false, true] {
+            let (status, bytes, truncated) = remote.snapshot(&id, cancel, "a.md").await.unwrap();
+            assert_eq!(status, "completed", "{name}");
+            assert!(truncated, "{name}");
+            assert_eq!(bytes, content[content.len() - MAX_OUTPUT..], "{name}");
+        }
+        assert_eq!(fs::read(directory.join(name)).unwrap(), content);
+        assert!(!directory.join("cancel").exists());
+    }
+}
+
+#[tokio::test]
 async fn recovery_rejects_remote_symlinks_nonregular_files_and_public_storage() {
     for kind in [
         "parent",
@@ -1006,14 +1110,12 @@ async fn recovery_rejects_remote_symlinks_nonregular_files_and_public_storage() 
         "lease",
         "fifo",
         "public",
-        "large",
         "named-log",
         "named-dangling",
         "named-fifo",
         "named-directory",
         "named-public",
         "named-hardlink",
-        "named-large",
     ] {
         let root = tempfile::tempdir().unwrap();
         let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
@@ -1050,30 +1152,12 @@ async fn recovery_rejects_remote_symlinks_nonregular_files_and_public_storage() 
                 std::os::unix::fs::symlink(root.path().join("elsewhere"), path).unwrap();
             }
             "public" => fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap(),
-            "large" => File::options()
-                .write(true)
-                .open(directory.join("output.log"))
-                .unwrap()
-                .set_len(8388609)
-                .unwrap(),
             "named-directory" => fs::create_dir(directory.join("a.md.out")).unwrap(),
             "named-hardlink" => fs::hard_link(outside.path(), directory.join("a.md.out")).unwrap(),
-            "named-public" | "named-large" => {
+            "named-public" => {
                 let file = directory.join("a.md.out");
                 fs::write(&file, "named output").unwrap();
-                fs::set_permissions(
-                    &file,
-                    fs::Permissions::from_mode(if kind == "named-public" { 0o644 } else { 0o600 }),
-                )
-                .unwrap();
-                if kind == "named-large" {
-                    File::options()
-                        .write(true)
-                        .open(file)
-                        .unwrap()
-                        .set_len(8388609)
-                        .unwrap();
-                }
+                fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
             }
             _ => {
                 let file = directory.join(match kind {

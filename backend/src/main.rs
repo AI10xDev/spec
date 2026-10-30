@@ -653,7 +653,6 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         let out = tokio::spawn(drain(app.clone(), id.clone(), stdout));
         let err = tokio::spawn(drain(app.clone(), id.clone(), stderr));
         let mut checkpoint = tokio::time::interval(Duration::from_secs(1));
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2 * 60 * 60 + 15);
         let mut status = loop {
             break tokio::select! {
                 result = child.wait() => match result {
@@ -664,7 +663,6 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
                     Err(error) => format!("failed ({error})"),
                 },
                 _ = stopped.changed() => if *stopped.borrow() == RunControl::Cancel { "cancelled" } else { "detached" }.into(),
-                _ = tokio::time::sleep_until(deadline), if !optimization => "detached (local timeout)".into(),
                 _ = &mut upload => "detached (input closed)".into(),
                 _ = checkpoint.tick() => {
                     recovery::checkpoint(&app, &id);

@@ -54,8 +54,7 @@ elif [[ $3 == cancel && $status == unknown ]]; then
 fi
 private_file "$log" || exit 125
 size=$(stat -c %s -- "$log")
-# Optimizer logs are unbounded; ordinary builds retain their 8 MiB limit.
-(( size <= 8388608 )) || { [[ $log == ./optimization.out ]] && private_file report.jsonl; } || exit 125
+# Keep-alives can grow logs beyond the agent-output cap; only read a bounded tail.
 count=$size
 offset=0
 truncated=0

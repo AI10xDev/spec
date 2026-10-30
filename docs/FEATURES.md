@@ -79,17 +79,20 @@ A failure to launch the local SSH client is reported immediately. SSH connection
 
 ### Run limits and lifecycle
 
-The watchdog and remote log/retention limits below apply to ordinary builds, not [optimization](../README.md#output-and-safety), which has independent output and no overall runtime cap.
+Builds (including continuations), repository saves, and [optimization](../README.md#output-and-safety) have no overall supervisor runtime limit or UI attachment deadline. Ordinary builds and repository saves cap agent output; optimization output remains uncapped and has separate retention rules.
 
 - At most one unresolved run per filename and 16 in total, including recovered or detached sessions whose completion is unconfirmed. Admission errors distinguish a blocked filename from the total run limit.
-- Latest 256 KiB of output per retained run. Truncation is explicitly indicated.
+- Latest 256 KiB of output per retained run. Recovery reads a bounded latest-256-KiB tail for all modes. Truncation is explicitly indicated.
 - At most 32 runs retained in memory; finished entries can be evicted but durable records remain on disk without automatic pruning.
 - Polling approximately every 650 ms for recoverable file runs, including background tabs, and independently for optimization; slower retry on fetch errors or unavailable/unknown recovered sessions.
-- An independent fifteen-minute remote watchdog survives disconnect. The local attachment times out fifteen seconds later. Network loss may prevent Stop confirmation.
+- Every 60 seconds while the child remains alive, the supervisor appends a message such as `[remote] keep-alive: build still running (60s elapsed); no execution timeout.` The mode is `build`, `repository-save`, or `optimize`, and elapsed seconds increase. This indicates process liveness, not model progress.
+- Normal process exit and explicit cancellation still end runs. The 10-second startup-readiness check, cleanup safety timers, SSH network keepalives, and individual provider/tool timeouts are unchanged. Network loss may prevent Stop confirmation. Exit code `124` can still indicate a child timeout or an older supervisor's watchdog timeout.
 - Ctrl+C/SIGTERM detaches on normal server shutdown; uploaded builds continue remotely.
 - Closing a browser page does not stop execution.
-- Run records and file associations persist in private local `.spec-output/` storage. Reopen a saved spec after restarting to recover output without another build; use the new server token when reconnecting. Unfinished sessions require the same remote configuration; finished cached output needs no SSH. Remote sessions retain private `<spec filename>.out` (first 8 MiB, spec-named instead of shared `nohup.out`) and atomic exit `status` under `.spec-runs/`. Legacy `output.log` sessions remain recoverable. Completed remote sessions older than seven days are pruned on subsequent launches. See [recovery and cancellation](../README.md#sessions-and-cancellation). Interactive replay and session steering are not implemented.
+- Run records and file associations persist in private local `.spec-output/` storage. Reopen a saved spec after restarting to recover output without another build; use the new server token when reconnecting. Unfinished sessions require the same remote configuration; finished cached output needs no SSH. Remote sessions retain private `<spec filename>.out` (spec-named instead of shared `nohup.out`) and atomic exit `status` under `.spec-runs/`. Ordinary builds and repository saves retain the first 8 MiB of agent stdout/stderr and drain/discard excess agent output. Supervisor keep-alives bypass this cap, so the total log can exceed 8 MiB and slowly grows while the process remains alive. Legacy `output.log` sessions remain recoverable. Completed ordinary remote sessions older than seven days are pruned on subsequent launches; optimization reports are exempt. See [recovery and cancellation](../README.md#sessions-and-cancellation). Interactive replay and session steering are not implemented.
 - Tools that detach into separate process groups may escape group cancellation. Use OS-level sandboxing for stronger containment.
+
+The Rust backend embeds the supervisor and sends it over SSH. To deploy this behavior, rebuild and restart the actual SSH-launching backend, not just the execution VM. Already-running supervisors retain their original behavior, including older watchdog deadlines.
 
 ## 7. What changed from the original
 
@@ -99,7 +102,7 @@ The watchdog and remote log/retention limits below apply to ordinary builds, not
 | One visible spec at a time | Multiple independent editor tabs |
 | Newline-delimited save history | Workspace file listing with filtering and timestamps |
 | Spec/output split | Desktop two-pane view; stacked mobile view |
-| Background shell build | Opt-in remote foreground build over SSH; local web server, bounded output, cancellation |
+| Background shell build | Opt-in remote foreground build over SSH; local web server, capped agent output plus uncapped keep-alives, cancellation, no overall runtime limit |
 | Basename mirror saves | No mirroring; saves only the named workspace file |
 | Persistent V2 session inbox | Not ported; explicit [continuation of completed builds](../README.md#continue-a-completed-build) resumes the captured engine session |
 | Azure inline completion/filename ranking | Optional sentence-part trailing completions; filename ranking not ported |
