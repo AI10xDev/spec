@@ -10,8 +10,25 @@ This review identified **one P1, eleven P2, and one P3 finding**, plus a failing
 formatting check. P1 is a high-priority execution-safety defect; P2 denotes
 correctness or accessibility issues to fix; P3 denotes a lower-impact issue.
 The initial review changed documentation only and left all findings open.
-The 2026-10-29 follow-ups fix F1-F13. The numbered descriptions below preserve
-the original reproductions and repair recommendations, not current open defects.
+The first 2026-10-29 follow-up implemented repairs for F1-F13. Subsequent review
+found residual defects; the original descriptions and first validation below
+are historical evidence, not proof that every finding is closed.
+
+## Reopened Findings: 2026-10-29
+
+F1, F3 and F7 are explicitly reopened for repair, in that priority order.
+The review of `296727d` reproduced these gaps despite 489 passing existing tests:
+
+| Finding | Status | Remaining Defect |
+| --- | --- | --- |
+| F1 (P1) | Reopened | Shared Git-lock reuse skips unresolved target-local legacy runs. |
+| F3 (P2) | Reopened | Container/inline code examples and hidden terminal payloads become measurements. |
+| F7 (P2) | Reopened | Native Undo targets hidden tabs; native Redo fails even in one tab. |
+
+Evidence: `/home/opencode/project/.spec-runs/run-00a10ad8-1635-4a53-9082-797cbebb3715/Fs_editor_issue_track.out`,
+lines 818-897; repeated in `run-c3436cc1-6554-4c8d-95a7-62fa0453a60d/Fs_editor_issue_track.out`.
+The adjacent F2 output-cache race and F9 spec-classification gaps remain outside
+this requested repair. The original F2 cancellation fix continues to hold.
 
 ## Repair Follow-Up: 2026-10-29
 

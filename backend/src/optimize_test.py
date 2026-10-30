@@ -409,17 +409,99 @@ class OptimizerTest(unittest.TestCase):
                                 status.unlink()
                                 saved.rename(status)
 
+    def test_supervisor_lock_reuse_validates_target_local_legacy_runs(self):
+        cases = ("unresolved", "malformed", "public-status", "public-run", "public-root",
+                 "symlink-status", "hardlink-status", "fifo-status", "symlink-run",
+                 "missing-run", "symlink-root", "missing-root", "success", "failure")
+        for kind in cases:
+            with self.subTest(kind=kind):
+                workspace = self.workspace / kind
+                workspace.mkdir()
+                subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+                self.project = workspace / "target"
+                self.project.mkdir()
+                output = self.project / "objective.md.out"
+                output.touch()
+                (workspace / ".bash_history").write_text(
+                    f"cd '{self.project}' && nohup spec build objective.md > '{output}' &\n")
+                runs = self.project / ".spec-runs"
+                runs.mkdir(mode=0o700)
+                # No registry pointer: this evidence predates the shared Git registry.
+                prior = runs / "run-prior"
+                prior.mkdir(mode=0o700)
+                (prior / "objective.md.out").write_text("legacy work\n")
+                status = prior / "status"
+                if kind != "unresolved":
+                    status.write_bytes(b"130\n" if kind == "failure" else
+                                       b"256\n" if kind == "malformed" else b"0\n")
+                    status.chmod(0o600)
+                if kind.startswith("public-"):
+                    path = {"public-status": status, "public-run": prior, "public-root": runs}[kind]
+                    path.chmod(0o644 if kind == "public-status" else 0o755)
+                elif kind in ("symlink-status", "hardlink-status", "fifo-status"):
+                    saved = workspace / "saved-status"
+                    status.rename(saved)
+                    if kind == "symlink-status":
+                        status.symlink_to(saved)
+                    elif kind == "hardlink-status":
+                        os.link(saved, status)
+                    else:
+                        os.mkfifo(status, 0o600)
+                elif kind in ("symlink-run", "missing-run", "symlink-root", "missing-root"):
+                    path = runs if kind.endswith("root") else prior
+                    saved = workspace / "saved-storage"
+                    path.rename(saved)
+                    path.symlink_to(saved if kind.startswith("symlink") else saved / "missing")
+                self.config([self.objective(
+                    measure=python("from pathlib import Path; Path('measured').touch(); print(1)"),
+                    command=python("from pathlib import Path; Path('changed').touch()"), patience=2)])
+                # Use the real launcher/supervisor handoff and optimizer admission, but
+                # record config access and prevent any accidental live model request.
+                payload = (f"import sys\nsys.path.insert(0, {str(Path(optimize.__file__).parent)!r})\n"
+                           + """
+import optimize
+from pathlib import Path
+original_read = optimize.read_limited
+def checked_read(path, limit):
+    if path.suffix == '.optim':
+        Path('target/config-read').touch()
+    return original_read(path, limit)
+def unexpected_planning(*args):
+    Path('target/planned').touch()
+    raise AssertionError('planning must not start')
+optimize.read_limited = checked_read
+optimize.ResponsesOptimizer = unexpected_planning
+sys.exit(optimize.main())
+""").encode()
+                child, directory = self.harness(workspace, payload=payload)
+                admitted = kind in ("success", "failure")
+                self.assertEqual(child.wait(timeout=10), 0 if admitted else 1, child.stderr.read().decode())
+                events = [json.loads(line) for line in (directory / "report.jsonl").read_text().splitlines()]
+                self.assertEqual(events[-1]["outcome"], "converged" if admitted else "failed")
+                for marker in ("config-read", "measured", "changed"):
+                    self.assertEqual((self.project / marker).exists(), admitted, marker)
+                self.assertFalse((self.project / "planned").exists())
+                if not admitted:
+                    self.assertEqual(len(events), 1, "admission must precede config/planning")
+                    self.assertIn(str(runs), events[0]["error"])
+                self.assertTrue(os.path.lexists(runs), "admission must retain prior evidence")
+                if kind == "unresolved":
+                    self.assertFalse(status.exists())
+
     def test_supervisor_lock_reused_for_same_workspace_or_worktree(self):
-        for scope in ("non-git", "git", "git-subdirectory"):
+        for scope in ("non-git", "git", "git-subdirectory", "non-git-alias", "git-alias"):
             with self.subTest(scope=scope):
                 workspace = self.workspace / scope
                 workspace.mkdir()
-                if scope != "non-git":
+                if not scope.startswith("non-git"):
                     subprocess.run(["git", "init", "-q", str(workspace)], check=True)
                 self.project = workspace
                 if scope == "git-subdirectory":
                     self.project = workspace / "subdirectory"
                     self.project.mkdir()
+                elif scope.endswith("alias"):
+                    self.project = self.workspace / (scope + "-target")
+                    self.project.symlink_to(workspace, target_is_directory=True)
                 output = self.project / "objective.md.out"
                 output.touch()
                 (workspace / ".bash_history").write_text(
@@ -1110,8 +1192,8 @@ unrelated = subprocess.Popen([sys.executable, '-c',
 assert unrelated.stdout.readline().strip() == 'ready'
 original_lock = optimize.project_lock
 @contextmanager
-def checked_lock(project):
-    with original_lock(project):
+def checked_lock(project, workspace=None):
+    with original_lock(project, workspace):
         try:
             yield
         finally:

@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react"
 import { codeBlockClassifier } from "./code-block"
+import { terminalControls } from "./terminal"
 
 type SpecToken = { text: string; kind?: string }
 type SpecLine = { tokens: SpecToken[]; kind?: string }
@@ -39,9 +40,8 @@ type LogToken = { text: string; style: CSSProperties }
 export function highlightLog(value: string): LogToken[] {
   const tokens: LogToken[] = []
   let style: CSSProperties = {}
-  const controls = /(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|(?:\x1b\]|\x9d)(?:[^\x07\x1b\x9c]|\x1b(?!\\))*(?:\x07|\x1b\\|\x9c|$)|(?:\x1b[P^_X]|[\x90\x98\x9e\x9f])(?:[^\x1b\x9c]|\x1b(?!\\))*(?:\x1b\\|\x9c|$)|(?:\x1b\[|\x9b)[0-?]*[ -/]*$|\x1b[ -/]*[@-~]?|[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
   let offset = 0
-  for (const match of value.matchAll(controls)) {
+  for (const match of value.matchAll(terminalControls)) {
     if (match.index! > offset) tokens.push({ text: value.slice(offset, match.index), style: { ...style } })
     offset = match.index! + match[0].length
     const sgr = /^(?:\x1b\[|\x9b)([\d;]*)m$/.exec(match[0])

@@ -346,9 +346,9 @@ spec() {
 "#,
         )
         .unwrap();
-        // Shorten only the test watchdog; production remains 15 minutes.
+        // Shorten only the test watchdog; production remains two hours.
         let supervisor =
-            include_str!("remote-supervisor.bash").replace("SECONDS >= 900", "SECONDS >= 3");
+            include_str!("remote-supervisor.bash").replace("SECONDS >= 7200", "SECONDS >= 3");
         let attachment = include_str!("remote-build.bash").replace(
             "reader=$!",
             "reader=$!\nprintf '%s' \"$reader\" > control-reader-pid",
@@ -528,7 +528,7 @@ async fn optimizer_bypasses_build_timeout_and_keeps_output_beyond_build_cap() {
         let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
         let id = Uuid::new_v4().to_string();
         let supervisor =
-            include_str!("remote-supervisor.bash").replace("SECONDS >= 900", "SECONDS >= 1");
+            include_str!("remote-supervisor.bash").replace("SECONDS >= 7200", "SECONDS >= 1");
         let mut child = tokio::process::Command::new("bash")
             .args([
                 "-c",
@@ -712,7 +712,7 @@ spec() {
     .unwrap();
     // Bound remote cleanup even if the test fails before it can send cancellation.
     let supervisor =
-        include_str!("remote-supervisor.bash").replace("SECONDS >= 900", "SECONDS >= 10");
+        include_str!("remote-supervisor.bash").replace("SECONDS >= 7200", "SECONDS >= 10");
     let mut child = tokio::process::Command::new("bash")
         .env("HOME", root.path())
         .args([

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { evaluate, extractMetrics, parseSuite } from "./evaluation"
 import type { Check, Suite } from "./evaluation"
+import { highlightLog } from "./highlighting"
 
 const check: Check = { name: "Quality", metric: "quality", aggregate: "mean", operator: ">=", threshold: 0.9 }
 const suite: Suite = { version: 1, kind: "eval", spec: "foo.md", checks: [check] }
@@ -57,6 +58,60 @@ describe("evaluation spec validation", () => {
 })
 
 describe("report metric extraction", () => {
+  it.each([
+    (event: string) => `- \`\`\`json\n  ${event}\n  \`\`\``,
+    (event: string) => `1. Outer\n   - ~~~json\n     ${event}\n     ~~~`,
+    (event: string) => `- \`\`\`json\n  ${event}`,
+    (event: string) => `> - \`\`\`json\n>   ${event}\n>   \`\`\``,
+    (event: string) => `> \`\`\`json\n> ${event}`,
+    (event: string) => `> Example\n${event}`,
+    (event: string) => `Example \`\`\n${event}\n\`\` end.`,
+    (event: string) => `<!-- comment -->\n    ${event}`,
+    (event: string) => `[example]: /example\n    ${event}`,
+    (event: string) => `<!-- comment -->\n\t${event}`,
+    (event: string) => `-\t\`\`\`json\n\t${event}\n\t\`\`\``,
+    (event: string) => `<!--\n${event}\n-->`,
+    (event: string) => `[example]: /example "title\n${event}\n"`,
+    (event: string) => `\x1b]8;;https://example.test\x1b\\\`\`\`json\x1b]8;;\x1b\\\n${event}\n\`\`\``,
+  ])("excludes CommonMark report quotes without hiding the following real event %#", (quote) => {
+    const example = quote(record({ quality: 1 }))
+    const only = extractMetrics(example)
+    expect(only.metrics).toEqual([])
+    expect(only.incomplete).toBe(false)
+    expect(evaluate(suite, only, false)[0].status).toBe("inconclusive")
+    const output = `${example}\n\n${record({ quality: 0.5 })}  \n`
+    const metrics = extractMetrics(output)
+    expect(metrics.metrics).toEqual([{ name: "quality", samples: [{ line: highlightLog(output).map(({ text }) => text).join("").split("\n").filter((line) => line.trim()).length, value: 0.5 }] }])
+    expect(metrics.incomplete).toBe(false)
+    expect(evaluate(suite, metrics, false)[0]).toMatchObject({ value: 0.5, status: "fail" })
+  })
+
+  it.each([
+    ["\x1b]0;", "\x07"], ["\x1b]0;", "\x1b\\"], ["\x9d0;", "\x9c"],
+    ["\x1bP", "\x1b\\"], ["\x90", "\x9c"], ["\x1b_", "\x1b\\"],
+  ])("discards entire hidden terminal payloads %j", (open, close) => {
+    const hidden = `${open}\n${record({ quality: 1 })}\nERROR WARNING\n{broken\n${close}`
+    const output = `${hidden}\n\x1b[32m${record({ quality: 0.5 })}\x1b[0m\n${hidden}`
+    expect(extractMetrics(hidden)).toEqual({ metrics: [], lines: 0, errors: 0, warnings: 0, diagnostics: [], incomplete: false })
+    expect(extractMetrics(output)).toEqual(extractMetrics(highlightLog(output).map(({ text }) => text).join("")))
+    expect(extractMetrics(output)).toMatchObject({ metrics: [{ name: "quality", samples: [{ line: 1, value: 0.5 }] }], lines: 1, errors: 0, warnings: 0, incomplete: false })
+  })
+
+  it("discards unterminated terminal strings without manufacturing evidence", () => {
+    for (const open of ["\x1b]0;", "\x1bP", "\x9d", "\x90"]) {
+      const metrics = extractMetrics(`${record({ quality: 0.5 })}\n${open}\n${record({ quality: 1 })}`)
+      expect(metrics.metrics[0].samples).toEqual([{ line: 1, value: 0.5 }])
+    }
+  })
+
+  it("keeps raw JSON string backticks literal, including across records", () => {
+    const events = ["`", "`", "```", "<!--", "[ref]: /url"].map((note) => JSON.stringify({ event: "eval", metrics: { quality: 0.5 }, note }))
+    const metrics = extractMetrics(`Report:\n${events.map((event) => `\t${event}  `).join("\n")}`)
+    expect(metrics.metrics[0].samples).toEqual(events.map((_, index) => ({ line: index + 2, value: 0.5 })))
+    expect(metrics.incomplete).toBe(false)
+    expect(extractMetrics(`\`\n${events[0]}\n\``).metrics).toEqual([])
+  })
+
   it.each([
     (event: string) => `Example only; no benchmark was run.\n\`\`\`json\n${event}\n\`\`\``,
     (event: string) => `  ~~~~json\r\n${event}\r\n  ~~~~\r`,

@@ -65,7 +65,7 @@ while kill -0 "$pid" 2>/dev/null; do
         result=130
         exit "$result"
     fi
-    if [[ ${4:-build} != optimize ]] && (( SECONDS >= 900 )); then
+    if [[ ${4:-build} != optimize ]] && (( SECONDS >= 7200 )); then
         result=124
         exit "$result"
     fi

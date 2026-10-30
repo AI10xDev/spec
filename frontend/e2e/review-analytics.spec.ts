@@ -81,6 +81,29 @@ test("quoted examples cannot create a passing check or replace the last observat
   await expect(dialog.locator(".metric-chart")).toContainText("1 samples")
 })
 
+test("container fences and invisible terminal events cannot hide a later failing observation", async ({ page }) => {
+  const event = record({ quality: 1 })
+  const example = [
+    `- \`\`\`json\n  ${event}\n  \`\`\``,
+    `1. Outer\n   - ~~~json\n     ${event}\n     ~~~`,
+    `> \`\`\`json\n> ${event}`,
+    `Example \`\`\n${event}\n\`\` end.`,
+    `<!-- comment -->\n\t${event}`,
+    `[example]: /example\n    ${event}`,
+    `\x1b]0;title\n${event}\nERROR WARNING\n\x07`,
+    `\x1bP\n${event}\n\x1b\\`,
+    `\x1b]8;;https://example.test\x1b\\\`\`\`json\x1b]8;;\x1b\\\n${event}\n\`\`\``,
+    `- \`\`\`json\n  ${event}`,
+  ].join("\n\n")
+  let dialog = await dashboard(page, example)
+  await expect(dialog.getByRole("row", { name: /Quality/ }).getByRole("cell")).toHaveText(["No data", ">= 0.9", "inconclusive"])
+  await expect(dialog.locator(".metric-chart")).toHaveCount(0)
+  await dialog.getByRole("button", { name: "Close analytics", exact: true }).click()
+  dialog = await dashboard(page, `${example}\n\n${record({ quality: 0.5 })}  `)
+  await expect(dialog.getByRole("row", { name: /Quality/ }).getByRole("cell")).toHaveText(["0.5", ">= 0.9", "fail"])
+  await expect(dialog.locator(".metric-chart")).toContainText("1 samples")
+})
+
 for (const colorScheme of ["light", "dark"] as const) {
   test(`forced-colors ${colorScheme} charts render contrasting system-colored labels, axes, series, dots and bars`, async ({ page }) => {
     await page.emulateMedia({ forcedColors: "active", colorScheme })

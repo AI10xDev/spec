@@ -280,7 +280,7 @@ def config_path(invocation):
 
 
 @contextmanager
-def project_lock(project):
+def project_lock(project, workspace=None):
     @contextmanager
     def private(path, directory=False, parent=None, limit=16384):
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -323,51 +323,52 @@ def project_lock(project):
             raise OptimizeError(f"unsafe target lock directory: {directory}")
         # The supervisor retains this lock, but deliberately closes its descriptor
         # in children. Reopening and locking the same inode would conflict with it.
-        if os.environ.get("SPEC_OPTIM_WORKSPACE_LOCK") != f"{info.st_dev}:{info.st_ino}":
+        reused = os.environ.get("SPEC_OPTIM_WORKSPACE_LOCK") == f"{info.st_dev}:{info.st_ino}"
+        if not reused:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:
                 raise OptimizeError(f"another harness is active for target project: {project}") from error
-            # A free lock does not prove completion after a supervisor crash.
-            # Lock reuse skips this scan: the launcher already checked admission,
-            # and its own current run is intentionally still unresolved.
-            roots = [(directory, registry)]
-            if registry:
-                roots.append((project / ".spec-runs", False))
-            for root, records in roots:
-                try:
-                    with private(root, directory=True) as parent, os.scandir(parent) as entries:
-                        for entry in entries:
-                            if not entry.name.startswith("run-"):
+        # A free lock does not prove completion after a supervisor crash. On reuse,
+        # the launcher checked the registry and its own workspace, not every Git
+        # subdirectory's legacy storage. Do not rescan its unresolved current run.
+        roots = [] if reused else [(directory, registry)]
+        if registry and (not reused or workspace is None or not project.samefile(workspace)):
+            roots.append((project / ".spec-runs", False))
+        for root, records in roots:
+            try:
+                with private(root, directory=True) as parent, os.scandir(parent) as entries:
+                    for entry in entries:
+                        if not entry.name.startswith("run-"):
+                            continue
+                        record = root / entry.name
+                        try:
+                            prior = record
+                            if records:
+                                with private(entry.name, parent=parent) as handle:
+                                    fields = os.read(handle, 16385).split(b"\0")
+                                if (len(fields) not in (2, 3) or fields[-1] != b""
+                                        or not fields[0].startswith(b"/")
+                                        or (len(fields) == 3 and fields[1] not in
+                                            (b"build", b"repository-save", b"optimize"))):
+                                    raise ValueError("invalid harness registry record")
+                                prior = os.fsdecode(fields[0])
+                            with private(prior, directory=True) as run:
+                                with private("status", parent=run, limit=4) as handle:
+                                    status = os.read(handle, 5)
+                            if (not re.fullmatch(rb"(0|[1-9][0-9]{0,2})\n?", status)
+                                    or int(status) > 255):
+                                raise ValueError("invalid terminal status")
+                        except (OSError, ValueError) as error:
+                            # A completing supervisor may retire its record.
+                            if not os.path.lexists(record):
                                 continue
-                            record = root / entry.name
-                            try:
-                                prior = record
-                                if records:
-                                    with private(entry.name, parent=parent) as handle:
-                                        fields = os.read(handle, 16385).split(b"\0")
-                                    if (len(fields) not in (2, 3) or fields[-1] != b""
-                                            or not fields[0].startswith(b"/")
-                                            or (len(fields) == 3 and fields[1] not in
-                                                (b"build", b"repository-save", b"optimize"))):
-                                        raise ValueError("invalid harness registry record")
-                                    prior = os.fsdecode(fields[0])
-                                with private(prior, directory=True) as run:
-                                    with private("status", parent=run, limit=4) as handle:
-                                        status = os.read(handle, 5)
-                                if (not re.fullmatch(rb"(0|[1-9][0-9]{0,2})\n?", status)
-                                        or int(status) > 255):
-                                    raise ValueError("invalid terminal status")
-                            except (OSError, ValueError) as error:
-                                # A completing supervisor may retire its record.
-                                if not os.path.lexists(record):
-                                    continue
-                                raise OptimizeError(
-                                    f"prior harness completion is unresolved at {record}; "
-                                    f"inspect that session before retrying ({error})") from error
-                except FileNotFoundError:
-                    if os.path.lexists(root):
-                        raise OptimizeError(f"unsafe target run storage: {root}")
+                            raise OptimizeError(
+                                f"prior harness completion is unresolved at {record}; "
+                                f"inspect that session before retrying ({error})") from error
+            except FileNotFoundError:
+                if os.path.lexists(root):
+                    raise OptimizeError(f"unsafe target run storage: {root}")
         yield
     finally:
         os.close(fd)
@@ -980,7 +981,7 @@ def run(run_directory, workspace, history=None, config=None):
         invocation = discover(workspace, history)
         target.update(project=str(invocation.project), filename=invocation.filename,
                       output=str(invocation.output), source=invocation.source)
-        with project_lock(invocation.project):
+        with project_lock(invocation.project, workspace):
             path = config_path(invocation) if config is None else Path(config)
             if not path.is_absolute():
                 raise OptimizeError("config path must be absolute")

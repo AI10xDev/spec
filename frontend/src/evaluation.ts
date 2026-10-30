@@ -1,4 +1,5 @@
-import { codeBlockClassifier } from "./code-block"
+import { reportQuotedLines } from "./report-quotes"
+import { normalizeTerminal } from "./terminal"
 
 export type Metric = { name: string; samples: { line: number; value: number }[] }
 export type Metrics = { metrics: Metric[]; lines: number; errors: number; warnings: number; diagnostics: string[]; incomplete: boolean }
@@ -39,7 +40,8 @@ export function extractMetrics(output: string): Metrics {
   let samples = 0
   let invalid = 0
   let limited = false
-  const inCodeBlock = codeBlockClassifier()
+  const lines = normalizeTerminal(output).split("\n")
+  const quoted = reportQuotedLines(lines)
   const add = (name: string, value: unknown, line: number) => {
     if (typeof value !== "number" || !Number.isFinite(value) || !name.trim() || name.length > 160) { invalid++; return }
     if (samples >= 100_000 || (!metrics.has(name) && metrics.size >= 32)) { limited = true; return }
@@ -48,15 +50,13 @@ export function extractMetrics(output: string): Metrics {
     metrics.set(name, metric)
     samples++
   }
-  for (const raw of output.split("\n")) {
-    const text = raw.replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "")
-    const quoted = inCodeBlock(text)
+  for (const [index, text] of lines.entries()) {
     const line = text.trim()
     if (!line) continue
     result.lines++
     if (/\b(?:error|failed|failure|fatal)\b/i.test(line)) result.errors++
     if (/\b(?:warn|warning)\b/i.test(line)) result.warnings++
-    if (quoted || !line.startsWith("{")) continue
+    if (quoted[index] || !line.startsWith("{")) continue
     if (line.length > 64 * 1024) { limited = true; continue }
     let event: unknown
     try { event = JSON.parse(line) } catch { invalid++; continue }
