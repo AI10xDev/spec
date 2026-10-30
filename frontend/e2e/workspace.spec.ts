@@ -779,7 +779,7 @@ test.describe("trailing completions", () => {
     const checkbox = page.getByRole("checkbox", { name: "Trailing completions" })
     await expect(checkbox).toBeDisabled()
     await expect(checkbox).not.toBeChecked()
-    await expect(page.locator("#completion-help")).toContainText("fill in the server .env")
+    await expect(page.locator("#completion-help")).toContainText("choose a provider in Settings")
     const editor = page.getByRole("textbox", { name: "Edit unconfigured.md" })
     await editor.fill("Still editable")
     await page.clock.runFor(1500)

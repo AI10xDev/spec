@@ -516,8 +516,7 @@ def ai_settings(project):
 class ResponsesOptimizer:
     """Model-guided steps; only independently measured scores determine stopping."""
 
-    def __init__(self, spec, invocation, reporter):
-        self.executable = os.environ.get("SPEC_OPTIM_OPENCODE", shutil.which("opencode-source") or "opencode")
+    def _configure_default(self, invocation, reporter):
         explicit_file = "SPEC_AI_ENV_FILE" in os.environ or "KIBI_ENV_FILE" in os.environ
         keys = ("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "OPENAI_API_KEY")
         explicit_credentials = {key: os.environ[key] for key in keys if key in os.environ}
@@ -559,6 +558,30 @@ class ResponsesOptimizer:
             reporter.emit("model_config", source="spec build OpenCode", provider="azure")
         self.headers = {"Content-Type": "application/json",
                         "api-key" if azure else "Authorization": key if azure else "Bearer " + key}
+
+    def __init__(self, spec, invocation, reporter):
+        self.executable = os.environ.get("SPEC_OPTIM_OPENCODE", shutil.which("opencode-source") or "opencode")
+        self.model = MODEL
+        self.protocol = "responses"
+        self.builder_env = None
+        self.builder_model_args = []
+        self.local_provider = False
+        if os.environ.get("SPEC_EXECUTION_PROFILE"):
+            try:
+                helper = Path(os.environ["SPEC_EXECUTION_PROFILE"]).parent / "provider-setup.bash"
+                result = subprocess.run(["bash", "--noprofile", "--norc", str(helper)],
+                                        capture_output=True, timeout=15, check=True)
+                selected = json.loads(result.stdout)
+                self.url, self.headers = selected["url"], selected["headers"]
+                self.model, self.protocol = selected["model"], selected["protocol"]
+                self.local_provider = selected["provider"] == "huggingface"
+                self.builder_env = {"OPENCODE_CONFIG_CONTENT": json.dumps(selected["config"]),
+                                    "SPEC_EXECUTION_API_KEY": selected["key"] or "local-no-key"}
+                self.builder_model_args = ["--model", selected["config"]["model"]]
+            except Exception:
+                raise OptimizeError("Could not configure selected execution provider; refusing fallback") from None
+        else:
+            self._configure_default(invocation, reporter)
         self.invocation = invocation
         self.reporter = reporter
         # Bound build logs independently of how long the original build ran.
@@ -581,9 +604,45 @@ class ResponsesOptimizer:
                 "parameters": {"type": "object", "properties": {
                     "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1}},
                     "required": ["argv"], "additionalProperties": False}, "strict": True}
-        payload = {"model": MODEL, "instructions": SYSTEM_PROMPT, "input": messages,
-                   "tools": [tool], "parallel_tool_calls": False, "store": False,
-                   "include": ["reasoning.encrypted_content"]}
+        payload = {"model": self.model, "instructions": SYSTEM_PROMPT, "input": messages,
+                    "tools": [tool], "parallel_tool_calls": False, "store": False,
+                    "include": ["reasoning.encrypted_content"]}
+        if self.protocol != "responses":
+            translated = []
+            for item in messages:
+                kind = item.get("type")
+                if kind == "function_call":
+                    if not translated or translated[-1]["role"] != "assistant":
+                        translated.append({"role": "assistant", "content": [] if self.protocol == "messages" else None})
+                    if self.protocol == "messages":
+                        translated[-1]["content"].append({"type": "tool_use", "id": item["call_id"],
+                            "name": item["name"], "input": json.loads(item["arguments"])})
+                    else:
+                        translated[-1].setdefault("tool_calls", []).append({"id": item["call_id"], "type": "function",
+                            "function": {"name": item["name"], "arguments": item["arguments"]}})
+                elif kind == "function_call_output":
+                    if self.protocol == "messages":
+                        block = {"type": "tool_result", "tool_use_id": item["call_id"], "content": item["output"]}
+                        if translated and translated[-1]["role"] == "user":
+                            translated[-1]["content"].append(block)
+                        else:
+                            translated.append({"role": "user", "content": [block]})
+                    else:
+                        translated.append({"role": "tool", "tool_call_id": item["call_id"], "content": item["output"]})
+                else:
+                    content = item["content"]
+                    if isinstance(content, list):
+                        content = "".join(part["text"] for part in content)
+                    translated.append({"role": item["role"], "content":
+                        [{"type": "text", "text": content}] if self.protocol == "messages" else content})
+            if self.protocol == "messages":
+                payload = {"model": self.model, "system": SYSTEM_PROMPT, "messages": translated,
+                           "max_tokens": 8192, "tools": [{"name": tool["name"],
+                           "description": tool["description"], "input_schema": tool["parameters"]}]}
+            else:
+                payload = {"model": self.model, "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *translated],
+                           "tools": [{"type": "function", "function": {key: tool[key] for key in
+                                      ("name", "description", "parameters")}}]}
         request = urllib.request.Request(self.url, data=json.dumps(payload).encode(), headers=self.headers)
 
         class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -591,7 +650,7 @@ class ResponsesOptimizer:
                 return None
 
         try:
-            opener = urllib.request.build_opener(NoRedirect)
+            opener = urllib.request.build_opener(NoRedirect, *([urllib.request.ProxyHandler({})] if self.local_provider else []))
             for attempt in range(3):
                 try:
                     connection = opener.open(request, timeout=300)
@@ -616,7 +675,7 @@ class ResponsesOptimizer:
                 400: "check Responses payload support and the model/deployment configuration",
                 401: "check execution-host API credentials and the endpoint's authentication requirements",
                 403: "check API permissions, network access rules, and gateway authentication",
-                404: "check the Responses endpoint path and availability of model/deployment " + MODEL,
+                404: "check the Responses endpoint path and availability of model/deployment " + self.model,
                 408: "provider timed out; retry when available",
                 429: "rate limit or quota exceeded; check provider quota before retrying",
             }.get(error.code, "check provider and gateway availability")
@@ -639,6 +698,47 @@ class ResponsesOptimizer:
             raise OptimizeError(f"Responses request failed: {detail}") from None
         except ValueError:
             raise OptimizeError("Responses request failed: invalid JSON response; check the Responses endpoint and gateway") from None
+        if self.protocol != "responses":
+            try:
+                output = []
+                if self.protocol == "messages":
+                    if body["type"] != "message" or body["role"] != "assistant" or body["stop_reason"] not in ("end_turn", "tool_use"):
+                        raise ValueError()
+                    for part in body["content"]:
+                        if part["type"] == "tool_use":
+                            output.append({"type": "function_call", "call_id": part["id"], "name": part["name"],
+                                           "arguments": json.dumps(part["input"])})
+                        elif part["type"] == "text" and isinstance(part["text"], str):
+                            output.append({"type": "message", "role": "assistant",
+                                           "content": [{"type": "output_text", "text": part["text"]}]})
+                        else:
+                            raise ValueError()
+                    has_calls = any(item["type"] == "function_call" for item in output)
+                    if has_calls != (body["stop_reason"] == "tool_use"):
+                        raise ValueError()
+                else:
+                    if len(body["choices"]) != 1:
+                        raise ValueError()
+                    choice = body["choices"][0]
+                    message = choice["message"]
+                    if (choice["finish_reason"] not in ("stop", "tool_calls")
+                            or message["role"] != "assistant" or message.get("refusal")):
+                        raise ValueError()
+                    if message.get("content"):
+                        if not isinstance(message["content"], str):
+                            raise ValueError()
+                        output.append({"type": "message", "role": "assistant",
+                                       "content": [{"type": "output_text", "text": message["content"]}]})
+                    for call in message.get("tool_calls", []):
+                        if call["type"] != "function" or not isinstance(call["function"]["arguments"], str):
+                            raise ValueError()
+                        output.append({"type": "function_call", "call_id": call["id"],
+                                       "name": call["function"]["name"], "arguments": call["function"]["arguments"]})
+                    if bool(message.get("tool_calls")) != (choice["finish_reason"] == "tool_calls"):
+                        raise ValueError()
+                return output
+            except (KeyError, TypeError, ValueError):
+                raise OptimizeError("Provider returned incomplete or unsupported assistant/tool content") from None
         if not isinstance(body, dict) or body.get("status") != "completed" or not isinstance(body.get("output"), list):
             raise OptimizeError("Responses request did not complete successfully")
         return body["output"]
@@ -648,7 +748,7 @@ class ResponsesOptimizer:
                      + "\n\n" + HISTORY_REVIEW + "\n\n" + prompt}]
         ran_process = False
         while True:
-            self.reporter.emit("model_request", model=MODEL, objective=objective["name"], iteration=iteration)
+            self.reporter.emit("model_request", model=self.model, objective=objective["name"], iteration=iteration)
             output = self.request(messages)
             messages.extend(output)
             calls = [item for item in output if item.get("type") == "function_call"]
@@ -705,7 +805,7 @@ class ResponsesOptimizer:
         )
         text = self.agent(prompt, {"name": "planning", "timeout_seconds": 300}, 0)
         objectives = load_config(path, text)
-        self.reporter.emit("plan", model=MODEL, objectives=objectives)
+        self.reporter.emit("plan", model=self.model, objectives=objectives)
         return objectives
 
     def step(self, objective, iteration, states):
@@ -749,11 +849,11 @@ class ResponsesOptimizer:
             source.write(prompt)
             source.seek(0)
             argv = [executable, "run", "--dir", str(self.invocation.project), "--agent", "build",
-                    "--auto", "--format", "json", "--",
+                    "--auto", "--format", "json", *self.builder_model_args, "--",
                     "Follow the optimization iteration instructions supplied on stdin."]
             self.reporter.emit("builder_start", objective=objective["name"], iteration=iteration, argv=argv)
             result = json.loads(execute(argv, self.invocation, objective, iteration, "builder", self.reporter,
-                                        input_file=source))
+                                        input_file=source, env_overrides=self.builder_env))
         self.reporter.emit("builder_result", objective=objective["name"], iteration=iteration, **result)
         if result["exit_code"] != 0:
             raise OptimizeError(f"{objective['name']}: OpenCode builder exited {result['exit_code']}")
@@ -762,13 +862,31 @@ class ResponsesOptimizer:
 
 class Reporter:
     def __init__(self, directory):
+        self.secrets = []
+        self.pending_output = {}
+        if os.environ.get("SPEC_EXECUTION_PROFILE"):
+            try:
+                key = json.loads(read_limited(Path(os.environ["SPEC_EXECUTION_PROFILE"]), 65536))["apiKey"]
+                self.secrets = sorted({value.encode() for value in (key, json.dumps(key)[1:-1]) if value}, key=len, reverse=True)
+            except Exception:
+                raise OptimizeError("Cannot initialize private execution output filter") from None
         directory.mkdir(parents=True, exist_ok=True)
         self.progress = (directory / "progress.log").open("a", encoding="utf-8")
         self.report = (directory / "report.jsonl").open("a", encoding="utf-8")
         self.commands = (directory / "commands.log").open("ab")
 
     def emit(self, event, **fields):
-        record = json.dumps({"event": event, "timestamp": time.time(), **fields}, allow_nan=False, ensure_ascii=True, sort_keys=True)
+        def redact(value):
+            if isinstance(value, str):
+                for secret in self.secrets:
+                    value = value.replace(secret.decode(), "[REDACTED]")
+            elif isinstance(value, dict):
+                value = {key: redact(item) for key, item in value.items()}
+            elif isinstance(value, list):
+                value = [redact(item) for item in value]
+            return value
+
+        record = json.dumps(redact({"event": event, "timestamp": time.time(), **fields}), allow_nan=False, ensure_ascii=True, sort_keys=True)
         for handle in (self.progress, self.report):
             handle.write(record + "\n")
             handle.flush()
@@ -777,12 +895,29 @@ class Reporter:
         os.fsync(self.commands.fileno())
         print(record, flush=True)
 
-    def command_output(self, data):
+    def command_output(self, data, stream=None):
+        pending = self.pending_output.get(stream, b"") + data
+        keep = max(map(len, self.secrets), default=1) - 1
+        cut = max(0, len(pending) - keep) if data else len(pending)
+        for secret in self.secrets:
+            start = pending.find(secret)
+            while 0 <= start < cut:
+                if start + len(secret) > cut:
+                    cut = start
+                    break
+                start = pending.find(secret, start + 1)
+        data, self.pending_output[stream] = pending[:cut], pending[cut:]
+        for secret in self.secrets:
+            data = data.replace(secret, b"[REDACTED]")
+        if data and stream:
+            data = ("[" + stream + "] ").encode() + data
         remaining = max(0, COMMAND_LOG_LIMIT - self.commands.tell())
         self.commands.write(data[:remaining])
         self.commands.flush()
 
     def close(self):
+        for stream in list(self.pending_output):
+            self.command_output(b"", stream)
         for handle in (self.progress, self.report, self.commands):
             handle.close()
 
@@ -838,8 +973,10 @@ def supervise_command(argv):
     return status if status >= 0 else 128 - status
 
 
-def execute(argv, invocation, objective, iteration, phase, reporter, input_file=None):
+def execute(argv, invocation, objective, iteration, phase, reporter, input_file=None, env_overrides=None):
     env = os.environ.copy()
+    if env_overrides:
+        env.update(env_overrides)
     # A nested invocation must acquire its own lock, not reuse our supervisor's.
     env.pop("SPEC_OPTIM_WORKSPACE_LOCK", None)
     env.update(SPEC_OPTIM_PROJECT=str(invocation.project), SPEC_OPTIM_FILENAME=invocation.filename,
@@ -877,7 +1014,7 @@ def execute(argv, invocation, objective, iteration, phase, reporter, input_file=
                         selector.unregister(key.fileobj)
                         continue
                     if phase != "config":
-                        reporter.command_output(("[" + key.data + "] ").encode() + data)
+                        reporter.command_output(data, stream=key.data)
                     if phase == "config" and key.data == "stdout":
                         if len(metric) + len(data) > CONFIG_LIMIT:
                             raise OptimizeError("OpenCode configuration exceeds 1 MiB")

@@ -110,7 +110,7 @@ pub async fn chat(State(app): State<App>, Json(mut input): Json<Input>) -> Resul
             ));
         }
     }
-    let provider = app.completion.as_ref().ok_or_else(|| {
+    let provider = app.ai_completion().ok_or_else(|| {
         Error(
             StatusCode::SERVICE_UNAVAILABLE,
             "AI chat is not configured".into(),

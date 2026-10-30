@@ -1,5 +1,6 @@
-# SSH attachment: workspace, bytes, alias, supervisor, UUID, name, mode, repository probe, session ID, config bytes.
-# Only an explicit C byte after both uploads cancels; EOF/signals detach after launch.
+# SSH attachment: workspace, bytes, alias, supervisor, UUID, name, mode, repository probe,
+# session ID, config bytes, profile bytes, provider setup script.
+# Only an explicit C byte after all uploads cancels; EOF/signals detach after launch.
 set -eu
 umask 077
 cd -- "$1"
@@ -15,6 +16,8 @@ run_kind=$mode
 repository_probe=${8:-}
 session_id=${9:-}
 config_bytes=${10:-0}
+profile_bytes=${11:-0}
+[[ $profile_bytes =~ ^(0|[1-9][0-9]{0,5})$ ]] && (( profile_bytes <= 65536 )) || exit 125
 [[ $config_bytes =~ ^(0|[1-9][0-9]{0,6})$ ]] || exit 125
 if [[ $mode == optimize ]]; then
     (( config_bytes > 0 && config_bytes <= 1048576 )) || exit 125
@@ -56,6 +59,7 @@ cleanup() {
         # session alone never proves that a supervisor did not start.
         printf '%s\n' '[remote] Launch rejected before supervisor start.' >> "$directory/$log"
         rm -f -- "$directory/snapshot.md"
+        rm -f -- "$directory/execution-profile.json" "$directory/provider-setup.bash"
         [[ -z $config_file ]] || rm -f -- "$config_file"
         printf '125\n' > "$directory/status.tmp"
         mv -T -- "$directory/status.tmp" "$directory/status"
@@ -87,6 +91,7 @@ completed() {
 # worktree has its own Git directory/index; subdirectories and symlinks share it.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
 unset SPEC_OPTIM_WORKSPACE_LOCK SPEC_OPTIM_CONFIG
+unset SPEC_EXECUTION_PROFILE SPEC_EXECUTION_API_KEY
 registry=
 if [[ $(git rev-parse --is-inside-work-tree 2>/dev/null) == true ]]; then
     git_directory=$(git rev-parse --absolute-git-dir)
@@ -174,6 +179,13 @@ fi
 if [[ $mode == repository-save ]]; then
     [[ -n $repository_probe ]] || exit 125
     timeout --kill-after=1s 10s bash --noprofile --norc -c "$repository_probe" -- "$PWD" require-dirty 9<&- >> "$directory/$log" 2>&1 || exit 125
+fi
+if (( profile_bytes > 0 )); then
+    [[ -n ${12:-} ]] || reject 'Missing execution provider setup.'
+    head -c "$profile_bytes" > "$directory/execution-profile.json"
+    [[ $(wc -c < "$directory/execution-profile.json") -eq "$profile_bytes" ]] || reject 'Incomplete execution profile.'
+    printf '%s' "${12}" > "$directory/provider-setup.bash"
+    export SPEC_EXECUTION_PROFILE="$directory/execution-profile.json"
 fi
 # Ignore HUP before fork, and redirect every SSH descriptor before detaching.
 # Ownership transfers before launch so an attachment signal cannot delete live input.

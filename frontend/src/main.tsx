@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useEffectEvent, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { dirty, openTab, savedTab } from "./tabs"
 import type { Document, Output as RunOutput, Tab } from "./tabs"
@@ -7,6 +7,7 @@ import { Chat } from "./chat"
 import { LogOutput } from "./highlighting"
 import { Analytics } from "./analytics"
 import { BuildProgress } from "./progress"
+import { Settings } from "./settings"
 import "./style.css"
 
 type Entry = { name: string; modified: number; bytes: number }
@@ -48,6 +49,8 @@ function App() {
   const [feedback, setFeedback] = useState<Record<string, string>>({})
   const [optimization, setOptimization] = useState<Output | null>(null)
   const [analytics, setAnalytics] = useState(false)
+  const [settings, setSettings] = useState(false)
+  const configRequest = useRef(0)
   const [outputView, setOutputView] = useState<"file" | "optimization">("file")
   const [loadingOutput, setLoadingOutput] = useState<{ id?: string } | null>(null)
   const [retained, setRetained] = useState<(RetainedRuns & { name: string; output?: Output; loading: boolean; listed: boolean }) | null>(null)
@@ -88,16 +91,22 @@ function App() {
     setFiles(await api<Entry[]>("/files"))
   }
 
-  async function connect(event?: React.FormEvent) {
-    event?.preventDefault()
-    setError("")
-    sessionStorage.setItem("spec-token", token)
+  async function refreshConfig() {
+    const request = ++configRequest.current
     const config = await api<{ execution: boolean; completion: boolean; chat: boolean; realtime: boolean; azureRealtime: boolean }>("/config")
+    if (request !== configRequest.current) return
     setExecution(config.execution)
     setCompletion(config.completion)
     setChat(config.chat)
     setRealtime(config.realtime)
     setAzureRealtime(config.azureRealtime)
+  }
+
+  async function connect(event?: React.FormEvent) {
+    event?.preventDefault()
+    setError("")
+    sessionStorage.setItem("spec-token", token)
+    await refreshConfig()
     if (chatName) { setConnected(true); return }
     const entries = await api<Entry[]>("/files")
     setFiles(entries)
@@ -116,6 +125,16 @@ function App() {
   }
 
   useEffect(() => { if (token) void connect().catch(fail) }, [])
+
+  const refreshCapabilities = useEffectEvent(() => {
+    void refreshConfig().catch(() => { /* Retain capabilities on transient focus refresh failures. */ })
+  })
+  useEffect(() => {
+    if (!connected) return
+    const focus = () => refreshCapabilities()
+    window.addEventListener("focus", focus)
+    return () => window.removeEventListener("focus", focus)
+  }, [connected])
 
   useEffect(() => {
     const receive = (event: MessageEvent) => {
@@ -318,7 +337,7 @@ function App() {
   }
 
   async function save(mode: "file" | "build" | "repository" = "file") {
-    if (analytics || !tab || busy || submitting.current || (mode !== "file" && optimization?.recoverable)) return
+    if (settings || analytics || !tab || busy || submitting.current || (mode !== "file" && optimization?.recoverable)) return
     submitting.current = true
     setBusy(true)
     setError("")
@@ -336,13 +355,13 @@ function App() {
   }
 
   function requestBuild() {
-    if (analytics || !tab || busy || submitting.current || !execution || fileOutput?.recoverable || optimization?.recoverable) return
+    if (settings || analytics || !tab || busy || submitting.current || !execution || fileOutput?.recoverable || optimization?.recoverable) return
     if (window.confirm("Send this saved spec over SSH and run remote spec build? Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.")) void save("build")
   }
 
   useEffect(() => {
     function shortcut(event: KeyboardEvent) {
-      if (analytics || !connected || chatName || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key !== "Enter") return
+      if (settings || analytics || !connected || chatName || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key !== "Enter") return
       const target = event.target as HTMLElement | null
       if (target?.closest("[inert]")) return
       if (target?.closest("input, textarea, [contenteditable=true]") && !target.matches(".editor-input textarea")) return
@@ -437,9 +456,10 @@ function App() {
   if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} realtime={realtime} azureRealtime={azureRealtime} />
 
   return <div className="app">
-    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ workspace</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Optimization: {optimization.status}</span>}<div className="analysis-actions"><button title="analytics" onClick={() => setAnalytics(true)}>Analytics</button><button className="primary" title="performance" disabled={!execution || busy || !!pendingRuns} onClick={() => void optimize()}>Performance</button></div></div></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Optimization: {optimization.status}</span>}<div className="analysis-actions"><button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button className="primary" title="performance" disabled={settings || !execution || busy || !!pendingRuns} onClick={() => void optimize()}>Performance</button></div></div></header>
     {analytics && <Analytics api={api} active={active} onClose={() => setAnalytics(false)} />}
-    <div className="workspace">
+    {settings && <Settings api={api} onClose={() => setSettings(false)} onChanged={refreshConfig} />}
+    <div className="workspace" hidden={settings} inert={settings}>
       <aside>
         <div className="sidebar-heading">YOUR WORKSPACE <button title="Refresh file list" aria-label="Refresh file list" onClick={() => void refresh().catch(fail)}>↻</button></div>
         <form className="new-file" onSubmit={create}>
@@ -478,7 +498,7 @@ function App() {
         <div className="panes">
           <section className="editor-pane" aria-label="Spec editing pane">
             <div className="pane-heading"><div><span className="eyebrow">01 / SPEC</span><h2>{tab?.name ?? "Your next idea"}</h2></div><span className="badge">{tab ? dirty(tab) ? "Unsaved" : "Saved" : "Editor"}</span></div>
-            {tabs.map((editor) => <Editor key={editor.name} active={editor.name === active} name={editor.name} value={editor.content} token={token} available={completion} enabled={complete} onEnabled={setComplete} onSave={() => void save()} onChange={(content) => {
+            {tabs.map((editor) => <Editor key={editor.name} active={!settings && editor.name === active} name={editor.name} value={editor.content} token={token} available={completion} enabled={complete} onEnabled={setComplete} onSave={() => void save()} onChange={(content) => {
               setTabs((items) => items.map((item) => item.name === editor.name ? { ...item, content } : item))
             }} />)}
             {!tab && <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}

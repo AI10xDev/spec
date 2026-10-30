@@ -28,6 +28,16 @@ pub(super) fn app(root: &FsPath) -> App {
         token: "test-token".into(),
         remote: None,
         completion: None,
+        settings: Arc::new(
+            settings::Store::open(
+                root.with_extension("settings").join("profile.json"),
+                root,
+                &root.join("ui"),
+                None,
+            )
+            .ok()
+            .unwrap(),
+        ),
         realtime: None,
         azure_realtime: None,
         files: Arc::new(Mutex::new(())),

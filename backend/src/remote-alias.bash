@@ -185,6 +185,14 @@ Current run directory to exclude (JSON path): ${JSON.stringify(require("node:pat
     exit 125
 fi
 export OPENCODE_CONFIG_CONTENT="$spec_build_config"
+spec_build_model_args=()
+if [[ -n ${SPEC_EXECUTION_PROFILE:-} ]]; then
+    spec_build_config=$(bash --noprofile --norc "${SPEC_EXECUTION_PROFILE%/*}/provider-setup.bash" config) || exit 125
+    SPEC_EXECUTION_API_KEY=$(bash --noprofile --norc "${SPEC_EXECUTION_PROFILE%/*}/provider-setup.bash" key) || exit 125
+    export OPENCODE_CONFIG_CONTENT="$spec_build_config" SPEC_EXECUTION_API_KEY
+    spec_build_model=$(bash --noprofile --norc "${SPEC_EXECUTION_PROFILE%/*}/provider-setup.bash" model) || exit 125
+    spec_build_model_args=(--model "$spec_build_model")
+fi
 if [[ $spec_build_mode == repository-save ]]; then
     [[ -n ${4:-} ]] || exit 125
     cd -- "$spec_build_workspace" || exit 125
@@ -194,7 +202,7 @@ if [[ -n $session_id ]]; then
     cd -- "$spec_build_workspace" || exit 125
     # A sentinel preserves trailing newlines otherwise stripped by command substitution.
     spec_build_prompt=$(cat -- "$1" && printf '.') || exit 125
-    opencode-source run --dir "$spec_build_workspace" --session "$session_id" --agent build -- "${spec_build_prompt%.}"
+    opencode-source run --dir "$spec_build_workspace" --session "$session_id" --agent build "${spec_build_model_args[@]}" -- "${spec_build_prompt%.}"
 else
     spec build "$1"
 fi

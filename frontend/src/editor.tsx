@@ -158,10 +158,10 @@ export function Editor({ active, name, value: content, token, available, enabled
 
   return <>
     <div className="completion-controls" style={{ display: active ? undefined : "none" }} inert={!active}>
-      <label title={available ? "Sends recent editor text to your configured Azure provider" : "Configure Azure completion on the local Rust server"}>
+      <label title={available ? "Sends recent editor text to your configured model provider" : "Configure a model provider in workspace Settings"}>
         <input type="checkbox" checked={available && enabled} disabled={!available} onChange={(event) => onEnabled(event.target.checked)} /> Trailing completions
       </label>
-      <span id={active ? "completion-help" : undefined} aria-live="polite">{!available ? "Azure not configured: fill in the server .env (see .env.example), restart and reload" : suffix ? "Tab to accept part / Esc to dismiss" : message || "One sentence part at a time"}</span>
+      <span id={active ? "completion-help" : undefined} aria-live="polite">{!available ? "AI not configured: choose a provider in Settings or configure the server environment" : suffix ? "Tab to accept part / Esc to dismiss" : message || "One sentence part at a time"}</span>
       {plain && <span>Large file: plain-text display (highlighting and line numbers off)</span>}
       {/* Reserve space so showing acceptance does not shrink a scrolled editor. */}
       <button style={{ visibility: suffix ? "visible" : "hidden" }} disabled={!suffix} onPointerDown={(event) => event.preventDefault()} onClick={accept} title={suffix}>Accept part</button>

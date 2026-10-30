@@ -60,6 +60,119 @@ class OptimizerTest(unittest.TestCase):
         os.utime(record, ns=(timestamp, timestamp))
         return record, output
 
+    def selected_profile(self, provider, endpoint, model="chosen-model", key='private-"selected-key'):
+        directory = self.workspace / "private execution"
+        directory.mkdir(exist_ok=True, mode=0o700)
+        profile = directory / "execution-profile.json"
+        profile.write_text(json.dumps({"provider": provider, "endpoint": endpoint, "model": model,
+                                      "apiVersion": "2026-01-01", "apiKey": key}))
+        profile.chmod(0o600)
+        source = Path(optimize.__file__).parent / "remote-provider.bash"
+        (directory / "provider-setup.bash").write_bytes(source.read_bytes())
+        return {"SPEC_EXECUTION_PROFILE": str(profile), "OPENCODE_CONFIG_CONTENT": json.dumps({
+            "instructions": ["AGENTS.md"], "plugin": ["existing-plugin"],
+            "agent": {"build": {"model": "old/model", "prompt": "preserve prompt"}},
+            "mode": {"build": {"model": "old/model", "temperature": 0.2}},
+            "provider": {"old": {"npm": "preserve"}}, "enabled_providers": ["old"]})}
+
+    def test_selected_provider_matrix_routes_reviewer_and_builder_without_default_credentials(self):
+        self.record()
+        invocation = optimize.discover(self.workspace, self.history)
+        cases = [("azure", "https://azure.example/openai/v1", "responses", "@ai-sdk/azure", "/openai/v1/responses?api-version=2026-01-01"),
+                 ("azure", "https://azure.example", "chat", "@ai-sdk/openai-compatible", "/openai/deployments/chosen-model/chat/completions?api-version=2026-01-01"),
+                 ("openai", "https://openai.example/v1", "responses", "@ai-sdk/openai", "/v1/responses"),
+                 ("claude", "https://claude.example/v1", "messages", "@ai-sdk/anthropic", "/v1/messages"),
+                 ("openrouter", "https://openrouter.example", "chat", "@ai-sdk/openai-compatible", "/api/v1/chat/completions"),
+                 ("huggingface", "http://localhost:8080/v1", "chat", "@ai-sdk/openai-compatible", "/v1/chat/completions")]
+        for provider, endpoint, protocol, npm, suffix in cases:
+            with self.subTest(provider=provider, endpoint=endpoint), \
+                    mock.patch.dict(os.environ, self.selected_profile(provider, endpoint), clear=True), \
+                    mock.patch.object(optimize, "build_ai_settings", side_effect=AssertionError("default credentials read")), \
+                    mock.patch.object(optimize, "ai_settings", side_effect=AssertionError("dotenv read")):
+                agent = optimize.ResponsesOptimizer("Optimize", invocation, self.reporter())
+                self.assertEqual(agent.protocol, protocol)
+                self.assertTrue(agent.url.endswith(suffix), agent.url)
+                config = json.loads(agent.builder_env["OPENCODE_CONFIG_CONTENT"])
+                self.assertEqual(config["instructions"], ["AGENTS.md"])
+                self.assertEqual(config["plugin"], ["existing-plugin"])
+                self.assertEqual(config["agent"]["build"]["prompt"], "preserve prompt")
+                self.assertEqual(config["provider"]["old"]["npm"], "preserve")
+                self.assertEqual(config["provider"]["spec-execution"]["npm"], npm)
+                for section in ("agent", "mode"):
+                    self.assertEqual(config[section]["build"]["model"], "spec-execution/chosen-model")
+                self.assertNotIn('private-', json.dumps(config))
+                with mock.patch.object(optimize, "execute", return_value='{"exit_code":0,"output":"ok"}') as execute:
+                    agent.build(self.objective(), 1, [])
+                    self.assertIn("spec-execution/chosen-model", execute.call_args.args[0])
+                    self.assertEqual(execute.call_args.kwargs["env_overrides"], agent.builder_env)
+
+    def test_selected_protocols_round_trip_tools_and_reject_truncated_responses(self):
+        self.record()
+        invocation = optimize.discover(self.workspace, self.history)
+        for provider, endpoint in (("openai", "https://api.example/v1"),
+                                   ("claude", "https://api.example/v1"),
+                                   ("huggingface", "http://127.0.0.1:8080/v1")):
+            with self.subTest(provider=provider), mock.patch.dict(os.environ, self.selected_profile(provider, endpoint), clear=True):
+                agent = optimize.ResponsesOptimizer("Optimize", invocation, self.reporter())
+                calls = model_tool(["validate"], "call-one") + model_tool(["inspect"], "call-two")
+                if provider == "openai":
+                    body = {"status": "completed", "output": calls}
+                elif provider == "claude":
+                    body = {"type": "message", "role": "assistant", "stop_reason": "tool_use", "content": [
+                        {"type": "tool_use", "id": call["call_id"], "name": call["name"], "input": json.loads(call["arguments"])} for call in calls]}
+                else:
+                    body = {"choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "tool_calls": [
+                        {"type": "function", "id": call["call_id"], "function": {"name": call["name"], "arguments": call["arguments"]}} for call in calls]}}]}
+                opener = mock.Mock()
+                with mock.patch.object(optimize.urllib.request, "build_opener", return_value=opener):
+                    opener.open.return_value = contextlib.closing(io.BytesIO(json.dumps(body).encode()))
+                    result = agent.request([{"role": "user", "content": "inspect"}])
+                    self.assertEqual(result, calls)
+                    history = [{"role": "user", "content": "inspect"}, *result,
+                               {"type": "function_call_output", "call_id": "call-one", "output": "validated"},
+                               {"type": "function_call_output", "call_id": "call-two", "output": "inspected"}]
+                    opener.open.return_value = contextlib.closing(io.BytesIO(json.dumps(body).encode()))
+                    agent.request(history)
+                    payload = json.loads(opener.open.call_args.args[0].data)
+                    self.assertEqual(payload["model"], "chosen-model")
+                    if provider == "claude":
+                        self.assertEqual([item["tool_use_id"] for item in payload["messages"][-1]["content"]], ["call-one", "call-two"])
+                        body["stop_reason"] = "max_tokens"
+                    elif provider == "huggingface":
+                        self.assertEqual(payload["messages"][-1]["tool_call_id"], "call-two")
+                        self.assertEqual(len(payload["messages"][-3]["tool_calls"]), 2)
+                        body["choices"][0]["finish_reason"] = "length"
+                    else:
+                        body["status"] = "incomplete"
+                    opener.open.return_value = contextlib.closing(io.BytesIO(json.dumps(body).encode()))
+                    with self.assertRaises(optimize.OptimizeError):
+                        agent.request(history)
+
+    def test_selected_profile_fails_closed_and_redacts_reports(self):
+        self.record()
+        invocation = optimize.discover(self.workspace, self.history)
+        env = self.selected_profile("huggingface", "http://localhost:8080/v1", key="private-secret")
+        with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(io.StringIO()):
+            reporter = optimize.Reporter(self.logs)
+            reporter.emit("test", value="private-secret")
+            reporter.command_output(b"before private-")
+            reporter.command_output(b"secret after")
+            reporter.command_output(b"private-", stream="stdout")
+            reporter.command_output(b"unrelated", stream="stderr")
+            reporter.command_output(b"secret", stream="stdout")
+            reporter.close()
+            for name in ("report.jsonl", "commands.log", "progress.log"):
+                self.assertNotIn("private-secret", (self.logs / name).read_text())
+                self.assertIn("[REDACTED]", (self.logs / name).read_text())
+            profile = Path(env["SPEC_EXECUTION_PROFILE"])
+            profile.chmod(0o644)
+            with self.assertRaisesRegex(optimize.OptimizeError, "refusing fallback"):
+                optimize.ResponsesOptimizer("Optimize", invocation, self.reporter())
+        for provider, endpoint in (("huggingface", "http://public.example/v1"), ("openai", "http://localhost/v1")):
+            with mock.patch.dict(os.environ, self.selected_profile(provider, endpoint), clear=True):
+                with self.assertRaisesRegex(optimize.OptimizeError, "refusing fallback"):
+                    optimize.ResponsesOptimizer("Optimize", invocation, self.reporter())
+
     def objective(self, name="score", command=None, measure=None, **options):
         return {"name": name, "command": command or python("pass"),
                 "measure": measure or python("print(1)"), "direction": "maximize", **options}

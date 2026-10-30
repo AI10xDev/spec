@@ -200,8 +200,22 @@ impl Remote {
         session_id: &str,
         config_bytes: usize,
     ) -> Command {
+        self.execution_command(bytes, id, name, mode, session_id, config_bytes, 0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execution_command(
+        &self,
+        bytes: usize,
+        id: &str,
+        name: &str,
+        mode: &str,
+        session_id: &str,
+        config_bytes: usize,
+        profile_bytes: usize,
+    ) -> Command {
         self.ssh(format!(
-            "bash -c {} -- {} {} {} {} {} {} {} {} {} {}",
+            "bash -c {} -- {} {} {} {} {} {} {} {} {} {} {} {}",
             quote(include_str!("remote-build.bash")),
             quote(&self.directory),
             bytes,
@@ -213,6 +227,8 @@ impl Remote {
             quote(include_str!("remote-repository.bash")),
             quote(session_id),
             config_bytes,
+            profile_bytes,
+            quote(include_str!("remote-provider.bash")),
         ))
     }
 

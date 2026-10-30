@@ -37,6 +37,7 @@ mod completion;
 mod realtime;
 mod recovery;
 mod remote;
+mod settings;
 use azure_realtime::AzureRealtime;
 use completion::Completion;
 use realtime::Realtime;
@@ -55,6 +56,7 @@ struct App {
     token: String,
     remote: Option<Remote>,
     completion: Option<Completion>,
+    settings: Arc<settings::Store>,
     realtime: Option<Realtime>,
     azure_realtime: Option<AzureRealtime>,
     files: Arc<Mutex<()>>,
@@ -63,6 +65,14 @@ struct App {
     recovery_runs: Arc<recovery::RunGates>,
     // Serializes admission and latest-pointer changes, never polling or cancellation.
     recovery_gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl App {
+    fn ai_completion(&self) -> Option<Completion> {
+        self.settings
+            .completion()
+            .or_else(|| self.completion.clone())
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -398,7 +408,7 @@ async fn continue_recommended(
     start_run(app, RunInput::Continue(id, input.message)).await
 }
 
-async fn repository(State(app): State<App>) -> Result<Json<remote::RepositoryStatus>> {
+async fn repository(State(app): State<App>) -> Result<Json<serde_json::Value>> {
     let status = match &app.remote {
         Some(remote) => remote
             .repository_status()
@@ -411,6 +421,10 @@ async fn repository(State(app): State<App>) -> Result<Json<remote::RepositorySta
             model: "azure/gpt-6-sol",
         },
     };
+    let mut status = serde_json::json!(status);
+    if let Some(profile) = app.settings.profile() {
+        status["model"] = format!("{}/{}", profile.provider, profile.model).into();
+    }
     Ok(Json(status))
 }
 
@@ -422,6 +436,17 @@ async fn repository_save(
 }
 
 async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>> {
+    // Capture once per admission; never persist credentials with the job or snapshot.
+    let profile = app.settings.profile();
+    let profile_bytes = profile
+        .as_ref()
+        .map(serde_json::to_vec)
+        .transpose()
+        .map_err(|_| invalid("Cannot encode execution provider settings"))?
+        .unwrap_or_default();
+    if profile_bytes.len() > 65536 {
+        return Err(invalid("Execution provider settings exceed 64 KiB"));
+    }
     let repository_save = matches!(&input, RunInput::RepositorySave(_));
     let optimization = matches!(&input, RunInput::Optimize(_));
     let remote = app.remote.as_ref().ok_or_else(|| Error(
@@ -581,8 +606,27 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         }
         jobs.push(job);
     }
-    // Both operations use the same fixed adapter and durable output/status protocol.
-    let mut command = if let Some(session) = &session_id {
+    // All operations use the same fixed adapter and durable output/status protocol.
+    let mode = if session_id.is_some() {
+        "continue"
+    } else if repository_save {
+        "repository-save"
+    } else if optimization {
+        "optimize"
+    } else {
+        "build"
+    };
+    let mut command = if !profile_bytes.is_empty() {
+        remote.execution_command(
+            content.len(),
+            &id,
+            &name,
+            mode,
+            session_id.as_deref().unwrap_or(""),
+            optimization_spec.len(),
+            profile_bytes.len(),
+        )
+    } else if let Some(session) = &session_id {
         remote.continuation_command(content.len(), &id, &name, session)
     } else if repository_save {
         remote.repository_command(content.len(), &id, &name)
@@ -628,7 +672,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             if session_id.is_some() {
                 b"[started] Submitting feedback and continuing the same build session with automatic tool approval.\n"
             } else if repository_save {
-                b"[started] remote repository save over SSH: azure/gpt-6-sol with the saved snapshot as context and the existing repository workflow. Output and logs only.\n"
+                b"[started] remote repository save over SSH with the saved snapshot as context and the existing repository workflow. Output and logs only.\n"
             } else if optimization {
                 b"[started] Uploading the editor's .optim spec to remote ~/projects and optimizing the latest detached build using its absolute path. No iteration or time limit; Stop run cancels. Progress and gain reports follow.\n"
             } else {
@@ -636,11 +680,13 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             },
         );
         // EOF only detaches. Stop sends a distinct control byte after the entire
-        // snapshot and optimization spec, so an early Stop cannot corrupt either.
+        // snapshot, optimization spec, and profile, so an early Stop cannot corrupt them.
         let mut control = stopped.clone();
         let mut upload = tokio::spawn(async move {
             stdin.write_all(content.as_bytes()).await?;
             stdin.write_all(optimization_spec.as_bytes()).await?;
+            stdin.write_all(&profile_bytes).await?;
+            drop(profile_bytes);
             let _ = control.changed().await;
             if *control.borrow() == RunControl::Cancel {
                 stdin.write_all(b"C").await?;
@@ -861,14 +907,22 @@ fn router(app: App) -> Router {
         .route(
             "/api/config",
             get(|State(app): State<App>| async move {
+                let completion = app.ai_completion().is_some();
                 Json(serde_json::json!({
                     "execution": app.remote.is_some(),
-                    "completion": app.completion.is_some(),
-                    "chat": app.completion.is_some(),
+                    "completion": completion,
+                    "chat": completion,
                     "realtime": app.realtime.is_some(),
                     "azureRealtime": app.azure_realtime.is_some(),
                 }))
             }),
+        )
+        .route(
+            "/api/settings",
+            get(settings::get)
+                .put(settings::put)
+                .delete(settings::delete)
+                .layer(DefaultBodyLimit::max(settings::MAX_BODY)),
         )
         .route("/api/files", get(list))
         .route("/api/analytics", post(analytics::report))
@@ -935,7 +989,20 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let _lock = nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusiveNonblock)
         .map_err(|(_, error)| format!("Workspace is already served: {error}"))?;
     let remote = Remote::from_env()?;
-    let completion = Completion::from_env()?;
+    let completion = Completion::from_env();
+    let ui = std::env::var("SPEC_UI_DIR").unwrap_or_else(|_| "../frontend/dist".into());
+    let settings = Arc::new(settings::Store::from_env(
+        &root,
+        FsPath::new(&ui),
+        completion.as_ref().ok().and_then(Option::as_ref),
+    )?);
+    // A saved profile overrides invalid text environment settings, but without one
+    // startup must still fail rather than silently disabling a configured provider.
+    let completion = match completion {
+        Ok(completion) => completion,
+        Err(_) if settings.profile().is_some() => None,
+        Err(error) => return Err(error.into()),
+    };
     let realtime = Realtime::from_env()?;
     let azure_realtime = AzureRealtime::from_env().unwrap_or_else(|error| {
         eprintln!("Azure Realtime voice disabled: {error}. Text chat configuration is unchanged.");
@@ -946,6 +1013,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
         remote,
         completion,
+        settings,
         realtime,
         azure_realtime,
         files: Arc::new(Mutex::new(())),
@@ -964,11 +1032,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         app.token
     );
     println!("Workspace: {}", app.root.display());
-    if app.completion.is_some() {
+    if app.ai_completion().is_some() {
         println!("AI chat and ghost text: enabled");
     } else {
         println!(
-            "AI chat and ghost text: disabled. Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env or the server environment; see .env.example. Then restart the server and reload."
+            "AI chat and ghost text: disabled. Configure a provider in Settings, or set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env or the server environment and restart; see .env.example."
         );
     }
     if app.azure_realtime.is_some() {
@@ -983,7 +1051,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             "WARNING: SSH spec build requests automatic tool approval (SPEC_BUILD_AUTO=1) with remote user privileges. Only run trusted specs."
         );
     }
-    let ui = std::env::var("SPEC_UI_DIR").unwrap_or_else(|_| "../frontend/dist".into());
     let server = router(app.clone())
         .fallback_service(ServeDir::new(ui))
         .layer(middleware::from_fn(

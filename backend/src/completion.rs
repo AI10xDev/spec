@@ -18,7 +18,8 @@ pub struct Completion {
     key: HeaderValue,
     deployment: String,
     responses: bool,
-    slots: Arc<Semaphore>,
+    profile: crate::settings::Profile,
+    pub(crate) slots: Arc<Semaphore>,
 }
 
 impl Completion {
@@ -114,11 +115,142 @@ impl Completion {
         Ok(Some(Self {
             client,
             url,
-            key,
+            key: key.clone(),
             deployment: deployment.into(),
             responses,
+            profile: crate::settings::Profile {
+                provider: "azure".into(),
+                model: deployment.into(),
+                endpoint: endpoint.into(),
+                api_version: version.unwrap_or_default().into(),
+                api_key: key.to_str().unwrap().into(),
+            },
             slots: Arc::new(Semaphore::new(4)),
         }))
+    }
+
+    pub fn profile(&self) -> crate::settings::Profile {
+        self.profile.clone()
+    }
+
+    pub fn from_profile(
+        profile: &crate::settings::Profile,
+    ) -> std::result::Result<Self, &'static str> {
+        let local = profile.provider == "huggingface";
+        if !matches!(
+            profile.provider.as_str(),
+            "azure" | "openai" | "claude" | "openrouter" | "huggingface"
+        ) {
+            return Err("Unknown AI provider");
+        }
+        if profile.model.is_empty()
+            || profile.model.len() > 256
+            || !profile
+                .model
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_.:/".contains(&c))
+            || profile
+                .model
+                .split('/')
+                .any(|part| matches!(part, "" | "." | ".."))
+        {
+            return Err("Model must be a bounded model identifier");
+        }
+        if profile.api_key.len() > 4096
+            || (!local && profile.api_key.is_empty())
+            || !profile.api_key.is_ascii()
+            || profile
+                .api_key
+                .bytes()
+                .any(|c| c.is_ascii_control() || c.is_ascii_whitespace())
+        {
+            return Err(
+                "API key is required for cloud providers and must be bounded without whitespace",
+            );
+        }
+        if profile.api_version.len() > 128
+            || !profile
+                .api_version
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-.".contains(&c))
+        {
+            return Err("Invalid API version");
+        }
+        if profile.endpoint.is_empty()
+            || profile.endpoint.len() > 2048
+            || profile.endpoint.trim() != profile.endpoint
+            || profile
+                .endpoint
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+        {
+            return Err("Invalid AI endpoint");
+        }
+        let mut url = Url::parse(&profile.endpoint).map_err(|_| "Invalid AI endpoint")?;
+        let loopback = url.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        if url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !(url.scheme() == "https" || (local && loopback && url.scheme() == "http"))
+            || (local && !loopback)
+        {
+            return Err(
+                "Cloud endpoints require HTTPS; local endpoints require localhost or a loopback address, without credentials, query, or fragment",
+            );
+        }
+        if profile.provider == "azure" {
+            let mut completion = Self::configured(
+                Some(&profile.endpoint),
+                Some(&profile.api_key),
+                Some(&profile.model),
+                Some(&profile.api_version),
+            )?
+            .ok_or("Invalid Azure profile")?;
+            completion.profile = profile.clone();
+            return Ok(completion);
+        }
+        let (base, action) = match profile.provider.as_str() {
+            "openai" => ("/v1", "/responses"),
+            "claude" => ("/v1", "/messages"),
+            "openrouter" => ("/api/v1", "/chat/completions"),
+            _ => ("/v1", "/chat/completions"),
+        };
+        let full = format!("{base}{action}");
+        if !matches!(url.path().trim_end_matches('/'), "")
+            && url.path().trim_end_matches('/') != base
+            && url.path().trim_end_matches('/') != full
+        {
+            return Err("Endpoint must be a provider root, API base, or completion endpoint");
+        }
+        url.set_path(&full);
+        let mut key = HeaderValue::from_str(&profile.api_key).map_err(|_| "Invalid API key")?;
+        key.set_sensitive(true);
+        let mut builder = Client::builder()
+            .https_only(!local)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(TIMEOUT);
+        if local {
+            builder = builder.no_proxy();
+        }
+        Ok(Self {
+            client: builder
+                .build()
+                .map_err(|_| "Could not initialize completion client")?,
+            url,
+            key,
+            deployment: profile.model.clone(),
+            responses: profile.provider == "openai",
+            profile: profile.clone(),
+            slots: Arc::new(Semaphore::new(4)),
+        })
     }
 
     async fn suffix(&self, prefix: &str) -> Result<String> {
@@ -156,16 +288,27 @@ impl Completion {
                 "tools": [],
                 "tool_choice": "none",
             })
+        } else if self.profile.provider == "claude" {
+            json!({"model": self.deployment, "system": instructions, "messages": messages, "max_tokens": max_tokens})
         } else {
             let messages: Vec<_> =
                 std::iter::once(json!({"role": "system", "content": instructions}))
                     .chain(messages.iter().cloned())
                     .collect();
-            json!({
+            let mut payload = json!({
                 "messages": messages,
                 "max_completion_tokens": max_tokens,
                 "store": false,
-            })
+            });
+            if self.profile.provider != "azure" {
+                payload["model"] = json!(self.deployment);
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("max_completion_tokens");
+                payload["max_tokens"] = json!(max_tokens);
+            }
+            payload
         };
         // Never expose reqwest errors: they can contain URLs or provider details.
         let network_error = |error: reqwest::Error| {
@@ -178,11 +321,22 @@ impl Completion {
                 provider_error()
             }
         };
-        let mut request = self
-            .client
-            .post(self.url.clone())
-            .header("api-key", self.key.clone())
-            .json(&payload);
+        let mut request = self.client.post(self.url.clone()).json(&payload);
+        request = match self.profile.provider.as_str() {
+            "azure" => request.header("api-key", self.key.clone()),
+            "claude" => request.header("x-api-key", self.key.clone()).header(
+                "anthropic-version",
+                if self.profile.api_version.is_empty() {
+                    "2023-06-01"
+                } else {
+                    &self.profile.api_version
+                },
+            ),
+            _ if !self.key.is_empty() => {
+                request.bearer_auth(self.key.to_str().map_err(|_| provider_error())?)
+            }
+            _ => request,
+        };
         if let Some(timeout) = timeout {
             request = request.timeout(timeout);
         }
@@ -224,6 +378,21 @@ impl Completion {
                         _ => return Err(provider_error()),
                     }
                 }
+            }
+        } else if self.profile.provider == "claude" {
+            if body["type"] != "message" || body["role"] != "assistant" {
+                return Err(provider_error());
+            }
+            match body["stop_reason"].as_str() {
+                Some("end_turn" | "stop_sequence") => {}
+                Some("max_tokens" | "refusal") => return Ok(None),
+                _ => return Err(provider_error()),
+            }
+            for content in body["content"].as_array().ok_or_else(provider_error)? {
+                if content["type"] != "text" {
+                    return Err(provider_error());
+                }
+                text.push_str(content["text"].as_str().ok_or_else(provider_error)?);
             }
         } else {
             let choice = &body["choices"][0];
@@ -303,7 +472,7 @@ pub async fn complete(State(app): State<App>, Json(input): Json<Input>) -> Resul
     {
         return Err(invalid("Completion prefix contains control characters"));
     }
-    let provider = app.completion.as_ref().ok_or_else(|| {
+    let provider = app.ai_completion().ok_or_else(|| {
         Error(
             StatusCode::SERVICE_UNAVAILABLE,
             "AI completion is not configured".into(),
@@ -554,6 +723,346 @@ mod tests {
             ]})
         } else {
             json!({"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": text}}]})
+        }
+    }
+
+    fn profile(provider: &str) -> crate::settings::Profile {
+        crate::settings::Profile {
+            provider: provider.into(),
+            model: if provider == "azure" {
+                "deployment"
+            } else {
+                "org/model"
+            }
+            .into(),
+            endpoint: match provider {
+                "azure" => "https://azure.test/openai/v1",
+                "openai" => "https://api.openai.com/v1",
+                "claude" => "https://api.anthropic.com/v1",
+                "openrouter" => "https://openrouter.ai/api/v1",
+                _ => "http://127.0.0.1:8080/v1",
+            }
+            .into(),
+            api_version: String::new(),
+            api_key: "mock-secret".into(),
+        }
+    }
+
+    async fn mock_profile(profile: crate::settings::Profile, body: Response) -> Mock {
+        let mut mock = mock(true, body, Duration::ZERO).await;
+        let transport = mock.state.completion.as_ref().unwrap();
+        let mut provider = Completion::from_profile(&profile).unwrap();
+        provider.client = transport.client.clone();
+        provider.url.set_scheme("http").unwrap();
+        provider.url.set_host(Some("127.0.0.1")).unwrap();
+        provider.url.set_port(transport.url.port()).unwrap();
+        mock.state.completion = Some(provider);
+        mock
+    }
+
+    fn provider_answer(provider: &str) -> Value {
+        if provider == "claude" {
+            json!({"type": "message", "role": "assistant", "stop_reason": "end_turn", "content": [{"type": "text", "text": " useful"}, {"type": "text", "text": " suffix"}]})
+        } else {
+            answer(matches!(provider, "azure" | "openai"), " useful suffix")
+        }
+    }
+
+    #[test]
+    fn provider_profiles_validate_urls_credentials_and_model_bounds() {
+        for provider in ["azure", "openai", "claude", "openrouter", "huggingface"] {
+            let original = profile(provider);
+            assert!(Completion::from_profile(&original).is_ok());
+            for endpoint in [
+                "http://remote.test/v1",
+                "https://user:mock-secret@remote.test/v1",
+                "https://remote.test/v1?key=mock-secret",
+                "https://remote.test/v1#mock-secret",
+                "https://remote.test/invalid",
+                " https://remote.test/v1",
+                "https://remote.test/\\v1",
+                "https://remote.test/v1\n",
+            ] {
+                let mut bad = original.clone();
+                bad.endpoint = endpoint.into();
+                let error = Completion::from_profile(&bad).err().unwrap();
+                assert!(!error.contains("mock-secret"));
+            }
+            for (field, value) in [
+                ("model", "".into()),
+                ("model", "x".repeat(257)),
+                ("model", "../model".into()),
+                ("key", "x".repeat(4097)),
+                ("key", "bad\r\nkey".into()),
+                ("version", "x".repeat(129)),
+                ("endpoint", format!("https://test/{}", "x".repeat(2049))),
+            ] {
+                let mut bad = original.clone();
+                match field {
+                    "model" => bad.model = value,
+                    "key" => bad.api_key = value,
+                    "version" => bad.api_version = value,
+                    _ => bad.endpoint = value,
+                }
+                assert!(
+                    Completion::from_profile(&bad).is_err(),
+                    "{provider} {field}"
+                );
+            }
+            let mut no_key = original.clone();
+            no_key.api_key.clear();
+            assert_eq!(
+                Completion::from_profile(&no_key).is_ok(),
+                provider == "huggingface"
+            );
+        }
+        for endpoint in [
+            "http://localhost:8080",
+            "http://127.0.0.2:8080/v1",
+            "http://[::1]:8080/v1/chat/completions",
+            "https://localhost/v1/",
+        ] {
+            let mut local = profile("huggingface");
+            local.endpoint = endpoint.into();
+            local.api_key.clear();
+            assert!(Completion::from_profile(&local).is_ok(), "{endpoint}");
+        }
+        for endpoint in [
+            "http://localhost.evil.test/v1",
+            "http://192.168.1.3/v1",
+            "https://huggingface.co/v1",
+        ] {
+            let mut local = profile("huggingface");
+            local.endpoint = endpoint.into();
+            assert!(Completion::from_profile(&local).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn all_provider_adapters_send_expected_auth_payloads_and_parse_text() {
+        for provider in ["azure", "openai", "claude", "openrouter", "huggingface"] {
+            let mut mock = mock_profile(
+                profile(provider),
+                Json(provider_answer(provider)).into_response(),
+            )
+            .await;
+            let response = request(
+                mock.state.clone(),
+                "POST",
+                "/api/completions",
+                json!({"prefix": "hello"}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{provider}");
+            assert_eq!(
+                response_json(response).await,
+                json!({"suffix": " useful suffix"})
+            );
+            let (uri, headers, payload) = mock.requests.recv().await.unwrap();
+            assert_eq!(
+                uri.path(),
+                match provider {
+                    "azure" => "/openai/v1/responses",
+                    "openai" => "/v1/responses",
+                    "claude" => "/v1/messages",
+                    "openrouter" => "/api/v1/chat/completions",
+                    _ => "/v1/chat/completions",
+                }
+            );
+            let auth = match provider {
+                "azure" => "api-key",
+                "claude" => "x-api-key",
+                _ => "authorization",
+            };
+            assert_eq!(
+                headers[auth],
+                if auth == "authorization" {
+                    "Bearer mock-secret"
+                } else {
+                    "mock-secret"
+                }
+            );
+            for other in ["authorization", "api-key", "x-api-key"] {
+                if other != auth {
+                    assert!(!headers.contains_key(other));
+                }
+            }
+            assert_eq!(
+                payload["model"],
+                if provider == "azure" {
+                    "deployment"
+                } else {
+                    "org/model"
+                }
+            );
+            assert!(!payload.to_string().contains("mock-secret"));
+            match provider {
+                "azure" | "openai" => {
+                    assert_eq!(payload["instructions"], PROMPT);
+                    assert_eq!(
+                        payload["input"],
+                        json!([{"role":"user", "content":"hello"}])
+                    );
+                    assert_eq!(payload["max_output_tokens"], 512);
+                    assert_eq!(payload["store"], false);
+                }
+                "claude" => {
+                    assert_eq!(headers["anthropic-version"], "2023-06-01");
+                    assert_eq!(payload["system"], PROMPT);
+                    assert_eq!(
+                        payload["messages"],
+                        json!([{"role":"user", "content":"hello"}])
+                    );
+                    assert_eq!(payload["max_tokens"], 512);
+                    assert!(payload.get("store").is_none());
+                }
+                _ => {
+                    assert_eq!(
+                        payload["messages"],
+                        json!([{"role":"system", "content": PROMPT}, {"role":"user", "content":"hello"}])
+                    );
+                    assert_eq!(payload["max_tokens"], 512);
+                }
+            }
+        }
+        let mut local = profile("huggingface");
+        local.api_key.clear();
+        let mut mock =
+            mock_profile(local, Json(provider_answer("huggingface")).into_response()).await;
+        assert_eq!(
+            request(mock.state.clone(), "POST", "/api/chat", chat_input())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let (_, headers, _) = mock.requests.recv().await.unwrap();
+        assert!(!headers.contains_key("authorization"));
+    }
+
+    #[tokio::test]
+    async fn every_provider_rejects_redirects_oversized_and_malformed_responses() {
+        for provider in ["azure", "openai", "claude", "openrouter", "huggingface"] {
+            for response in [
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(header::LOCATION, "/redirect?mock-secret")],
+                    "mock-secret",
+                )
+                    .into_response(),
+                (StatusCode::UNAUTHORIZED, "mock-secret").into_response(),
+                "mock-secret invalid JSON".into_response(),
+                "x".repeat(MAX_RESPONSE + 1).into_response(),
+                Json(json!({"error":"mock-secret"})).into_response(),
+            ] {
+                let mut mock = mock_profile(profile(provider), response).await;
+                let response = request(
+                    mock.state.clone(),
+                    "POST",
+                    "/api/completions",
+                    json!({"prefix":"hello"}),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+                assert_eq!(
+                    response_json(response).await,
+                    json!({"error":"Completion provider request failed"})
+                );
+                mock.requests.recv().await.unwrap();
+                assert!(mock.requests.try_recv().is_err());
+            }
+        }
+        for (reason, content, status) in [
+            (
+                "max_tokens",
+                json!([{"type":"text", "text":"partial"}]),
+                StatusCode::OK,
+            ),
+            ("refusal", json!([]), StatusCode::OK),
+            ("tool_use", json!([]), StatusCode::BAD_GATEWAY),
+            (
+                "end_turn",
+                json!([{"type":"tool_use"}]),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                "end_turn",
+                json!([{"type":"text", "text":null}]),
+                StatusCode::BAD_GATEWAY,
+            ),
+        ] {
+            let mock = mock_profile(profile("claude"), Json(json!({"type":"message", "role":"assistant", "stop_reason":reason, "content":content})).into_response()).await;
+            let response = request(
+                mock.state.clone(),
+                "POST",
+                "/api/completions",
+                json!({"prefix":"hello"}),
+            )
+            .await;
+            assert_eq!(response.status(), status);
+            if status == StatusCode::OK {
+                assert_eq!(response_json(response).await, json!({"suffix":""}));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_selection_is_used_by_chat_and_completion_immediately() {
+        for chat in [false, true] {
+            let mut mock = mock(
+                false,
+                Json(answer(false, " useful suffix")).into_response(),
+                Duration::ZERO,
+            )
+            .await;
+            let storage = tempfile::tempdir().unwrap();
+            mock.state.settings = Arc::new(
+                crate::settings::Store::open(
+                    storage.path().join(".private/profile.json"),
+                    &mock.state.root,
+                    &mock.state.root.join("ui"),
+                    None,
+                )
+                .ok()
+                .unwrap(),
+            );
+            let endpoint = format!(
+                "http://127.0.0.1:{}/v1",
+                mock.state.completion.as_ref().unwrap().url.port().unwrap()
+            );
+            mock.state.completion = None;
+            let response = request(mock.state.clone(), "PUT", "/api/settings", json!({"provider":"huggingface", "model":"local-model", "endpoint": endpoint, "apiVersion":"", "apiKey":""})).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let slots = mock.state.settings.completion().unwrap().slots.clone();
+            let permits = slots.acquire_many(4).await.unwrap();
+            let (route, body) = if chat {
+                ("/api/chat", chat_input())
+            } else {
+                ("/api/completions", json!({"prefix":"hello"}))
+            };
+            assert_eq!(
+                request(mock.state.clone(), "POST", route, body.clone())
+                    .await
+                    .status(),
+                StatusCode::TOO_MANY_REQUESTS
+            );
+            drop(permits);
+            let response = request(mock.state.clone(), "POST", route, body).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let (uri, headers, payload) = mock.requests.recv().await.unwrap();
+            assert_eq!(uri.path(), "/v1/chat/completions");
+            assert!(!headers.contains_key("authorization"));
+            assert_eq!(payload["model"], "local-model");
+            assert_eq!(
+                request(mock.state.clone(), "DELETE", "/api/settings", Value::Null)
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            let config =
+                response_json(request(mock.state.clone(), "GET", "/api/config", Value::Null).await)
+                    .await;
+            assert_eq!(config["completion"], false);
+            assert_eq!(config["chat"], false);
         }
     }
 

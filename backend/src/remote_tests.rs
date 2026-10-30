@@ -1,6 +1,199 @@
 use super::*;
 use tokio::io::AsyncWriteExt;
 
+#[tokio::test]
+async fn selected_profiles_use_private_stdin_and_override_build_models_without_leaking() {
+    for provider in ["azure", "openai", "claude", "openrouter", "huggingface"] {
+        for mode in ["build", "continue", "repository-save", "optimize"] {
+            let root = tempfile::tempdir().unwrap();
+            let runner = root.path().join("runner");
+            let remote = tests::remote_fixture(root.path(), &runner);
+            fs::write(&runner, "#!/usr/bin/env python3\nimport json,os\nc=json.loads(os.environ['OPENCODE_CONFIG_CONTENT'])\nassert c['agent']['build']['model']=='spec-execution/chosen'\nassert c['mode']['build']['model']=='spec-execution/chosen'\nassert c['agent']['build']['prompt']=='keep'\nassert c['instructions'][0]=='AGENTS.md'\nassert c['plugin'][0]=='existing'\nassert 'private-secret' not in json.dumps(c)\nprint('selected', flush=True)\nprint(os.environ['SPEC_EXECUTION_API_KEY'], flush=True)\n").unwrap();
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(
+                root.path().join(".bash_aliases"),
+                format!(
+                    "alias spec='{}'\nalias opencode-source='{}'\n",
+                    runner.display(),
+                    runner.display()
+                ),
+            )
+            .unwrap();
+            if mode == "repository-save" {
+                assert!(
+                    std::process::Command::new("git")
+                        .args(["init", "-q"])
+                        .current_dir(root.path())
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            let profile = serde_json::json!({"provider": provider, "model":"chosen",
+                "endpoint": if provider == "huggingface" { "http://localhost:8080/v1" } else if provider == "azure" { "https://example.test/openai/v1" } else { "https://example.test/v1" },
+                "apiVersion":"2026-01-01", "apiKey":"private-secret"}).to_string();
+            let id = Uuid::new_v4().to_string();
+            let payload = if mode == "optimize" {
+                "import json,os,stat\nfrom pathlib import Path\np=Path(os.environ['SPEC_EXECUTION_PROFILE'])\nassert stat.S_IMODE(p.stat().st_mode)==0o600\nassert json.loads(p.read_text())['model']=='chosen'\nprint('selected')\nprint(json.loads(p.read_text())['apiKey'])\n"
+            } else {
+                "snapshot context"
+            };
+            let config = if mode == "optimize" { "{}" } else { "" };
+            let mut command = remote.execution_command(
+                payload.len(),
+                &id,
+                "test.md",
+                mode,
+                if mode == "continue" {
+                    "ses_Existing"
+                } else {
+                    ""
+                },
+                config.len(),
+                profile.len(),
+            );
+            assert!(!format!("{command:?}").contains("private-secret"));
+            command.env("OPENCODE_CONFIG_CONTENT", r#"{"instructions":["AGENTS.md"],"plugin":["existing"],"agent":{"build":{"model":"old/model","prompt":"keep"}},"mode":{"build":{"model":"old/model"}}}"#);
+            let mut child = command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            stdin
+                .write_all(format!("{payload}{config}{profile}").as_bytes())
+                .await
+                .unwrap();
+            let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(stdin);
+            assert!(output.status.success(), "{provider} {mode}: {output:?}");
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(text.contains("selected"), "{text}");
+            assert!(text.contains("[REDACTED]"), "{text}");
+            assert!(!text.contains("private-secret"));
+            let directory = root.path().join(format!(".spec-runs/run-{id}"));
+            assert!(!directory.join("execution-profile.json").exists());
+            assert!(!directory.join("provider-setup.bash").exists());
+            assert!(
+                !fs::read_to_string(directory.join("test.md.out"))
+                    .unwrap()
+                    .contains("private-secret")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn incomplete_selected_profile_never_launches_and_is_removed() {
+    let root = tempfile::tempdir().unwrap();
+    let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
+    let id = Uuid::new_v4().to_string();
+    let mut child = remote
+        .execution_command(0, &id, "test.md", "build", "", 0, 100)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"private-secret")
+        .await
+        .unwrap();
+    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(125));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("private-secret"));
+    assert!(
+        !root
+            .path()
+            .join(format!(".spec-runs/run-{id}/execution-profile.json"))
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn admission_captures_settings_once_and_cancel_cleans_private_profile() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let runner = workspace.join("runner");
+    let mut app = tests::app(&workspace);
+    app.remote = Some(tests::remote_fixture(&workspace, &runner));
+    fs::write(
+        &runner,
+        "#!/bin/bash\nprintf started > \"$HOME/started\"\nsleep 60\n",
+    )
+    .unwrap();
+    fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(workspace.join("test.md"), "unchanged snapshot").unwrap();
+    let selected = serde_json::json!({"provider":"openai","model":"first-model", "endpoint":"https://api.openai.com/v1", "apiVersion":"", "apiKey":"private-selected-secret"});
+    let response = tests::request(app.clone(), "PUT", "/api/settings", selected.clone()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let revision = read(&workspace, "test.md").ok().unwrap().revision;
+    let response = tests::request(
+        app.clone(),
+        "POST",
+        "/api/runs",
+        serde_json::json!({"name":"test.md", "revision":revision}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let id = tests::json(response).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    tests::wait_for_file(&workspace.join("started")).await;
+    let directory = workspace.join(format!(".spec-runs/run-{id}"));
+    let uploaded: serde_json::Value =
+        serde_json::from_slice(&fs::read(directory.join("execution-profile.json")).unwrap())
+            .unwrap();
+    assert_eq!(uploaded, selected);
+    let mut changed = selected;
+    changed["model"] = "next-model".into();
+    let response = tests::request(app.clone(), "PUT", "/api/settings", changed).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        fs::read_to_string(directory.join("execution-profile.json"))
+            .unwrap()
+            .contains("first-model")
+    );
+    let response = tests::request(
+        app.clone(),
+        "POST",
+        &format!("/api/runs/{id}/cancel"),
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    tests::wait_for_file(&directory.join("status")).await;
+    assert_eq!(
+        fs::read_to_string(directory.join("status")).unwrap(),
+        "130\n"
+    );
+    assert!(!directory.join("execution-profile.json").exists());
+    assert!(!directory.join("provider-setup.bash").exists());
+    assert_eq!(
+        fs::read_to_string(workspace.join("test.md")).unwrap(),
+        "unchanged snapshot"
+    );
+    for job in app.jobs.lock().unwrap().iter() {
+        assert!(
+            !serde_json::to_string(job)
+                .unwrap()
+                .contains("private-selected-secret")
+        );
+    }
+}
+
 #[test]
 fn remote_configuration_rejects_options_and_relative_paths() {
     let mut remote = Remote {

@@ -156,7 +156,7 @@ supported, with textual counts and accessible progress values.
 
 **Save repo changes** appears only for a connected, dirty Git worktree in `SPEC_SSH_WORKSPACE` (the remote build directory, not the local editor directory). Status refreshes every five seconds; probe errors hide the button. Staged, unstaged, and untracked files count, but `.spec-runs/`, `.spec-output/`, and `.spec.lock` do not. Select a nonempty spec as context to enable the button.
 
-After explicit confirmation, the UI saves the active spec locally and submits its revision to `POST /api/repository/save`. The backend rechecks the repository and unfinished harnesses, then uses the existing SSH `spec build` launcher with `azure/gpt-6-sol` and repository-save instructions instead of implementing pending spec requirements. Existing provider settings, instructions, and repository workflow are preserved. The model is instructed to validate and make focused commits, excluding secrets, session artifacts, and unrelated edits; pushing, amending, resetting, and bypassing hooks are not authorized. The remote launcher must honor the supplied OpenCode configuration.
+After explicit confirmation, the UI saves the active spec locally and submits its revision to `POST /api/repository/save`. The backend rechecks the repository and unfinished harnesses, then uses the existing SSH `spec build` launcher with the saved AI profile (or `azure/gpt-6-sol` when none is saved) and repository-save instructions instead of implementing pending spec requirements. Existing instructions and repository workflow are preserved. The model is instructed to validate and make focused commits, excluding secrets, session artifacts, and unrelated edits; pushing, amending, resetting, and bypassing hooks are not authorized. The remote launcher must honor the supplied OpenCode configuration.
 
 An active or unresolved harness blocks repository saves, including runs for other specs. The remote supervisor also excludes overlapping launches and refuses saves when a prior session lacks a valid terminal `status`. Inspect that session rather than assuming missing status means success. Output, cancellation, and recovery use the same **Output & logs**, **Stop run**, and **Load nohup output** controls. Logs are per-session `<spec filename>.out`, not a shared `nohup.out`. A `completed` harness means CLI exit success only: inspect its reported commit and validation results to confirm the changes were saved. No repository commits or provider calls happen merely by checking status.
 
@@ -244,9 +244,9 @@ The report identifies the uploaded `config` path and, once discovered, the proje
 Two modes share the same measurement scheduler:
 
 - **Explicit JSON v1:** provide one-step command argv, fixed read-only scalar measurement argv, direction, tolerances, patience, and optional command timeouts for each objective. The scheduler executes these commands directly without model requests.
-- **Free-form prose:** describe the improvements and real measurements to use. Responses planning with `gpt-6-sol` creates a validated plan. Each active-objective iteration runs the OpenCode **build** agent for a focused improvement, then Responses-based review, repair, and the planned validation/process command. Completed spec requirements and unrelated edits must be preserved. A model's assertion of convergence cannot stop the scheduler.
+- **Free-form prose:** describe the improvements and real measurements to use. Model planning creates a validated plan. Each active-objective iteration runs the OpenCode **build** agent for a focused improvement, then model review, repair, and the planned validation/process command. A saved AI profile selects both planner/reviewer and builder; without one, planning/review defaults to Responses with `gpt-6-sol`. Completed spec requirements and unrelated edits must be preserved. A model's assertion of convergence cannot stop the scheduler.
 
-Both modes require **Python 3.10+ on Linux**, subreaper support, and readable procfs on the execution host. Prose mode additionally needs authenticated OpenCode (`SPEC_OPTIM_OPENCODE`, otherwise `opencode-source` when available, then `opencode`) and Responses access to `gpt-6-sol`. By default, Performance reuses the connected Azure API credentials/resource and resolved OpenCode provider configuration used by `spec build`, rather than an old editor dotenv. Override this with complete exported credentials (`AZURE_OPENAI_ENDPOINT` plus `AZURE_OPENAI_API_KEY`, or `OPENAI_API_KEY` with Azure variables unset), or select a dotenv using `SPEC_AI_ENV_FILE` or `KIBI_ENV_FILE`. Without a connected Azure API entry or explicit credentials, the nearest build-project/ancestor `.env`, then `~/code.dev/.env`, remains the fallback. See [configuration precedence and syntax](OPTIMIZE.md#free-form-responses-mode) for details and supported routing. Existing OpenCode configuration selects the builder's model; Performance still requires the `gpt-6-sol` deployment. Local chat/voice dotenv settings are not transferred over SSH, and optimization does not source `~/.bash_aliases`.
+Both modes require **Python 3.10+ on Linux**, subreaper support, and readable procfs on the execution host. Prose mode additionally needs OpenCode (`SPEC_OPTIM_OPENCODE`, otherwise `opencode-source` when available, then `opencode`) and a tool-capable model. A profile saved in [AI settings](#ai-settings) takes precedence for both builder and reviewer, including its credentials and provider protocol. Without a saved profile, prose mode requires Responses access to `gpt-6-sol`: Performance reuses the connected Azure API credentials/resource and resolved OpenCode provider configuration used by `spec build`, rather than an old editor dotenv. Override those defaults with complete exported credentials (`AZURE_OPENAI_ENDPOINT` plus `AZURE_OPENAI_API_KEY`, or `OPENAI_API_KEY` with Azure variables unset), or select a dotenv using `SPEC_AI_ENV_FILE` or `KIBI_ENV_FILE`. Without a connected Azure API entry or explicit credentials, the nearest build-project/ancestor `.env`, then `~/code.dev/.env`, remains the fallback. See [configuration precedence and syntax](OPTIMIZE.md#free-form-responses-mode) for details. Without saved settings, existing OpenCode configuration selects the builder's model. Local chat/voice dotenv settings are not transferred over SSH, and optimization does not source `~/.bash_aliases`.
 
 #### Measured stopping
 
@@ -270,16 +270,69 @@ Each command runs under a Linux subreaper that cleans up detached descendants be
 
 **This is trusted, unsandboxed execution.** Commands and model tools can change files, access credentials and the network, and incur provider costs. Prose mode sends objectives, `.optim` contents, bounded build/tool output, and measured state to model providers; reports may contain sensitive data. Instructions to preserve measurements and avoid credentials are not isolation. Review the [optimizer trust and privacy notes](OPTIMIZE.md#model-privacy-and-trust) before enabling it.
 
+### AI settings
+
+Open **Settings** in the workspace header to select the AI model for session chat,
+trailing completions, and future agent runs (builds, continuations, repository
+saves, and model-guided optimization). One active profile is shared by everyone
+using this server. Saving replaces that profile, persists across server restarts,
+and takes effect without restarting. Already-running requests and builds retain
+their admitted configuration. Voice settings remain independent.
+
+| Provider | Configuration |
+| --- | --- |
+| Azure OpenAI | Resource endpoint, deployment name, API key. A resource-root endpoint requires an API version; `/openai/v1` uses Responses and permits a blank version. |
+| Standalone OpenAI | Model ID, API key, and API base URL (normally `https://api.openai.com/v1`); uses Responses. |
+| Claude API | Model ID, API key, and base URL (normally `https://api.anthropic.com`); uses Messages. Optional API version defaults to `2023-06-01`. |
+| OpenRouter | Model ID such as `openai/gpt-4.1-mini`, API key, and `https://openrouter.ai/api/v1`; uses Chat Completions. |
+| Local Hugging Face | Served model ID, loopback OpenAI-compatible API URL such as `http://127.0.0.1:8000/v1`, and an optional API key. |
+
+Model defaults are examples, not availability guarantees. Cloud endpoints require
+HTTPS. Saving validates configuration, not credentials, connectivity, model
+availability, or tool support. Agent builds and optimization need a tool-capable
+model and a remote launcher that honors the supplied OpenCode configuration.
+Remote runs with a saved profile also require Python 3 on the execution host.
+
+**Local inference:** obtain a compatible Hugging Face model and serve it on your
+own hardware using an OpenAI-compatible runtime such as vLLM or llama.cpp. Settings
+does not download weights, start that runtime, or allocate hardware. The URL must
+use `localhost` or a loopback IP. It refers to the Rust server host for chat and
+completions, and the SSH execution host for builds/optimization, not the browser.
+If those hosts differ, provide a reachable local service on each host. Hardware,
+model licensing/access, and inference-runtime installation remain your responsibility.
+
+**Credentials:** the authenticated settings API never returns saved keys. Leave
+the key blank to retain it only for the same provider and endpoint; changing either
+requires a new cloud key. Local profiles offer an explicit key-removal control.
+Keys are not persisted in browser storage. The server stores the profile as a
+private `0600` JSON file in a `0700` directory outside both workspace and static
+UI roots. This is filesystem protection, not encryption at rest. By default the
+directory is `.spec-settings-<workspace hash>` beside the workspace; override with
+an absolute `SPEC_SETTINGS_FILE` path in a dedicated private directory (its parent
+must already exist). Do not commit, serve, or distribute that file.
+
+For remote runs the selected profile is sent through SSH stdin into a private
+per-run file, never the command line, and removed on normal cleanup. Trust the
+execution host and its tools: they run as the user and can access the credential.
+Crashes or forced termination can leave private files requiring manual cleanup.
+
+**Reset to environment** removes the active saved profile. Chat/completions then
+use the local Azure environment configuration described below, while builds and
+optimization return to their existing remote defaults. Reset does not unify those
+independent host configurations or revoke provider credentials. A valid saved
+profile takes precedence over invalid text environment configuration at startup;
+without a saved profile, partial/invalid text configuration still fails startup.
+
 ### Trailing sentence-part completions
 
-Configure Azure once on the **local Rust server** to enable both ghost text and session chat. Copy the template to a private `.env` in the repository root:
+Select any supported provider in **Settings** to enable both ghost text and session chat. Alternatively, configure Azure on the **local Rust server** as an environment fallback. Copy the template to a private `.env` in the repository root:
 
 ```sh
 cp .env.example .env
 chmod 600 .env
 ```
 
-Fill in your Azure endpoint, API key and deployment in `.env`, then start `./run.sh` (or `./run.sh --local` for the editor without remote builds). Restart an already-running server and reload the browser after changing settings. Startup reports whether chat and ghost text are enabled.
+Fill in your Azure endpoint, API key and deployment in `.env`, then start `./run.sh` (or `./run.sh --local` for the editor without remote builds). Restart an already-running server and reload the browser after changing environment settings. The Settings page does not require a restart. Startup reports whether chat and ghost text are enabled.
 
 The Rust server reads the nearest `.env` in its working directory or an ancestor, so this works with `run.sh` and with `cargo run` from `backend/`. To use a file elsewhere, set `SPEC_AI_ENV_FILE=/absolute/path/to/ai.env`. Only AI settings are consumed from this file; exported environment variables take precedence. You can also configure everything through exports:
 
@@ -294,19 +347,19 @@ If the installed `spec build` command already works, it may be using OpenCode's 
 
 Use your configured deployment name (default `gpt-5.5`). A legacy resource-root endpoint instead requires `AZURE_OPENAI_API_VERSION`. Endpoints must use HTTPS. No credentials are exposed to the browser or bundled in the repo; do not commit keys. Missing endpoint and key disables completions, while partial/invalid configuration fails startup.
 
-When configured, **Trailing completions** starts enabled and can be switched off in the editor. After 500 ms idle at a line's end, the browser sends up to 4,000 recent UTF-16 units (at most 16 KiB UTF-8) before the caret to Azure through the authenticated Rust API. This includes **unsaved text** and may incur provider costs. A muted suffix suggests one sentence part, capped at 160 characters and the first clause/sentence punctuation. **Tab** or **Accept part** inserts it; **Escape** dismisses until typing resumes. Selections, IME composition, and text after the caret on the same line suppress suggestions. Long ghost text is clipped at the pane edge; the Accept part button's tooltip shows the suffix. Suggestions are not saved or downloaded until accepted.
+When configured, **Trailing completions** starts enabled and can be switched off in the editor. After 500 ms idle at a line's end, the browser sends up to 4,000 recent UTF-16 units (at most 16 KiB UTF-8) before the caret to the selected provider through the authenticated Rust API. This includes **unsaved text** and may incur provider costs. A muted suffix suggests one sentence part, capped at 160 characters and the first clause/sentence punctuation. **Tab** or **Accept part** inserts it; **Escape** dismisses until typing resumes. Selections, IME composition, and text after the caret on the same line suppress suggestions. Long ghost text is clipped at the pane edge; the Accept part button's tooltip shows the suffix. Suggestions are not saved or downloaded until accepted.
 
 Accepting a part waits for your next edit before requesting another suggestion, including when the accepted suffix has no final punctuation. Requests have a 10-second timeout and four-request concurrency cap. Errors leave editing available and retry on subsequent edits, not in a loop. Tests use provider mocks; no live Azure call is needed. This restores inline completion only, not filename ranking.
 
 ### Session chat
 
-Click **Open session chat** near the output controls to open a separate browser window (allow popups for this site). Text chat uses the same server-side Azure configuration as trailing completions; disabling inline suggestions does not disable chat. Click **Ask** or press **Enter** to send; **Shift+Enter** inserts a new line.
+Click **Open session chat** near the output controls to open a separate browser window (allow popups for this site). Text chat uses the same selected server-side AI profile as trailing completions; disabling inline suggestions does not disable chat. Click **Ask** or press **Enter** to send; **Shift+Enter** inserts a new line.
 
 The window stays bound to its chosen filename, even when you select another editor tab. While the source workspace remains open, it uses that file's live buffer, including unsaved edits. If the source closes or is unavailable, it explicitly falls back to the saved file; drafts and conversation are not persisted. The current written spec is never presented as the immutable input to an older build.
 
 Before each question, chat reloads the file's latest associated nohup output without launching or cancelling a build. Failed reads block the question rather than silently using stale logs. Context priority is qualitative: current session output/status as execution evidence, written spec as intent, then prior conversation for continuity. A new run clears earlier conversation on the next question. Without a run, spec and general questions still work.
 
-Questions send up to the first **64 KiB of spec**, the last **64 KiB of available output**, and four prior question/answer pairs to Azure through the authenticated API. Truncation is disclosed; remote log retention limits still apply. Questions are capped at 8 KiB, answers at 16 KiB, and provider requests at 60 seconds, sharing the four-request concurrency limit with inline completions. AI answers are read-only, have no tools, and render as plain text. Keep sensitive information out of submitted specs/logs and verify important claims.
+Questions send up to the first **64 KiB of spec**, the last **64 KiB of available output**, and four prior question/answer pairs to the selected provider through the authenticated API. Truncation is disclosed; remote log retention limits still apply. Questions are capped at 8 KiB, answers at 16 KiB, and provider requests at 60 seconds, sharing the four-request concurrency limit with inline completions. AI answers are read-only, have no tools, and render as plain text. Keep sensitive information out of submitted specs/logs and verify important claims.
 
 **Edit Agent.md** opens an inline editor for creating and saving that workspace file, with revision checks to prevent overwriting concurrent edits. See [chat editing](docs/chat-editing.md) for draft and reload behavior. Saving does not automatically install instructions into remote builds or AI conversations.
 

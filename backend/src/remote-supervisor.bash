@@ -34,6 +34,7 @@ cleanup() {
         wait "$logger" 2>/dev/null || true
     fi
     rm -f -- "$directory/snapshot.md" "$directory/pipe" "$directory/ready" "$directory/cancel"
+    rm -f -- "$directory/execution-profile.json" "$directory/provider-setup.bash"
     printf '%s\n' "$result" > "$directory/status.tmp" &&
         mv -T -- "$directory/status.tmp" "$directory/status" || return
     [[ -z $registry_record ]] || rm -f -- "$registry_record"
@@ -47,8 +48,12 @@ mkfifo "$directory/pipe"
 # Only the supervisor retains the repository lock, never escaped build descendants.
 log_command='stdbuf -o0 head -c 8388608; cat >/dev/null'
 [[ $mode != optimize ]] || log_command='cat'
+if [[ -n ${SPEC_EXECUTION_PROFILE:-} ]]; then
+    # Keep secrets out of retained/live logs even if an engine prints its config.
+    log_command='exec bash --noprofile --norc "${SPEC_EXECUTION_PROFILE%/*}/provider-setup.bash" redact "$1"'
+fi
 # Both writers append so agent output cannot overwrite supervisor keep-alives.
-setsid bash --noprofile --norc -c "$log_command" 9<&- < "$directory/pipe" >> "$directory/$3" &
+setsid bash --noprofile --norc -c "$log_command" -- "$mode" 9<&- < "$directory/pipe" >> "$directory/$3" &
 logger=$!
 setsid bash --noprofile --norc -c "$2" -- "$directory/snapshot.md" "$directory/ready" "${4:-build}" "${5:-}" 9<&- </dev/null > "$directory/pipe" 2>&1 &
 pid=$!
