@@ -181,6 +181,15 @@ impl Remote {
         self.build_command(bytes, id, name, "optimize", "", config_bytes)
     }
 
+    pub fn project_search_command(&self) -> Command {
+        self.ssh(format!(
+            "bash --noprofile --norc -c {} -- {} {}",
+            quote("export PATH=\"$HOME/.local/bin:$HOME/.bun/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}\"; exec timeout --signal=TERM --kill-after=2s 45s python3 -I -B -c \"$1\" \"$2\""),
+            quote(include_str!("project-search.py")),
+            quote(&self.directory),
+        ))
+    }
+
     pub fn continuation_command(
         &self,
         bytes: usize,

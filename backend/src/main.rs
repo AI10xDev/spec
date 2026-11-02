@@ -34,6 +34,7 @@ mod analytics;
 mod azure_realtime;
 mod chat;
 mod completion;
+mod project_search;
 mod realtime;
 mod recovery;
 mod remote;
@@ -65,6 +66,7 @@ struct App {
     recovery_runs: Arc<recovery::RunGates>,
     // Serializes admission and latest-pointer changes, never polling or cancellation.
     recovery_gate: Arc<tokio::sync::Mutex<()>>,
+    project_search_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl App {
@@ -1015,6 +1017,10 @@ fn router(app: App) -> Router {
         )
         .route("/api/runs", post(start))
         .route("/api/optimize", get(latest_optimization).post(optimize))
+        .route(
+            "/api/projects/search",
+            post(project_search::search).layer(DefaultBodyLimit::max(1024)),
+        )
         .route("/api/repository", get(repository))
         .route("/api/repository/save", post(repository_save))
         .route("/api/runs/{id}", get(output))
@@ -1083,6 +1089,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         recovered: Arc::new(Mutex::new(false)),
         recovery_runs: Arc::default(),
         recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
+        project_search_slots: Arc::new(tokio::sync::Semaphore::new(1)),
     };
     let port: u16 = std::env::var("SPEC_PORT")
         .unwrap_or_else(|_| "4780".into())

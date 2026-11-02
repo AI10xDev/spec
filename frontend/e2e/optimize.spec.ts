@@ -5,6 +5,7 @@ import type { ChildProcess } from "node:child_process"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import type { ProjectSearch } from "../src/project-picker"
 
 let server: ChildProcess
 let directory: string
@@ -432,3 +433,186 @@ test("header and output controls fit narrow mobile screens", async ({ page }) =>
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   }
 })
+
+const projectMatches: ProjectSearch = {
+  projects: [{ name: "my-project", path: "/remote/workspace/team/my-project" }, { name: "my-project", path: "/remote/workspace/other/my-project" }],
+  root: "/remote/workspace",
+  truncated: false,
+  agent: "explore",
+}
+
+for (const width of [1440, 390, 320]) {
+  test(`Explore search is explicit and selecting a result only fills the path at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 })
+    const { writes, dialogs, errors, auth } = await workspace(page)
+    await page.route("**/api/projects/search", (route) => route.fulfill({ json: projectMatches }))
+    await configurePerformance(page)
+    const project = page.getByRole("textbox", { name: "Project folder", exact: true })
+    await project.fill("my")
+    await project.fill("my-project")
+    await page.getByRole("button", { name: "Cancel", exact: true }).click()
+    await page.getByRole("button", { name: "Performance", exact: true }).click()
+    expect(writes).toEqual([])
+    await expect(page.getByText("Project names are sent, not file contents.", { exact: false })).toBeVisible()
+    await page.getByRole("button", { name: "Search with Explore", exact: true }).click()
+    const results = page.getByRole("combobox", { name: "Matching projects", exact: true })
+    await expect(results).toBeVisible()
+    await expect(results.getByRole("option")).toHaveCount(3)
+    await expect(page.getByRole("form", { name: "Performance pipelines" }).getByRole("status")).toContainText("Search root: /remote/workspace")
+    await expect(project).toHaveValue("my-project")
+    await results.focus()
+    await results.press("ArrowDown")
+    await expect(project).toHaveValue(projectMatches.projects[0].path)
+    await results.selectOption(projectMatches.projects[1].path)
+    await expect(project).toHaveValue(projectMatches.projects[1].path)
+    expect(writes).toEqual([{ path: "/api/projects/search", method: "POST", body: { query: "my-project" } }])
+    expect(dialogs).toEqual([])
+    for (const control of [project, results, page.getByRole("button", { name: "Search with Explore", exact: true })]) {
+      await control.scrollIntoViewIfNeeded()
+      const bounds = await control.boundingBox()
+      expect(bounds!.x).toBeGreaterThanOrEqual(0)
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width)
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+    await page.getByRole("button", { name: "Run pipelines", exact: true }).click()
+    await expect(page.getByLabel("Run output")).toHaveText(running.output)
+    expect(writes[1]).toEqual({ path: "/api/optimize", method: "POST", body: { project: projectMatches.projects[1].path, spec: null } })
+    expect(auth.every((value) => value === `Bearer ${new URL(url).hash.slice(7)}`)).toBe(true)
+    expect(errors).toEqual([])
+  })
+}
+
+test("Explore prevents duplicate searches and pipeline submission without blocking editing or local save", async ({ page }) => {
+  const { writes, dialogs } = await workspace(page)
+  await page.getByRole("tabpanel").getByRole("button", { name: /second\.md/ }).click()
+  await configurePerformance(page)
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  await page.route("**/api/projects/search", async (route) => { await held; await route.fulfill({ json: projectMatches }) })
+  const search = page.getByRole("button", { name: "Search with Explore", exact: true })
+  await search.evaluate((element: HTMLButtonElement) => { element.click(); element.click() })
+  await expect(search).toBeDisabled()
+  await expect(page.getByRole("form", { name: "Performance pipelines" }).getByRole("status")).toContainText("This can take up to a minute")
+  await expect(page.getByRole("button", { name: "Run pipelines", exact: true })).toBeDisabled()
+  await page.getByRole("textbox", { name: "Project folder", exact: true }).press("Enter")
+  const editor = page.getByRole("textbox", { name: "Edit second.md", exact: true })
+  await editor.fill("Edited during project search")
+  await page.route("**/api/files/second.md", (route) => route.fulfill({ json: { name: "second.md", content: "Edited during project search", revision: "revision-2" } }))
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(page.locator(".editor-pane .badge")).toHaveText("Saved")
+  await expect(search).toBeDisabled()
+  expect(writes.map((write) => write.path)).toEqual(["/api/projects/search", "/api/files/second.md"])
+  expect(dialogs).toEqual([])
+  release()
+  await expect(page.getByRole("combobox", { name: "Matching projects", exact: true })).toBeVisible()
+  await expect(search).toBeEnabled()
+  await expect(page.getByRole("button", { name: "Run pipelines", exact: true })).toBeEnabled()
+})
+
+test("Explore validates names by UTF-8 bytes without restricting manual paths", async ({ page }) => {
+  const { writes } = await workspace(page)
+  await configurePerformance(page)
+  const project = page.getByRole("textbox", { name: "Project folder", exact: true })
+  const search = page.getByRole("button", { name: "Search with Explore", exact: true })
+  for (const value of [" ", "a".repeat(101), "\u00e9".repeat(51), "bad\u007fname", "bad\u0085name", "../my-project", "/remote/project", "team\\project", ".", ".."]) {
+    await project.fill(value)
+    await search.click()
+    await expect(page.getByRole("alert")).toContainText("Search by project name")
+  }
+  expect(writes).toEqual([])
+  await page.route("**/api/projects/search", (route) => route.fulfill({ json: projectMatches }))
+  for (const value of ["a", "\u00e9".repeat(50)]) {
+    await project.fill(` ${value} `)
+    await search.click()
+    await expect(page.getByRole("combobox", { name: "Matching projects", exact: true })).toBeVisible()
+    expect(writes.at(-1)?.body).toEqual({ query: value })
+  }
+  const manual = `/remote/${"long-project-".repeat(12)}`
+  await project.fill(manual)
+  await search.click()
+  await page.getByRole("button", { name: "Run pipelines", exact: true }).click()
+  await expect(page.getByLabel("Run output")).toHaveText(running.output)
+  expect(writes.at(-1)?.body).toEqual({ project: manual, spec: null })
+})
+
+test("Explore shows empty, error, retry, root and truncated results on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 900 })
+  const { writes, errors } = await workspace(page)
+  await configurePerformance(page)
+  let searches = 0
+  const root = `/remote/${"workspace-".repeat(30)}`
+  const projects = Array.from({ length: 20 }, (_, i) => ({ name: `project-${i}`, path: `${root}/project-${i}` }))
+  await page.route("**/api/projects/search", (route) => {
+    searches++
+    if (searches === 1) return route.fulfill({ json: { ...projectMatches, projects: [] } })
+    if (searches === 2) return route.fulfill({ status: 503, json: { error: "Explore unavailable" } })
+    return route.fulfill({ json: { ...projectMatches, projects, root, truncated: true } })
+  })
+  const search = page.getByRole("button", { name: "Search with Explore", exact: true })
+  await search.click()
+  await expect(page.getByRole("form", { name: "Performance pipelines" }).getByRole("status")).toContainText("No matching projects")
+  await expect(page.getByRole("combobox", { name: "Matching projects", exact: true })).toBeHidden()
+  await search.click()
+  await expect(page.getByRole("alert")).toContainText("Explore unavailable")
+  await expect(search).toBeEnabled()
+  await search.click()
+  await expect(page.getByRole("alert")).toBeHidden()
+  await expect(page.getByRole("form", { name: "Performance pipelines" }).getByRole("status")).toContainText(root)
+  await expect(page.getByText("Results are truncated", { exact: false })).toBeVisible()
+  await expect(page.getByRole("combobox", { name: "Matching projects", exact: true }).getByRole("option")).toHaveCount(21)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  expect(writes).toHaveLength(3)
+  expect(writes.every((write) => write.path === "/api/projects/search")).toBe(true)
+  expect(errors).toEqual([])
+})
+
+declare global {
+  interface Window {
+    projectSearchRequests: { signal: AbortSignal; resolve: (response: Response) => void; reject: (error: Error) => void }[]
+  }
+}
+
+for (const close of ["Cancel", "Performance", "Settings"]) {
+  test(`Explore ignores reordered responses after edits and ${close} closes the picker`, async ({ page }) => {
+    // Deliberately ignore abort in this transport to exercise the stale-response guard too.
+    await page.addInitScript(() => {
+      const original = window.fetch.bind(window)
+      window.projectSearchRequests = []
+      window.fetch = (input, init) => String(input) === "/api/projects/search"
+        ? new Promise<Response>((resolve, reject) => window.projectSearchRequests.push({ signal: init!.signal as AbortSignal, resolve, reject }))
+        : original(input, init)
+    })
+    const { writes, dialogs, errors } = await workspace(page)
+    await configurePerformance(page, "old")
+    const project = page.getByRole("textbox", { name: "Project folder", exact: true })
+    const search = page.getByRole("button", { name: "Search with Explore", exact: true })
+    await search.click()
+    await project.fill("new")
+    expect(await page.evaluate(() => window.projectSearchRequests[0].signal.aborted)).toBe(true)
+    await search.click()
+    await page.evaluate(() => window.projectSearchRequests[0].reject(new Error("Obsolete failure")))
+    await expect(search).toBeDisabled()
+    await expect(page.getByRole("alert")).toBeHidden()
+    await project.fill("newest")
+    await search.click()
+    await page.evaluate((json) => window.projectSearchRequests[2].resolve(new Response(JSON.stringify(json))), projectMatches)
+    await expect(page.getByRole("combobox", { name: "Matching projects", exact: true })).toBeVisible()
+    await page.evaluate(() => window.projectSearchRequests[1].resolve(new Response(JSON.stringify({ projects: [], root: "/obsolete", agent: "explore", truncated: false }))))
+    await expect(page.getByRole("form", { name: "Performance pipelines" }).getByRole("status")).toContainText(projectMatches.root)
+    await expect(project).toHaveValue("newest")
+    await search.click()
+    await page.getByRole("button", { name: close, exact: true }).click()
+    expect(await page.evaluate(() => window.projectSearchRequests[3].signal.aborted)).toBe(true)
+    if (close === "Settings") await page.getByRole("button", { name: "Back to workspace", exact: true }).click()
+    else await page.getByRole("button", { name: "Performance", exact: true }).click()
+    await page.evaluate((json) => window.projectSearchRequests[3].resolve(new Response(JSON.stringify(json))), projectMatches)
+    await expect(project).toHaveValue("newest")
+    await expect(page.getByRole("combobox", { name: "Matching projects", exact: true })).toBeHidden()
+    await expect(search).toBeEnabled()
+    await expect(page.getByRole("button", { name: "Run pipelines", exact: true })).toBeEnabled()
+    expect(await page.evaluate(() => window.projectSearchRequests.length)).toBe(4)
+    expect(writes).toEqual([])
+    expect(dialogs).toEqual([])
+    expect(errors).toEqual([])
+  })
+}

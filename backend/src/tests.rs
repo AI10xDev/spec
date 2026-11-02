@@ -45,6 +45,7 @@ pub(super) fn app(root: &FsPath) -> App {
         recovered: Arc::new(Mutex::new(false)),
         recovery_runs: Arc::default(),
         recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
+        project_search_slots: Arc::new(tokio::sync::Semaphore::new(1)),
     }
 }
 
@@ -118,6 +119,7 @@ async fn all_api_routes_require_authentication() {
         ("POST", "/api/runs"),
         ("GET", "/api/optimize"),
         ("POST", "/api/optimize"),
+        ("POST", "/api/projects/search"),
         ("GET", "/api/repository"),
         ("POST", "/api/repository/save"),
         ("GET", "/api/runs/id"),

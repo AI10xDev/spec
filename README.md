@@ -237,6 +237,15 @@ Builds are capped at **120 KiB** because some existing launchers forward the pro
 
 Click **Performance**, enter a project folder relative to `SPEC_SSH_WORKSPACE` (or an absolute execution-host path), and click **Run pipelines**. No editor tab or previous build is required. By default the runner reads that project's `performance.json`. Check **Use current editor as spec** to supply a JSON pipeline manifest instead, including unsaved changes, without saving locally. `.opt`, `.optim`, `.md`, and extension-free names are accepted; no extension is required. Prose is not interpreted by this fixed pipeline runner.
 
+To find a folder by name, enter a name fragment and click **Search with Explore**,
+then choose a path from **Matching projects**. Search covers up to three directory
+levels below the remote workspace's parent, excluding hidden/dependency/build
+directories and symlinks. The Explore agent ranks a bounded directory-name
+inventory with all tools denied; only names/paths, not file contents, reach the
+configured model. Search is explicit and may incur model costs. Selection fills
+the path without starting a run. See [project name search](PERFORMANCE.md#project-name-search)
+for scope, limits, configuration and privacy details.
+
 Prepare the trusted manifest, curated test source, digest-pinned local Docker image, prebuilt Candle trainer, and model datasets described in [PERFORMANCE.md](PERFORMANCE.md). The folder alone cannot supply missing teacher logits, trajectories, or test configuration. The runner evaluates source-directory test commands via `dataset_pipe`, then runs offline `model_pipeline` training on the configured trajectories. These are separate stages: test rewards are not automatically converted to training trajectories.
 
 **Optimization** in **Output & logs** shows stage metrics, artifact paths, and the final result, with the existing reload recovery and **Stop run** controls. Metrics include test-command pass fraction, before/after accuracy and NLL, optional cached GPT-sol comparison, and plateau diagnostics. Missing configuration or failed infrastructure produces a failed run, not fabricated metrics. Completion does not imply quality improvement or convergence. Pipeline provider credentials are not uploaded; model commands are trusted execution-host programs. Python 3.11+ on Linux is required.

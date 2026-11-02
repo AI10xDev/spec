@@ -8,6 +8,8 @@ import { LogOutput } from "./highlighting"
 import { Analytics } from "./analytics"
 import { BuildProgress } from "./progress"
 import { Settings } from "./settings"
+import { ProjectPicker } from "./project-picker"
+import type { ProjectSearch } from "./project-picker"
 import "./style.css"
 
 type Entry = { name: string; modified: number; bytes: number }
@@ -50,6 +52,7 @@ function App() {
   const [optimization, setOptimization] = useState<Output | null>(null)
   const [performance, setPerformance] = useState(false)
   const [project, setProject] = useState("")
+  const [projectSearching, setProjectSearching] = useState(false)
   const [useEditorSpec, setUseEditorSpec] = useState(false)
   const performanceButton = useRef<HTMLButtonElement>(null)
   const [analytics, setAnalytics] = useState(false)
@@ -71,11 +74,12 @@ function App() {
   const message = output ? feedback[output.id] ?? "" : ""
   const pendingRuns = [...Object.values(outputs), ...(optimization ? [optimization] : [])].filter((item) => item.recoverable).map((item) => item.id).join(",")
 
-  async function api<T>(path: string, body?: unknown, method = "POST"): Promise<T> {
+  async function api<T>(path: string, body?: unknown, method = "POST", signal?: AbortSignal): Promise<T> {
     const response = await fetch(`/api${path}`, {
       method: body === undefined ? "GET" : method,
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     })
     if (!response.ok) {
       const text = await response.text()
@@ -402,7 +406,7 @@ function App() {
   }
 
   async function optimize() {
-    if (settings || analytics || busy || submitting.current || !execution || pendingRuns) return
+    if (settings || analytics || busy || submitting.current || projectSearching || !execution || pendingRuns) return
     setNotice("")
     if (!project.trim() || project.includes("\0")) {
       setError("Enter a project folder relative to the remote workspace or an absolute remote path, without NUL bytes.")
@@ -480,13 +484,11 @@ function App() {
     {performance && !settings && <form id="performance-form" className="performance-form" aria-label="Performance pipelines" onSubmit={(event) => { event.preventDefault(); void optimize() }}>
       <h2>Run performance pipelines</h2>
       <p id="performance-config">Run <code>dataset_pipe</code> + <code>model_pipeline</code> using the project's <code>performance.json</code> by default. No editor tab is needed.</p>
-      <label htmlFor="performance-project">Project folder</label>
-      <input id="performance-project" autoFocus aria-describedby="performance-path" placeholder="my-project or /remote/path/to/project" value={project} disabled={busy} onChange={(event) => setProject(event.target.value)} />
-      <p id="performance-path">Relative to the remote workspace, or an absolute remote path.</p>
+      <ProjectPicker value={project} onChange={setProject} disabled={busy || !execution} onSearchingChange={setProjectSearching} search={(query, signal) => api<ProjectSearch>("/projects/search", { query }, "POST", signal)} />
       <label className="performance-option"><input type="checkbox" checked={useEditorSpec} disabled={busy} onChange={(event) => setUseEditorSpec(event.target.checked)} aria-describedby="performance-spec" /> Use current editor as spec</label>
       <p id="performance-spec">Optional JSON pipeline config, any extension. Unsaved content is included without saving locally (maximum 1 MiB).{useEditorSpec && <> Current editor: <strong>{tab?.name ?? "No tab selected"}</strong>.</>}</p>
       {error && <div role="alert" className="error">{error}</div>}
-      <div className="performance-actions"><button type="submit" className="primary" disabled={busy || !execution || !!pendingRuns}>Run pipelines</button><button type="button" disabled={busy} onClick={() => { setPerformance(false); performanceButton.current?.focus() }}>Cancel</button></div>
+      <div className="performance-actions"><button type="submit" className="primary" disabled={busy || projectSearching || !execution || !!pendingRuns}>Run pipelines</button><button type="button" disabled={busy} onClick={() => { setPerformance(false); performanceButton.current?.focus() }}>Cancel</button></div>
     </form>}
     {analytics && <Analytics api={api} active={active} onClose={() => setAnalytics(false)} />}
     {settings && <Settings api={api} onClose={() => setSettings(false)} onChanged={refreshConfig} />}

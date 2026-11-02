@@ -11,6 +11,53 @@ execution. Results appear in **Optimization** under **Output & logs**. This uses
 the same authenticated SSH transport, recovery, and **Stop run** controls as the
 existing optimizer, without requiring a previous build or an editor tab.
 
+## Project Name Search
+
+Enter part of a folder name in **Project folder**, then click **Search with
+Explore**. Choose a result from **Matching projects** to fill its absolute remote
+path. Duplicate folder names are distinguished by their paths. Selecting a result
+does not start pipelines or save the editor; **Run pipelines** remains separate.
+Manual relative or absolute paths still work without search.
+
+Search runs only on explicit clicks, never on typing or opening Performance. It
+uses the saved AI settings profile when available; otherwise it uses the remote
+OpenCode provider configuration. Only the query and matching directory paths are
+sent to the model, not project file contents. Model calls may incur costs and
+directory names/paths may themselves be sensitive.
+
+The search root is the **parent of the resolved remote `SPEC_SSH_WORKSPACE`**,
+allowing sibling projects to be found. The response displays this root. Directory
+inventory is bounded to three levels and 3,000 entries; hidden directories,
+symlinks, dependency trees and common build/cache directories are excluded. A
+case-insensitive name substring filters up to 40 candidates, then the actual
+OpenCode **explore** agent ranks up to 20 results. Explore runs as a primary agent
+in a temporary directory with all tool permissions denied and plugins disabled.
+Its selections must be members of the observed inventory and still be real
+directories. Invented or stale paths fail the search, with no fabricated fallback.
+An empty inventory returns no matches without calling a model. Truncation warnings
+mean additional matches may exist; refine the query or enter a path manually.
+
+The execution host needs Python 3.11+, Linux and OpenCode. Executable resolution
+uses `SPEC_PROJECT_SEARCH_OPENCODE`, then `opencode-source`, then `opencode` on the
+remote PATH (including `~/.local/bin` and `~/.bun/bin`). No shell alias file is
+sourced and no automatic tool-approval flag is enabled. Search has a 35-second
+worker deadline, a 45-second remote wrapper deadline, bounded request/output sizes,
+and one active request per web backend. It does not create a build/optimization
+job, take its repository lock, or write `.spec-runs` artifacts. OpenCode may retain
+its ordinary session/provider metadata; temporary profile files are removed.
+
+Editing the input or closing the form aborts the browser request and discards stale
+results. An already submitted remote/model request may continue until completion
+or its deadline; dismissing the UI is not proof that model usage stopped. Loading,
+no-match, error and retry states leave manual path entry available.
+
+The authenticated endpoint is `POST /api/projects/search` with
+`{"query":"project-name"}` (1-100 UTF-8 bytes, printable name text, not a path).
+It returns `{"projects":[{"name":"project-name","path":"/remote/project-name"}],
+"truncated":false,"agent":"explore","root":"/remote"}`. Provider profiles and
+helper code travel to SSH only over stdin; neither raw provider errors nor keys
+are returned to the browser.
+
 ## Invocation And Request
 
 ```sh
@@ -280,3 +327,14 @@ container execution or isolation. It skips if the real pipeline or binary is
 absent; set `PERFORMANCE_TEST_PIPELINE_ROOT` to another checkout if needed.
 Other process tests cover deadlines, bounded logs, nonzero exits, SIGTERM cleanup,
 and rejection of incomplete/stale/invalid results.
+
+Directory-search tests run without an external model:
+
+```sh
+python3 -B -m unittest discover -s backend/src -p project_search_test.py -v
+```
+
+Set `SPEC_PROJECT_SEARCH_INTEGRATION_OPENCODE` to an installed OpenCode executable
+to additionally exercise the actual CLI against a temporary loopback mock provider,
+with isolated HOME/XDG configuration. This verifies primary Explore selection,
+tool denial and JSON event parsing, not real-provider ranking quality.

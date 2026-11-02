@@ -47,7 +47,11 @@ input { background: var(--surface-deep); border: 1px solid var(--border); color:
 .performance-form { display: grid; gap: 8px; flex-shrink: 0; max-height: 50dvh; overflow: auto; padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--surface); font-size: 12px; overflow-wrap: anywhere; }
 .performance-form h2, .performance-form p { margin: 0; }
 .performance-form p { color: var(--muted); line-height: 1.6; }
-.performance-form > input { width: 100%; max-width: 640px; }
+.project-picker { display: grid; gap: 8px; min-width: 0; max-width: 640px; }
+.project-search-controls { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.project-search-controls input { flex: 1 1 240px; width: 100%; }
+.project-picker select { width: 100%; min-width: 0; font: inherit; padding: 9px 10px; background: var(--surface-deep); color: var(--text); border: 1px solid var(--border); border-radius: 6px; }
+.project-picker select:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .performance-option { display: flex; align-items: center; gap: 8px; }
 .performance-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 .app { height: 100dvh; display: flex; flex-direction: column; }
