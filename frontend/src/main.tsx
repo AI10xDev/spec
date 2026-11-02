@@ -44,7 +44,11 @@ function App() {
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
   const [busy, setBusy] = useState(false)
+  const [saving, setSaving] = useState<{ name: string; automatic: boolean } | null>(null)
   const submitting = useRef(false)
+  const edited = useRef(new Set<string>())
+  const autosaveBlocked = useRef(new Set<string>())
+  const [windowFocused, setWindowFocused] = useState(() => document.hasFocus() && !document.hidden)
   const [repository, setRepository] = useState<Repository | null>(null)
   const [repositoryError, setRepositoryError] = useState("")
   const [outputs, setOutputs] = useState<Record<string, Output>>({})
@@ -70,6 +74,7 @@ function App() {
   const retainedView = outputView === "file" && retained?.name === active ? retained : null
   const historical = retainedView?.output
   const output = outputView === "optimization" ? optimization : historical ?? fileOutput
+  const actionBusy = busy && !saving?.automatic
   const canContinue = !!output && !historical && outputView === "file" && execution && !busy && !optimization?.recoverable && output.status === "completed" && !output.recoverable && output.continuable === true
   const message = output ? feedback[output.id] ?? "" : ""
   const pendingRuns = [...Object.values(outputs), ...(optimization ? [optimization] : [])].filter((item) => item.recoverable).map((item) => item.id).join(",")
@@ -143,6 +148,29 @@ function App() {
     window.addEventListener("focus", focus)
     return () => window.removeEventListener("focus", focus)
   }, [connected])
+
+  useEffect(() => {
+    const focus = () => setWindowFocused(document.hasFocus() && !document.hidden)
+    const blur = () => setWindowFocused(false)
+    window.addEventListener("focus", focus)
+    window.addEventListener("blur", blur)
+    document.addEventListener("visibilitychange", focus)
+    return () => {
+      window.removeEventListener("focus", focus)
+      window.removeEventListener("blur", blur)
+      document.removeEventListener("visibilitychange", focus)
+    }
+  }, [])
+
+  const autosave = useEffectEvent(() => {
+    if (!document.hasFocus() || document.hidden || !tab || !edited.current.has(tab.name) || autosaveBlocked.current.has(tab.name) || !dirty(tab)) return
+    void save("file", true)
+  })
+  useEffect(() => {
+    if (!connected || chatName || !windowFocused || settings || analytics || busy || !tab || !edited.current.has(tab.name) || autosaveBlocked.current.has(tab.name) || !dirty(tab)) return
+    const timer = setTimeout(autosave, 500)
+    return () => clearTimeout(timer)
+  }, [connected, windowFocused, settings, analytics, busy, tab?.name, tab?.content, tab?.revision])
 
   useEffect(() => {
     const receive = (event: MessageEvent) => {
@@ -225,10 +253,10 @@ function App() {
   }, [output?.output, follow])
 
   useEffect(() => {
-    // Historical reads must not replace a new run or follow the user to another tab.
+    // Historical reads must not follow another tab or action; local autosaves preserve them.
     retainedRequest.current++
     setRetained(null)
-  }, [active, fileOutput?.id, token, busy])
+  }, [active, fileOutput?.id, token, actionBusy])
 
   useEffect(() => {
     if (!connected || !execution || chatName || busy) return
@@ -337,29 +365,44 @@ function App() {
   }
 
   function close(item: Tab) {
+    if (saving?.name === item.name) return
     if (dirty(item) && !window.confirm(`Discard unsaved changes to ${item.name}?`)) return
+    edited.current.delete(item.name)
+    autosaveBlocked.current.delete(item.name)
     navigation.current++
     const remaining = tabs.filter((tab) => tab.name !== item.name)
     setTabs(remaining)
     if (active === item.name) setActive(remaining.at(-1)?.name ?? "")
   }
 
-  async function save(mode: "file" | "build" | "repository" = "file") {
+  async function save(mode: "file" | "build" | "repository" = "file", automatic = false) {
     if (settings || analytics || !tab || busy || submitting.current || (mode !== "file" && optimization?.recoverable)) return
     submitting.current = true
     setBusy(true)
     setError("")
+    setNotice(`Saving ${tab.name}...`)
+    setSaving({ name: tab.name, automatic })
+    let persisted = false
     try {
       const document = await api<Document>(`/files/${encodeURIComponent(tab.name)}`, { content: tab.content, revision: tab.revision }, "PUT")
+      persisted = true
+      autosaveBlocked.current.delete(tab.name)
       setTabs((items) => savedTab(items, document))
       setNotice(`Saved ${document.name}`)
-      await refresh()
+      await refresh().catch(fail)
       if (mode === "file") return
       const job = await api<{ id: string }>(mode === "repository" ? "/repository/save" : "/runs", { name: document.name, revision: document.revision })
       setOutputs((items) => ({ ...items, [document.name]: { ...job, name: document.name, output: "Starting…", status: "running", truncated: false, recoverable: true, continuable: mode !== "repository" } }))
       setOutputView("file")
       if (mode === "repository") setNotice(`Repository save submitted to ${repository?.model ?? "azure/gpt-6-sol"}. Check Output & logs for the result.`)
-    } catch (error) { fail(error) } finally { submitting.current = false; setBusy(false) }
+    } catch (error) {
+      if (!persisted) {
+        // A conflict needs explicit resolution; never retry it on every keystroke.
+        autosaveBlocked.current.add(tab.name)
+        setNotice(`Autosave paused for ${tab.name}. Use Save to retry.`)
+      }
+      fail(automatic ? `Autosave failed for ${tab.name}: ${error instanceof Error ? error.message : String(error)}` : error)
+    } finally { submitting.current = false; setSaving(null); setBusy(false) }
   }
 
   function requestBuild() {
@@ -523,7 +566,7 @@ function App() {
         <nav className="editor-tabs" aria-label="Editor tabs">
           {tabs.map((item) => <div className={`editor-tab ${item.name === active ? "active" : ""}`} key={item.name}>
             <button onClick={() => selectTab(item.name)} aria-current={item.name === active ? "page" : undefined}>{item.name}{dirty(item) ? " •" : ""}</button>
-            <button className="close" aria-label={`Close ${item.name}`} onClick={() => close(item)}>×</button>
+            <button className="close" aria-label={`Close ${item.name}`} disabled={saving?.name === item.name} onClick={() => close(item)}>×</button>
           </div>)}
           {!tabs.length && <span className="empty-tabs">Open a saved file or create something new</span>}
         </nav>
@@ -532,6 +575,7 @@ function App() {
           <section className="editor-pane" aria-label="Spec editing pane">
             <div className="pane-heading"><div><span className="eyebrow">01 / SPEC</span><h2>{tab?.name ?? "Your next idea"}</h2></div><span className="badge">{tab ? dirty(tab) ? "Unsaved" : "Saved" : "Editor"}</span></div>
             {tabs.map((editor) => <Editor key={editor.name} active={!settings && editor.name === active} name={editor.name} value={editor.content} token={token} available={completion} enabled={complete} onEnabled={setComplete} onSave={() => void save()} onChange={(content) => {
+              if (content !== editor.content) edited.current.add(editor.name)
               setTabs((items) => items.map((item) => item.name === editor.name ? { ...item, content } : item))
             }} />)}
             {!tab && <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
@@ -567,14 +611,19 @@ function App() {
             <pre ref={log} className="output" aria-label="Run output">{output ? <LogOutput value={output.output} /> : (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery. To run dataset_pipe + model_pipeline, click Performance and enter a project folder relative to the remote workspace or an absolute remote path. The project's performance.json is used by default; no editor tab is needed. Optionally use the current editor's JSON pipeline config, with any filename extension. Unsaved content is included without saving locally. Metrics and pipeline output appear here." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
             {!historical && output && outputView === "file" && output.continuable === true && <form className="chat-composer build-feedback" onSubmit={(event) => { event.preventDefault(); void continueRun(message) }}>
               <label htmlFor="build-feedback">Feedback to build session</label>
-              <textarea id="build-feedback" aria-describedby="feedback-help feedback-limit" placeholder="Answer the agent or explain what to change..." value={message} disabled={busy} onChange={(event) => setFeedback((items) => ({ ...items, [output.id]: event.target.value }))} />
+              <textarea id="build-feedback" aria-describedby="feedback-help feedback-limit feedback-shortcuts" placeholder="Answer the agent or explain what to change..." value={message} disabled={actionBusy} onChange={(event) => setFeedback((items) => ({ ...items, [output.id]: event.target.value }))} onKeyDown={(event) => {
+                if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing || event.keyCode === 229) return
+                event.preventDefault()
+                if (!event.repeat) event.currentTarget.form?.requestSubmit()
+              }} />
+              <span id="feedback-shortcuts">Enter to send. Shift+Enter for a new line.</span>
               <span id="feedback-limit">{new TextEncoder().encode(message).length.toLocaleString()} / 16,384 bytes</span>
               <div><span id="feedback-help">{canContinue ? "Continues the same session with automatic tool approval. Can modify files and incur provider costs. Editor changes are not sent." : "Send after the agent turn finishes. Live input and stopped or failed runs are not supported."}</span><button className="primary" disabled={!canContinue || !message.trim() || message.includes("\0") || new TextEncoder().encode(message).length > 16 * 1024}>Send &amp; continue</button></div>
             </form>}
             <footer className="output-footer">{output && <span>Harness: {output.status}{output.recoverable ? " (completion not confirmed)" : ""}. CLI success alone does not verify saved changes.<br /></span>}Available output only. No hidden model reasoning is requested.</footer>
           </section>
         </div>
-        <div className="statusbar"><span role="status">{notice || "Ready"}</span><span id="editor-shortcuts">/ toggle completed (outside fenced code); Alt+/ type /</span><span>Ctrl/Cmd+S save · Ctrl/Cmd+Enter save &amp; run · 2 MiB file limit</span></div>
+        <div className="statusbar"><span role="status">{notice || "Ready"}</span><span id="editor-shortcuts">/ toggle completed (outside fenced code); Alt+/ type /</span><span>Autosave after 500 ms in focused window · Ctrl/Cmd+S save · Ctrl/Cmd+Enter save &amp; run · 2 MiB file limit</span></div>
       </main>
     </div>
   </div>

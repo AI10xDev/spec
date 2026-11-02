@@ -287,6 +287,8 @@ test("optimization is separate from a same-named file and preserves unsaved tabs
   await expect(page.getByRole("button", { name: "Use recommended & continue" })).toBeDisabled()
   await objectives.press("Control+s")
   await objectives.fill("Edited while submitting")
+  // Pause focused-window autosave to isolate the pipeline's write behavior.
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")))
   release()
   await expect(page.getByLabel("Run output")).toHaveText(running.output)
   await expect(objectives).toHaveValue("Edited while submitting")

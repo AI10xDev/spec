@@ -135,6 +135,8 @@ test("continuation submits only the prior ID, locks competing writes, and polls 
   await expect(page.getByRole("button", { name: "Save repo changes" })).toBeDisabled()
   await editor.press("Control+s")
   await editor.fill("Edited again while submitting")
+  // Isolate continuation writes while the focused-window autosave is paused.
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")))
   await expect(page.getByLabel("Run output")).toHaveText(completed.output)
   const polled = page.waitForRequest("**/api/runs/continued-harness")
   release()
@@ -257,6 +259,160 @@ test("feedback stays scoped to its run, locks duplicate submissions, and never s
   await expect(feedback).toHaveValue("")
   await expect(page.getByRole("textbox", { name: "Edit first.md" })).toHaveValue("Unsaved spec")
   expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: { message } }])
+  expect(errors).toEqual([])
+})
+
+test("autosaving the sheet does not interrupt typing a follow-up", async ({ page }) => {
+  const { writes } = await workspace(page)
+  await page.clock.install()
+  await page.clock.pauseAt(new Date(Date.now() + 1000))
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  await page.route("**/api/files/first.md", async (route) => {
+    await held
+    await route.fulfill({ json: { name: "first.md", content: "Autosaved spec", revision: "revision-2" } })
+  })
+  await page.route("**/api/runs/prior-harness/continue", (route) => route.fulfill({ json: { id: "after-autosave" } }))
+  await page.route("**/api/runs/after-autosave", (route) => route.fulfill({ json: { ...completed, id: "after-autosave", output: "Follow-up applied" } }))
+  await page.getByRole("textbox", { name: "Edit first.md" }).fill("Autosaved spec")
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  await feedback.fill("Please ")
+  await page.clock.runFor(500)
+  try {
+    await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled()
+    await expect(feedback).toBeEnabled()
+    await expect(feedback).toBeFocused()
+    await page.keyboard.type("continue")
+    await expect(feedback).toHaveValue("Please continue")
+  } finally { release() }
+  await expect(page.getByRole("button", { name: "Send & continue" })).toBeEnabled()
+  await feedback.press("Enter")
+  await expect(page.getByLabel("Run output")).toHaveText("Follow-up applied")
+  expect(writes).toEqual([
+    { path: "/api/files/first.md", method: "PUT", body: { content: "Autosaved spec", revision: "revision-1" } },
+    { path: "/api/runs/prior-harness/continue", method: "POST", body: { message: "Please continue" } },
+  ])
+})
+
+test("feedback Enter sends the exact multiline draft and Shift+Enter inserts a newline", async ({ page }) => {
+  const { writes, dialogs, errors } = await workspace(page)
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  const message = "  Use the smaller option.\nKeep the existing API.\n"
+  await feedback.fill("  Use the smaller option.")
+  await feedback.press("End")
+  await feedback.press("Shift+Enter")
+  await feedback.pressSequentially("Keep the existing API.")
+  await feedback.press("Shift+Enter")
+  await expect(feedback).toHaveValue(message)
+  expect(writes).toEqual([])
+  await page.route("**/api/runs/prior-harness/continue", (route) => route.fulfill({ json: { id: "enter-harness" } }))
+  await page.route("**/api/runs/enter-harness", (route) => route.fulfill({ json: { ...completed, id: "enter-harness", output: "Enter feedback applied" } }))
+
+  await feedback.press("Enter")
+
+  await expect(page.getByLabel("Run output")).toHaveText("Enter feedback applied")
+  await expect(feedback).toHaveValue("")
+  await expect(page.getByRole("textbox", { name: "Edit first.md" })).toHaveValue("Saved first.md")
+  expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: { message } }])
+  expect(dialogs).toEqual([])
+  expect(errors).toEqual([])
+})
+
+test("feedback Enter ignores modifiers, repeat and composition and guards same-tick submissions", async ({ page }) => {
+  const { writes, dialogs, errors } = await workspace(page)
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  const send = page.getByRole("button", { name: "Send & continue" })
+  const message = "Submit this only once"
+  await feedback.fill(message)
+  for (const shortcut of ["Control+Enter", "Meta+Enter", "Alt+Enter"]) {
+    await feedback.press(shortcut)
+    await expect(send).toBeEnabled()
+    expect(writes).toEqual([])
+    expect(dialogs).toEqual([])
+  }
+  for (const ignored of [{ repeat: true }, { isComposing: true }, { keyCode: 229 }]) {
+    await feedback.dispatchEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true, ...ignored })
+    await expect(send).toBeEnabled()
+    expect(writes).toEqual([])
+  }
+  await feedback.fill(message)
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  await page.route("**/api/runs/prior-harness/continue", async (route) => {
+    await held
+    await route.fulfill({ json: { id: "guarded-enter-harness" } })
+  })
+  await page.route("**/api/runs/guarded-enter-harness", (route) => route.fulfill({ json: { ...completed, id: "guarded-enter-harness", output: "Single Enter submission applied" } }))
+  // Dispatch before React can render disabled controls to exercise the synchronous guard.
+  await feedback.evaluate((element) => {
+    for (let index = 0; index < 2; index++) element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }))
+  })
+  await expect(send).toBeDisabled()
+  await expect(feedback).toBeDisabled()
+  await expect(page.getByLabel("Run output")).toHaveText(completed.output)
+  expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: { message } }])
+  release()
+  await expect(page.getByLabel("Run output")).toHaveText("Single Enter submission applied")
+  await expect(feedback).toHaveValue("")
+  expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: { message } }])
+  expect(dialogs).toEqual([])
+  expect(errors).toEqual([])
+})
+
+test("feedback Enter submits a second follow-up using the newly returned run ID", async ({ page }) => {
+  const { writes, dialogs, errors } = await workspace(page)
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  await page.route("**/api/runs/prior-harness/continue", (route) => route.fulfill({ json: { id: "first-follow-up" } }))
+  await page.route("**/api/runs/first-follow-up", (route) => route.fulfill({ json: { ...completed, id: "first-follow-up", output: "First follow-up completed" } }))
+  await page.route("**/api/runs/first-follow-up/continue", (route) => route.fulfill({ json: { id: "second-follow-up" } }))
+  await page.route("**/api/runs/second-follow-up", (route) => route.fulfill({ json: { ...completed, id: "second-follow-up", output: "Second follow-up completed" } }))
+
+  await feedback.fill("Use option two")
+  await feedback.press("Enter")
+  await expect(page.getByLabel("Run output")).toHaveText("First follow-up completed")
+  await expect(feedback).toHaveValue("")
+  await feedback.fill("Now add the regression test")
+  await expect(page.getByRole("button", { name: "Send & continue" })).toBeEnabled()
+  await feedback.press("Enter")
+  await expect(page.getByLabel("Run output")).toHaveText("Second follow-up completed")
+  await expect(feedback).toHaveValue("")
+  expect(writes).toEqual([
+    { path: "/api/runs/prior-harness/continue", method: "POST", body: { message: "Use option two" } },
+    { path: "/api/runs/first-follow-up/continue", method: "POST", body: { message: "Now add the regression test" } },
+  ])
+  expect(dialogs).toEqual([])
+  expect(errors).toEqual([])
+})
+
+test("feedback Enter retains the exact failed draft and retries the original run", async ({ page }) => {
+  const { writes, dialogs, errors } = await workspace(page)
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  const message = "  Please retry option two.\nKeep the API unchanged.\n"
+  let attempts = 0
+  await page.route("**/api/runs/prior-harness/continue", (route) => ++attempts === 1
+    ? route.fulfill({ status: 503, json: { error: "Session temporarily unavailable" } })
+    : route.fulfill({ json: { id: "retried-enter-harness" } }))
+  await page.route("**/api/runs/retried-enter-harness", (route) => route.fulfill({ json: { ...completed, id: "retried-enter-harness", output: "Retry completed" } }))
+  await page.getByLabel("Follow output").uncheck()
+  await feedback.fill(message)
+  await feedback.press("Enter")
+  await expect(page.getByRole("alert")).toContainText("Session temporarily unavailable")
+  await expect(feedback).toHaveValue(message)
+  await expect(page.getByLabel("Run output")).toHaveText(completed.output)
+  await expect(page.getByLabel("Follow output")).not.toBeChecked()
+  await expect(page.getByRole("button", { name: "Send & continue" })).toBeEnabled()
+  expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: { message } }])
+
+  await feedback.press("Enter")
+
+  await expect(page.getByLabel("Run output")).toHaveText("Retry completed")
+  await expect(feedback).toHaveValue("")
+  await expect(page.getByRole("alert")).toBeHidden()
+  expect(writes).toEqual([
+    { path: "/api/runs/prior-harness/continue", method: "POST", body: { message } },
+    { path: "/api/runs/prior-harness/continue", method: "POST", body: { message } },
+  ])
+  expect(dialogs).toEqual([])
   expect(errors).toEqual([])
 })
 

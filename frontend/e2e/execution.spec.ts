@@ -552,7 +552,8 @@ test("retained snapshots cannot resolve an unavailable run and missing selection
   await expect(run).toBeDisabled()
   await expect(page.getByRole("button", { name: "Stop run" })).toBeVisible()
   await expect(page.getByRole("textbox", { name: "Edit retained-poll.md" })).toHaveValue("Unsaved retained-run edits")
-  expect(mutations).toEqual([])
+  // Autosaving the editor must not clear historical output or trigger remote mutations.
+  expect(mutations).toEqual([new URL("/api/files/retained-poll.md", url).href])
   expect(alternatePolls).toEqual([])
 })
 

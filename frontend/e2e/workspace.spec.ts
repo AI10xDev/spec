@@ -280,6 +280,165 @@ test("edits during a real in-flight save retain the later buffer and save again 
   expect(await readFile(path.join(directory, "inflight.md"), "utf8")).toBe(edited)
 })
 
+test.describe("focused sheet autosave", () => {
+  let name: string
+  let writes: { path: string; body: { content?: string; revision?: string | null } }[]
+
+  test.beforeEach(async ({ page }, testInfo) => {
+    name = `autosave-${testInfo.title.replace(/[^a-z0-9]/gi, "-")}.md`
+    writes = []
+    page.on("request", (request) => {
+      if (request.url().includes("/api/") && request.method() !== "GET") writes.push({ path: new URL(request.url()).pathname, body: request.postDataJSON() })
+    })
+    await page.clock.install()
+    await page.clock.pauseAt(new Date(Date.now() + 1000))
+    await page.goto(url)
+    await page.getByRole("textbox", { name: "New filename" }).fill(name)
+    await page.getByRole("button", { name: "Create file" }).click()
+  })
+
+  test("coalesces typing and saves to disk without execution", async ({ page }) => {
+    const editor = page.getByRole("textbox", { name: `Edit ${name}` })
+    await editor.fill("First draft")
+    await page.clock.runFor(400)
+    await editor.fill("Latest draft")
+    await page.clock.runFor(499)
+    expect(writes).toEqual([])
+    await page.clock.runFor(1)
+    await expect(page.getByRole("status")).toHaveText(`Saved ${name}`)
+    expect(writes).toEqual([{ path: `/api/files/${name}`, body: { content: "Latest draft", revision: null } }])
+    expect(await readFile(path.join(directory, name), "utf8")).toBe("Latest draft")
+    await page.clock.runFor(2000)
+    expect(writes).toHaveLength(1)
+  })
+
+  test("does not create untouched empty sheets or duplicate manual saves", async ({ page }) => {
+    await page.clock.runFor(1000)
+    expect(writes).toEqual([])
+    await page.getByRole("textbox", { name: `Edit ${name}` }).fill("Save now")
+    await page.getByRole("button", { name: "Save", exact: true }).click()
+    await expect(page.getByRole("status")).toHaveText(`Saved ${name}`)
+    await page.clock.runFor(1000)
+    expect(writes).toHaveLength(1)
+  })
+
+  test("pauses when the window loses focus and resumes on return", async ({ page }) => {
+    await page.getByRole("textbox", { name: `Edit ${name}` }).fill("Pending focus")
+    await page.clock.runFor(300)
+    await page.evaluate(() => window.dispatchEvent(new Event("blur")))
+    await page.clock.runFor(1000)
+    expect(writes).toEqual([])
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")))
+    await page.clock.runFor(500)
+    await expect(page.getByRole("status")).toHaveText(`Saved ${name}`)
+    expect(await readFile(path.join(directory, name), "utf8")).toBe("Pending focus")
+  })
+
+  test("saves only the selected sheet and cancels discarded drafts", async ({ page }) => {
+    await page.getByRole("textbox", { name: `Edit ${name}` }).fill("Inactive draft")
+    const other = `other-${name}`
+    await page.getByRole("textbox", { name: "New filename" }).fill(other)
+    await page.getByRole("button", { name: "Create file" }).click()
+    await page.clock.runFor(1000)
+    expect(writes).toEqual([])
+    await page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button", { name: `${name} •`, exact: true }).click()
+    await page.clock.runFor(500)
+    await expect(page.getByRole("status")).toHaveText(`Saved ${name}`)
+    await page.getByRole("textbox", { name: `Edit ${name}` }).fill("Discard me")
+    page.once("dialog", (dialog) => dialog.accept())
+    await page.getByRole("button", { name: `Close ${name}` }).click()
+    await page.clock.runFor(1000)
+    expect(writes).toHaveLength(1)
+    expect(await readFile(path.join(directory, name), "utf8")).toBe("Inactive draft")
+  })
+
+  test("serializes in-flight edits using the acknowledged revision", async ({ page }) => {
+    const editor = page.getByRole("textbox", { name: `Edit ${name}` })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let fetched!: () => void
+    const submitted = new Promise<void>((resolve) => { fetched = resolve })
+    await page.route(`**/api/files/${name}`, async (route) => {
+      const response = await route.fetch()
+      fetched()
+      await gate
+      await route.fulfill({ response })
+    }, { times: 1 })
+    await editor.fill("Snapshot")
+    await page.clock.runFor(500)
+    await submitted
+    try {
+      await editor.fill("Newer typing")
+      await page.clock.runFor(1000)
+      expect(writes).toHaveLength(1)
+      await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled()
+      // A late acknowledgement must not attach to a reopened instance of this file.
+      await expect(page.getByRole("button", { name: `Close ${name}` })).toBeDisabled()
+    } finally { release() }
+    await expect(page.getByRole("status")).toHaveText(`Saved ${name}`)
+    await expect(page.getByRole("button", { name: `Close ${name}` })).toBeEnabled()
+    await expect(editor).toHaveValue("Newer typing")
+    await expect(page.getByRole("region", { name: "Spec editing pane" }).getByText("Unsaved", { exact: true })).toBeVisible()
+    await page.clock.runFor(500)
+    await expect(page.getByRole("region", { name: "Spec editing pane" }).getByText("Saved", { exact: true })).toBeVisible()
+    expect(writes).toHaveLength(2)
+    expect(writes[1].body.revision).toEqual(expect.any(String))
+    expect(await readFile(path.join(directory, name), "utf8")).toBe("Newer typing")
+  })
+
+  test("pauses after a conflict and retains edits until explicit retry", async ({ page }) => {
+    const editor = page.getByRole("textbox", { name: `Edit ${name}` })
+    await page.route(`**/api/files/${name}`, (route) => route.fulfill({ status: 409, json: { error: "File changed on disk" } }), { times: 1 })
+    await editor.fill("Keep this draft")
+    await page.clock.runFor(500)
+    await expect(page.getByRole("alert")).toContainText("Autosave failed")
+    await expect(page.getByRole("status")).toContainText("Autosave paused")
+    await editor.fill("Keep newer edits too")
+    await page.clock.runFor(2000)
+    expect(writes).toHaveLength(1)
+    await expect(editor).toHaveValue("Keep newer edits too")
+    await page.getByRole("button", { name: "Save", exact: true }).click()
+    await expect(page.getByRole("status")).toHaveText(`Saved ${name}`)
+    await editor.fill("Autosave works again")
+    await page.clock.runFor(500)
+    await expect(page.getByRole("region", { name: "Spec editing pane" }).getByText("Saved", { exact: true })).toBeVisible()
+    expect(writes).toHaveLength(3)
+    expect(await readFile(path.join(directory, name), "utf8")).toBe("Autosave works again")
+  })
+
+  test("defers saving while settings replace the sheet", async ({ page }) => {
+    await page.getByRole("textbox", { name: `Edit ${name}` }).fill("Settings draft")
+    await page.getByRole("button", { name: "Settings", exact: true }).click()
+    await page.clock.runFor(1000)
+    expect(writes).toEqual([])
+    await page.getByRole("button", { name: "Back to workspace" }).click()
+    await page.clock.runFor(500)
+    await expect(page.getByRole("status")).toHaveText(`Saved ${name}`)
+  })
+
+  test("never overwrites another writer after a real revision conflict", async ({ page }) => {
+    const editor = page.getByRole("textbox", { name: `Edit ${name}` })
+    await editor.fill("Original snapshot")
+    await page.clock.runFor(500)
+    await expect(page.getByRole("status")).toHaveText(`Saved ${name}`)
+    const endpoint = new URL(`/api/files/${name}`, url).href
+    const headers = { Authorization: `Bearer ${new URLSearchParams(new URL(url).hash.slice(1)).get("token")}` }
+    const snapshot = await (await page.request.get(endpoint, { headers })).json()
+    expect((await page.request.put(endpoint, { headers, data: { content: "External update", revision: snapshot.revision } })).ok()).toBe(true)
+    await editor.fill("Retain my local draft")
+    await page.clock.runFor(500)
+    await expect(page.getByRole("alert")).toContainText("File changed on disk")
+    await expect(page.getByRole("status")).toContainText("Autosave paused")
+    await page.clock.runFor(2000)
+    expect(writes).toHaveLength(2)
+    await page.getByRole("button", { name: "Save", exact: true }).click()
+    await expect(page.getByRole("status")).toContainText("Autosave paused")
+    await expect(editor).toHaveValue("Retain my local draft")
+    expect(await readFile(path.join(directory, name), "utf8")).toBe("External update")
+    expect(writes).toHaveLength(3)
+  })
+})
+
 test.describe("repository save", () => {
   test.beforeEach(async ({ page }) => {
     await page.route("**/api/config", (route) => route.fulfill({ json: { execution: true, completion: false } }))
@@ -1166,6 +1325,9 @@ test.describe("session chat popup", () => {
     const chat = await opened
     await expect(chat.getByRole("region", { name: "Chat context" })).toContainText("Live editor buffer")
     await page.reload()
+    // Keep this regression about live unsaved context, before the autosave deadline.
+    await page.clock.install()
+    await page.clock.pauseAt(new Date(Date.now() + 1000))
     await page.getByRole("textbox", { name: `Edit ${name}` }).fill("Draft after workspace reload")
     await chat.getByText("Inspect current context", { exact: true }).click()
     await expect(chat.getByRole("region", { name: "Chat context" }).locator("pre").first()).toHaveText("Draft after workspace reload")
