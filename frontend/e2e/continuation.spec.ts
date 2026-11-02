@@ -46,6 +46,7 @@ test.afterAll(async () => {
 })
 
 const completed = { id: "prior-harness", name: "first.md", status: "completed", output: "Original logs: use the recommended option?", truncated: false, recoverable: false, continuable: true }
+const running = { ...completed, status: "running", recoverable: true }
 const second = { ...completed, id: "other-harness", name: "second.md", output: "Independent second-file logs" }
 const buttonName = "Use recommended & continue"
 
@@ -92,7 +93,7 @@ for (const scenario of [
     const button = page.getByRole("button", { name: buttonName })
     await expect(button).toBeVisible()
     await expect(button).toBeDisabled()
-    const send = page.getByRole("button", { name: "Send & continue" })
+    const send = page.getByRole("button", { name: scenario.output.status === "running" ? "Queue follow-up" : "Send & continue" })
     if (scenario.output.continuable === true) await expect(send).toBeDisabled()
     else await expect(send).toBeHidden()
     expect(writes).toEqual([])
@@ -291,6 +292,309 @@ test("autosaving the sheet does not interrupt typing a follow-up", async ({ page
   expect(writes).toEqual([
     { path: "/api/files/first.md", method: "PUT", body: { content: "Autosaved spec", revision: "revision-1" } },
     { path: "/api/runs/prior-harness/continue", method: "POST", body: { message: "Please continue" } },
+  ])
+})
+
+test("queued Enter guards duplicates, dispatches the original background run, and preserves an identical new draft on its child", async ({ page }) => {
+  await page.clock.install()
+  await page.clock.pauseAt(new Date(Date.now() + 1000))
+  const { writes, dialogs, errors } = await workspace(page, running)
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  const queue = page.getByRole("region", { name: "Queued follow-ups" })
+  const message = "  Apply the smaller change.\nKeep the API unchanged.\n"
+  await feedback.fill(message)
+  await expect(page.getByRole("button", { name: "Queue follow-up", exact: true })).toBeEnabled()
+  await feedback.evaluate((element) => {
+    for (let index = 0; index < 2; index++) element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }))
+  })
+  await expect(queue.locator("pre")).toHaveCount(1)
+  await expect(queue.locator("pre")).toHaveJSProperty("textContent", message)
+  await expect(feedback).toHaveValue("")
+  // This is a new draft even though its text matches the queued message exactly.
+  await feedback.fill(message)
+  await feedback.press("Enter")
+  await expect(feedback).toHaveValue(message)
+  await expect(page.getByRole("button", { name: "Queue follow-up", exact: true })).toBeDisabled()
+  await expect(queue.locator("pre")).toHaveJSProperty("textContent", message)
+  expect(writes).toEqual([])
+
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  await page.route("**/api/runs/prior-harness/continue", async (route) => {
+    await held
+    await route.fulfill({ json: { id: "queued-child" } })
+  })
+  await page.route("**/api/runs/queued-child", (route) => route.fulfill({ json: { ...completed, id: "queued-child", output: "Background follow-up completed" } }))
+  await page.route("**/api/runs/queued-child/continue", (route) => route.fulfill({ json: { id: "queued-grandchild" } }))
+  await page.route("**/api/runs/queued-grandchild", (route) => route.fulfill({ json: { ...completed, id: "queued-grandchild", output: "Preserved draft applied" } }))
+  await page.getByRole("tabpanel").getByRole("button", { name: /second\.md/ }).click()
+  await expect(page.getByLabel("Run output")).toHaveText(second.output)
+  await feedback.fill("Independent second-file draft")
+  await page.route("**/api/runs/prior-harness", (route) => route.fulfill({ json: completed }))
+  const submitted = page.waitForRequest("**/api/runs/prior-harness/continue")
+  try {
+    await page.clock.runFor(650)
+    await submitted
+    await expect(page.getByRole("status")).toContainText("Submitting feedback for first.md")
+    await expect(page.getByLabel("Run output")).toHaveText(second.output)
+    expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: { message } }])
+  } finally { release() }
+  await expect(page.getByRole("status")).toContainText("Feedback submitted to the same session for first.md")
+  await expect(queue).toBeHidden()
+  await expect(page.getByLabel("Run output")).toHaveText(second.output)
+  await expect(feedback).toHaveValue("Independent second-file draft")
+  await page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button", { name: /^first\.md/ }).click()
+  await expect(page.getByLabel("Run output")).toHaveText("Background follow-up completed")
+  await expect(feedback).toHaveValue(message)
+  await feedback.press("Enter")
+  await expect(page.getByLabel("Run output")).toHaveText("Preserved draft applied")
+  expect(writes).toEqual([
+    { path: "/api/runs/prior-harness/continue", method: "POST", body: { message } },
+    { path: "/api/runs/queued-child/continue", method: "POST", body: { message } },
+  ])
+  expect(dialogs).toEqual([])
+  expect(errors).toEqual([])
+})
+
+test("queued feedback waits through unavailable transport and recoverable completion until completion is confirmed", async ({ page }) => {
+  await page.clock.install()
+  await page.clock.pauseAt(new Date(Date.now() + 1000))
+  const { writes } = await workspace(page, running)
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  const queue = page.getByRole("region", { name: "Queued follow-ups" })
+  await feedback.fill("Send only after confirmation")
+  await feedback.press("Enter")
+  let current: Output | null = null
+  await page.route("**/api/runs/prior-harness", (route) => current
+    ? route.fulfill({ json: current })
+    : route.fulfill({ status: 503, json: { error: "Status probe unavailable" } }))
+  await page.route("**/api/runs/prior-harness/continue", (route) => route.fulfill({ json: { id: "confirmed-child" } }))
+  await page.route("**/api/runs/confirmed-child", (route) => route.fulfill({ json: { ...completed, id: "confirmed-child", output: "Confirmed follow-up completed" } }))
+  await page.clock.runFor(650)
+  await expect(page.getByRole("alert")).toContainText("Status probe unavailable")
+  await expect(page.getByRole("region", { name: "Output and logs pane" }).locator(".badge")).toHaveText("running (connection unavailable)")
+  expect(writes).toEqual([])
+
+  for (const state of [
+    { ...running, status: "unavailable (remote disconnected)", output: "Do not replace cached logs" },
+    { ...completed, recoverable: true, output: "Process exited, completion not confirmed" },
+    { ...completed, transportUnavailable: true, output: "Cached completion with unavailable transport" },
+  ]) {
+    current = state
+    await page.clock.runFor(2500)
+    await expect(page.getByRole("region", { name: "Output and logs pane" }).locator(".badge")).toHaveText("transportUnavailable" in state && state.transportUnavailable ? "completed (connection unavailable)" : state.status)
+    await expect(queue).toContainText("Waiting to send to the same session")
+    await expect(page.getByLabel("Run output")).toHaveText(state.status.startsWith("unavailable") ? running.output : state.output)
+    expect(writes).toEqual([])
+  }
+
+  await page.route("**/api/files/first.md/run/log", (route) => route.fulfill({ json: completed }))
+  await page.getByRole("button", { name: "Load nohup output" }).click()
+  await expect(page.getByLabel("Run output")).toHaveText("Confirmed follow-up completed")
+  await expect(queue).toBeHidden()
+  expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: { message: "Send only after confirmation" } }])
+})
+
+for (const scenario of [
+  { name: "failed", output: { ...completed, status: "failed (exit status: 7)" } },
+  { name: "stopped", output: { ...completed, status: "stopped" } },
+  { name: "replaced", output: { ...completed, id: "replacement-harness" } },
+]) {
+  test(`queued feedback stays paused after its parent is ${scenario.name}`, async ({ page }) => {
+    await page.clock.install()
+    await page.clock.pauseAt(new Date(Date.now() + 1000))
+    const { writes } = await workspace(page, running)
+    const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+    const queue = page.getByRole("region", { name: "Queued follow-ups" })
+    await feedback.fill("Never resume this parent automatically")
+    await feedback.press("Enter")
+    let current = scenario.output
+    await page.route("**/api/files/first.md/run/log", (route) => route.fulfill({ json: current }))
+    await page.getByRole("button", { name: "Load nohup output" }).click()
+    await expect(queue).toContainText("The original run changed or did not complete successfully. Feedback was not sent.")
+    await expect(queue.locator("pre")).toHaveText("Never resume this parent automatically")
+    expect(writes).toEqual([])
+
+    // Even a later successful read of the original parent must not unpause delivery.
+    current = completed
+    await page.getByRole("button", { name: "Load nohup output" }).click()
+    await expect(page.getByRole("status")).toContainText("Loaded first.md.out")
+    await page.clock.runFor(10_000)
+    await expect(queue).toContainText("Feedback was not sent.")
+    await expect(page.getByRole("button", { name: "Send & continue" })).toBeDisabled()
+    expect(writes).toEqual([])
+  })
+}
+
+test("queued delivery errors retain the message and new draft without automatic retries", async ({ page }) => {
+  await page.clock.install()
+  await page.clock.pauseAt(new Date(Date.now() + 1000))
+  const { writes } = await workspace(page, running)
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  const queue = page.getByRole("region", { name: "Queued follow-ups" })
+  const message = "  Do not retry an ambiguous delivery.\n"
+  await feedback.fill(message)
+  await feedback.press("Enter")
+  await feedback.fill("Keep this newer draft")
+  await page.route("**/api/runs/prior-harness/continue", (route) => route.fulfill({ status: 503, json: { error: "Delivery result unavailable" } }))
+  await page.route("**/api/files/first.md/run/log", (route) => route.fulfill({ json: completed }))
+  await page.getByRole("button", { name: "Load nohup output" }).click()
+  await expect(page.getByRole("alert")).toContainText("Delivery result unavailable")
+  await expect(queue).toContainText("Delivery failed or is unconfirmed.")
+  await expect(queue).toContainText("automatic retry is disabled")
+  await expect(queue.locator("pre")).toHaveJSProperty("textContent", message)
+  await expect(feedback).toHaveValue("Keep this newer draft")
+  await expect(page.getByLabel("Run output")).toHaveText(completed.output)
+  await feedback.press("Enter")
+  await page.getByRole("button", { name: "Load nohup output" }).click()
+  await expect(page.getByRole("status")).toContainText("Loaded first.md.out")
+  await page.clock.runFor(10_000)
+  await expect(queue).toContainText("automatic retry is disabled")
+  expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: { message } }])
+})
+
+test("Stop run pauses queued feedback before cancellation settles even if the parent completes and cancellation fails", async ({ page }) => {
+  await page.clock.install()
+  await page.clock.pauseAt(new Date(Date.now() + 1000))
+  const { writes } = await workspace(page, running)
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  const queue = page.getByRole("region", { name: "Queued follow-ups" })
+  await feedback.fill("Do not restart after Stop")
+  await feedback.press("Enter")
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  await page.route("**/api/runs/prior-harness/cancel", async (route) => {
+    await held
+    await route.fulfill({ status: 503, json: { error: "Cancellation unavailable" } })
+  })
+  await page.route("**/api/files/first.md/run/log", (route) => route.fulfill({ json: completed }))
+  const canceled = page.waitForRequest("**/api/runs/prior-harness/cancel")
+  try {
+    await page.getByRole("button", { name: "Stop run", exact: true }).click()
+    await canceled
+    await expect(queue).toContainText("Stop requested. Queued feedback will not resume this run.")
+    await page.getByRole("button", { name: "Load nohup output" }).click()
+    await expect(page.getByRole("button", { name: "Stop run", exact: true })).toBeHidden()
+    await expect(queue).toContainText("Stop requested.")
+    expect(writes).toEqual([{ path: "/api/runs/prior-harness/cancel", method: "POST", body: {} }])
+  } finally { release() }
+  await expect(page.getByRole("alert")).toContainText("Cancellation unavailable")
+  await page.clock.runFor(10_000)
+  await expect(queue.locator("pre")).toHaveText("Do not restart after Stop")
+  expect(writes).toEqual([{ path: "/api/runs/prior-harness/cancel", method: "POST", body: {} }])
+})
+
+test("Stop without a queue blocks same-tick and subsequent queued Enter while cancellation is pending", async ({ page }) => {
+  await page.clock.install()
+  await page.clock.pauseAt(new Date(Date.now() + 1000))
+  const { writes, errors } = await workspace(page, running)
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  const queue = page.getByRole("region", { name: "Queued follow-ups" })
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  await page.route("**/api/runs/prior-harness/cancel", async (route) => {
+    await held
+    await route.fulfill({ json: { ok: true } })
+  })
+  await feedback.fill("Do not queue after Stop")
+  await expect(queue).toBeHidden()
+  const canceled = page.waitForRequest("**/api/runs/prior-harness/cancel")
+  const settled = page.waitForResponse("**/api/runs/prior-harness/cancel")
+  try {
+    await page.getByRole("button", { name: "Stop run", exact: true }).evaluate((button: HTMLButtonElement) => {
+      button.click()
+      document.querySelector<HTMLTextAreaElement>("#build-feedback")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }))
+    })
+    await canceled
+    await expect(queue).toBeHidden()
+    await expect(feedback).toHaveValue("Do not queue after Stop")
+    await feedback.fill("New draft while cancellation is pending")
+    await feedback.press("Enter")
+    await expect(page.getByRole("button", { name: "Queue follow-up", exact: true })).toBeDisabled()
+    await expect(queue).toBeHidden()
+    await expect(feedback).toHaveValue("New draft while cancellation is pending")
+    expect(writes).toEqual([{ path: "/api/runs/prior-harness/cancel", method: "POST", body: {} }])
+
+    await page.route("**/api/runs/prior-harness", (route) => route.fulfill({ json: completed }))
+    await page.clock.runFor(650)
+    await expect(page.getByRole("button", { name: "Stop run", exact: true })).toBeHidden()
+    await expect(page.getByRole("button", { name: "Send & continue" })).toBeVisible()
+    await expect(queue).toBeHidden()
+    expect(writes).toEqual([{ path: "/api/runs/prior-harness/cancel", method: "POST", body: {} }])
+  } finally { release() }
+  await settled
+  await page.clock.runFor(10_000)
+  await expect(queue).toBeHidden()
+  await expect(feedback).toHaveValue("New draft while cancellation is pending")
+  expect(writes).toEqual([{ path: "/api/runs/prior-harness/cancel", method: "POST", body: {} }])
+  expect(errors).toEqual([])
+})
+
+test("canceling queued feedback clears the unload warning and permits a replacement without sending canceled messages", async ({ page }) => {
+  await page.clock.install()
+  await page.clock.pauseAt(new Date(Date.now() + 1000))
+  const { writes } = await workspace(page, running)
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  const queue = page.getByRole("region", { name: "Queued follow-ups" })
+  for (const message of ["Cancel the original", "Cancel its replacement too"]) {
+    expect(await page.evaluate(() => !window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(false)
+    await feedback.fill(message)
+    await feedback.press("Enter")
+    await expect(queue.locator("pre")).toHaveText(message)
+    expect(await page.evaluate(() => !window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(true)
+    await feedback.fill("Unsubmitted draft survives cancellation")
+    await page.getByRole("button", { name: "Cancel queued follow-up for first.md", exact: true }).click()
+    await expect(queue).toBeHidden()
+    await expect(feedback).toHaveValue("Unsubmitted draft survives cancellation")
+    await expect(page.getByRole("button", { name: "Queue follow-up", exact: true })).toBeEnabled()
+  }
+  expect(await page.evaluate(() => !window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(false)
+  await page.route("**/api/runs/prior-harness", (route) => route.fulfill({ json: completed }))
+  await page.clock.runFor(650)
+  await expect(page.getByRole("button", { name: "Send & continue" })).toBeEnabled()
+  expect(writes).toEqual([])
+})
+
+test("Enter during a held autosave queues locally and dispatches after saving without consuming the newer draft", async ({ page }) => {
+  await page.clock.install()
+  await page.clock.pauseAt(new Date(Date.now() + 1000))
+  const { writes } = await workspace(page)
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  await page.route("**/api/files/first.md", async (route) => {
+    await held
+    await route.fulfill({ json: { name: "first.md", content: "Autosaved before queued feedback", revision: "revision-2" } })
+  })
+  await page.route("**/api/runs/prior-harness/continue", (route) => route.fulfill({ json: { id: "autosave-queued-child" } }))
+  await page.route("**/api/runs/autosave-queued-child", (route) => route.fulfill({ json: { ...completed, id: "autosave-queued-child", output: "Queued after autosave" } }))
+  const editor = page.getByRole("textbox", { name: "Edit first.md" })
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  const queue = page.getByRole("region", { name: "Queued follow-ups" })
+  await editor.fill("Autosaved before queued feedback")
+  await feedback.fill("Submit when autosave finishes")
+  const saving = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/files/first.md" && request.method() === "PUT")
+  try {
+    await page.clock.runFor(500)
+    await saving
+    await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled()
+    await expect(feedback).toBeEnabled()
+    await feedback.press("Enter")
+    await expect(queue.locator("pre")).toHaveText("Submit when autosave finishes")
+    await expect(feedback).toHaveValue("")
+    await feedback.fill("New draft while saving")
+    await feedback.press("Enter")
+    await expect(queue.locator("pre")).toHaveCount(1)
+    await expect(queue.locator("pre")).toHaveText("Submit when autosave finishes")
+    await expect(feedback).toHaveValue("New draft while saving")
+    expect(writes).toEqual([{ path: "/api/files/first.md", method: "PUT", body: { content: "Autosaved before queued feedback", revision: "revision-1" } }])
+  } finally { release() }
+  await expect(page.getByLabel("Run output")).toHaveText("Queued after autosave")
+  await expect(queue).toBeHidden()
+  await expect(feedback).toHaveValue("New draft while saving")
+  await expect(editor).toHaveValue("Autosaved before queued feedback")
+  expect(writes).toEqual([
+    { path: "/api/files/first.md", method: "PUT", body: { content: "Autosaved before queued feedback", revision: "revision-1" } },
+    { path: "/api/runs/prior-harness/continue", method: "POST", body: { message: "Submit when autosave finishes" } },
   ])
 })
 

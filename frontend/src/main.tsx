@@ -53,6 +53,9 @@ function App() {
   const [repositoryError, setRepositoryError] = useState("")
   const [outputs, setOutputs] = useState<Record<string, Output>>({})
   const [feedback, setFeedback] = useState<Record<string, string>>({})
+  const [queuedFeedback, setQueuedFeedback] = useState<Record<string, { name: string; message: string; paused?: string }>>({})
+  const queuedIds = useRef(new Set<string>())
+  const stoppedIds = useRef(new Set<string>())
   const [optimization, setOptimization] = useState<Output | null>(null)
   const [performance, setPerformance] = useState(false)
   const [project, setProject] = useState("")
@@ -75,11 +78,19 @@ function App() {
   const historical = retainedView?.output
   const output = outputView === "optimization" ? optimization : historical ?? fileOutput
   const actionBusy = busy && !saving?.automatic
-  const canContinue = !!output && !historical && outputView === "file" && execution && !busy && !optimization?.recoverable && output.status === "completed" && !output.recoverable && output.continuable === true
+  const canContinue = !!output && !historical && outputView === "file" && execution && !busy && !optimization?.recoverable && !queuedFeedback[output.id] && output.status === "completed" && !output.recoverable && output.continuable === true
+  const canQueueFeedback = !!output && !historical && outputView === "file" && execution && !actionBusy && !optimization?.recoverable && !queuedFeedback[output.id] && !stoppedIds.current.has(output.id) && output.continuable === true && (output.status === "running" || (output.status === "completed" && !output.recoverable))
   const message = output ? feedback[output.id] ?? "" : ""
   const pendingRuns = [...Object.values(outputs), ...(optimization ? [optimization] : [])].filter((item) => item.recoverable).map((item) => item.id).join(",")
+  const queuedForFile = Object.values(queuedFeedback).some((item) => item.name === active)
 
   async function api<T>(path: string, body?: unknown, method = "POST", signal?: AbortSignal): Promise<T> {
+    // Every cancellation surface must revoke queued execution before any network I/O.
+    if (body !== undefined && method === "POST" && /^\/runs\/[^/]+\/cancel$/.test(path)) {
+      const id = path.split("/")[2]
+      stoppedIds.current.add(id)
+      setQueuedFeedback((items) => ({ ...items, ...(items[id] ? { [id]: { ...items[id], paused: "Stop requested. Queued feedback will not resume this run." } } : {}) }))
+    }
     const response = await fetch(`/api${path}`, {
       method: body === undefined ? "GET" : method,
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -203,13 +214,13 @@ function App() {
 
   useEffect(() => {
     const listener = (event: BeforeUnloadEvent) => {
-      if (!tabs.some(dirty)) return
+      if (!tabs.some(dirty) && !Object.keys(queuedFeedback).length) return
       event.preventDefault()
       event.returnValue = ""
     }
     window.addEventListener("beforeunload", listener)
     return () => window.removeEventListener("beforeunload", listener)
-  }, [tabs])
+  }, [tabs, queuedFeedback])
 
   useEffect(() => {
     // Let an explicit disk read finish without a poll invalidating its result.
@@ -247,6 +258,23 @@ function App() {
     if (optimization?.recoverable) void poll(optimization, true)
     return () => { cancelled = true; timers.forEach(clearTimeout) }
   }, [pendingRuns, loadingOutput, token])
+
+  const dispatchQueuedFeedback = useEffectEvent(() => {
+    if (!connected || !execution || busy || submitting.current || settings || analytics || optimization?.recoverable) return
+    for (const [id, queued] of Object.entries(queuedFeedback)) {
+      if (queued.paused || !queuedIds.current.has(id) || stoppedIds.current.has(id)) continue
+      const current = outputs[queued.name]
+      if (!current || current.id !== id || (!current.recoverable && current.status !== "completed")) {
+        setQueuedFeedback((items) => ({ ...items, [id]: { ...queued, paused: "The original run changed or did not complete successfully. Feedback was not sent." } }))
+        continue
+      }
+      if (current.status === "completed" && !current.recoverable && !current.transportUnavailable && current.continuable) {
+        void continueRun(queued.message, current)
+        break
+      }
+    }
+  })
+  useEffect(() => { dispatchQueuedFeedback() }, [queuedFeedback, outputs, connected, execution, busy, settings, analytics, optimization?.recoverable])
 
   useEffect(() => {
     if (follow && log.current) log.current.scrollTop = log.current.scrollHeight
@@ -376,7 +404,7 @@ function App() {
   }
 
   async function save(mode: "file" | "build" | "repository" = "file", automatic = false) {
-    if (settings || analytics || !tab || busy || submitting.current || (mode !== "file" && optimization?.recoverable)) return
+    if (settings || analytics || !tab || busy || submitting.current || (mode !== "file" && (optimization?.recoverable || queuedForFile))) return
     submitting.current = true
     setBusy(true)
     setError("")
@@ -406,7 +434,7 @@ function App() {
   }
 
   function requestBuild() {
-    if (settings || analytics || !tab || busy || submitting.current || !execution || fileOutput?.recoverable || optimization?.recoverable) return
+    if (settings || analytics || !tab || busy || submitting.current || !execution || queuedForFile || fileOutput?.recoverable || optimization?.recoverable) return
     if (window.confirm("Send this saved spec over SSH and run remote spec build? Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.")) void save("build")
   }
 
@@ -423,29 +451,56 @@ function App() {
     return () => window.removeEventListener("keydown", shortcut)
   })
 
-  async function continueRun(message?: string) {
-    if (!canContinue || submitting.current || !output) return
+  function removeQueuedFeedback(id: string) {
+    queuedIds.current.delete(id)
+    setQueuedFeedback((items) => {
+      const next = { ...items }
+      delete next[id]
+      return next
+    })
+  }
+
+  function submitFeedback() {
+    if (!output || queuedIds.current.has(output.id) || !message.trim() || message.includes("\0") || new TextEncoder().encode(message).length > 16 * 1024) return
+    if (canContinue) { void continueRun(message); return }
+    if (!canQueueFeedback || stoppedIds.current.has(output.id)) return
+    queuedIds.current.add(output.id)
+    setQueuedFeedback((items) => ({ ...items, [output.id]: { name: output.name, message } }))
+    setFeedback((items) => ({ ...items, [output.id]: "" }))
+    setNotice(`Feedback queued for ${output.name}. Keep this page open; it sends after confirmed completion.`)
+  }
+
+  async function continueRun(message?: string, queuedOutput?: Output) {
+    const target = queuedOutput ?? output
+    if ((!queuedOutput && !canContinue) || submitting.current || !target || busy || !execution || optimization?.recoverable) return
+    if (queuedOutput && (!queuedIds.current.has(target.id) || stoppedIds.current.has(target.id))) return
+    if (target.status !== "completed" || target.recoverable || !target.continuable || outputs[target.name]?.id !== target.id) return
     if (message !== undefined && (!message.trim() || message.includes("\0") || new TextEncoder().encode(message).length > 16 * 1024)) {
       setError("Feedback must be nonempty, without NUL bytes, and at most 16 KiB.")
       return
     }
-    const { id, name } = output
+    const { id, name } = target
     submitting.current = true
     setBusy(true)
     setError("")
     setNotice(`Submitting ${message === undefined ? "recommendation" : "feedback"} for ${name}...`)
     try {
       const job = await api<{ id: string }>(`/runs/${id}/continue`, message === undefined ? {} : { message })
+      if (queuedOutput) removeQueuedFeedback(id)
       setOutputs((items) => ({ ...items, [name]: { ...job, name, output: "Starting...", status: "running", truncated: false, recoverable: true, continuable: true } }))
       if (message !== undefined) setFeedback((items) => {
-        if (items[id] !== message) return items
         const next = { ...items }
+        if (items[id] && (queuedOutput || items[id] !== message)) next[job.id] = items[id]
         delete next[id]
         return next
       })
       setFollow(true)
       setNotice(`${message === undefined ? "Recommended choice" : "Feedback"} submitted to the same session for ${name}. Check Output & logs for the result.`)
-    } catch (error) { setNotice(""); fail(error) } finally { submitting.current = false; setBusy(false) }
+    } catch (error) {
+      if (queuedOutput) setQueuedFeedback((items) => ({ ...items, [id]: { name, message: message!, paused: "Delivery failed or is unconfirmed. Check the associated run before resubmitting; automatic retry is disabled." } }))
+      setNotice("")
+      fail(error)
+    } finally { submitting.current = false; setBusy(false) }
   }
 
   async function optimize() {
@@ -579,10 +634,10 @@ function App() {
               setTabs((items) => items.map((item) => item.name === editor.name ? { ...item, content } : item))
             }} />)}
             {!tab && <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
-            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || fileOutput?.recoverable || optimization?.recoverable} title="Save & run (Ctrl/Cmd+Enter)" aria-keyshortcuts="Control+Enter Meta+Enter" onClick={requestBuild}>Save & run ↗</button></div></footer>
+            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || queuedForFile || fileOutput?.recoverable || optimization?.recoverable} title="Save & run (Ctrl/Cmd+Enter)" aria-keyshortcuts="Control+Enter Meta+Enter" onClick={requestBuild}>Save & run ↗</button></div></footer>
             {execution && <div className="repository-controls">
               <span>{repositoryError || (repository?.connected ? `${repository.directory} / ${repository.dirty ? "Uncommitted changes" : "No uncommitted changes"}` : repository ? "No repository connected in the remote directory." : "Checking remote repository...")}</span>
-              {repository?.connected && repository.dirty && <button disabled={!tab?.content.trim() || busy || !!pendingRuns} title={`Use ${repository.model} with the existing repository workflow`} onClick={() => {
+              {repository?.connected && repository.dirty && <button disabled={!tab?.content.trim() || busy || queuedForFile || !!pendingRuns} title={`Use ${repository.model} with the existing repository workflow`} onClick={() => {
                 if (window.confirm(`Save edited repository changes in ${repository.directory} using ${repository.model}? This saves the current spec as context, then runs the existing repository workflow with automatic tool approval. It authorizes focused commits, but no push, and can execute tools and incur provider costs. Wait for harness completion in Output & logs and review its reported result.`)) void save("repository")
               }}>Save repo changes</button>}
             </div>}
@@ -595,6 +650,16 @@ function App() {
             }}>Optimization</button></div>
             {tab && outputView === "file" && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>{historical ? "Chat uses the associated run, not this retained log" : "Spec + current nohup output in a separate window"}</span></div>}
             <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <><button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button><button disabled={!!loadingOutput || !!retainedView?.loading || busy || !execution} onClick={() => void browseRetained(tab.name)}>Browse retained runs</button></>}{!historical && output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={!canContinue} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
+            {!!Object.keys(queuedFeedback).length && <section className="build-feedback chat-composer" aria-label="Queued follow-ups">
+              <strong>Queued follow-ups</strong>
+              <span>Keep this page open. One follow-up per run; sent after confirmed completion, not as live input. Cancel to replace.</span>
+              {Object.entries(queuedFeedback).map(([id, queued]) => <div key={id}>
+                <strong>{queued.name}</strong>
+                <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{queued.message}</pre>
+                <p>{queued.paused ?? "Waiting to send to the same session with automatic tool approval. Can modify files and incur provider costs."}</p>
+                <button type="button" disabled={actionBusy} onClick={() => removeQueuedFeedback(id)}>Cancel queued follow-up for {queued.name}</button>
+              </div>)}
+            </section>}
             {retainedView && <div className="retained-runs" aria-label="Retained run selection" aria-busy={retainedView.loading}>
               <label htmlFor="retained-run">Retained runs for {retainedView.name} (log updated)</label>
               <select id="retained-run" value={historical?.id ?? ""} disabled={retainedView.loading || !retainedView.runs.length} onChange={(event) => { if (event.target.value) void browseRetained(retainedView.name, event.target.value) }}>
@@ -609,7 +674,7 @@ function App() {
             {!historical && outputView === "file" && output?.continuable && <BuildProgress key={output.id} output={output} />}
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
             <pre ref={log} className="output" aria-label="Run output">{output ? <LogOutput value={output.output} /> : (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery. To run dataset_pipe + model_pipeline, click Performance and enter a project folder relative to the remote workspace or an absolute remote path. The project's performance.json is used by default; no editor tab is needed. Optionally use the current editor's JSON pipeline config, with any filename extension. Unsaved content is included without saving locally. Metrics and pipeline output appear here." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
-            {!historical && output && outputView === "file" && output.continuable === true && <form className="chat-composer build-feedback" onSubmit={(event) => { event.preventDefault(); void continueRun(message) }}>
+            {!historical && output && outputView === "file" && output.continuable === true && <form className="chat-composer build-feedback" onSubmit={(event) => { event.preventDefault(); submitFeedback() }}>
               <label htmlFor="build-feedback">Feedback to build session</label>
               <textarea id="build-feedback" aria-describedby="feedback-help feedback-limit feedback-shortcuts" placeholder="Answer the agent or explain what to change..." value={message} disabled={actionBusy} onChange={(event) => setFeedback((items) => ({ ...items, [output.id]: event.target.value }))} onKeyDown={(event) => {
                 if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing || event.keyCode === 229) return
@@ -618,7 +683,7 @@ function App() {
               }} />
               <span id="feedback-shortcuts">Enter to send. Shift+Enter for a new line.</span>
               <span id="feedback-limit">{new TextEncoder().encode(message).length.toLocaleString()} / 16,384 bytes</span>
-              <div><span id="feedback-help">{canContinue ? "Continues the same session with automatic tool approval. Can modify files and incur provider costs. Editor changes are not sent." : "Send after the agent turn finishes. Live input and stopped or failed runs are not supported."}</span><button className="primary" disabled={!canContinue || !message.trim() || message.includes("\0") || new TextEncoder().encode(message).length > 16 * 1024}>Send &amp; continue</button></div>
+              <div><span id="feedback-help">{queuedFeedback[output.id] ? "A follow-up is already queued for this run. Cancel it to submit a replacement." : canContinue ? "Continues the same session with automatic tool approval. Can modify files and incur provider costs. Editor changes are not sent." : canQueueFeedback ? "Queues for the same session after confirmed completion. Keep this page open. Automatic tool approval can modify files and incur provider costs. Editor changes are not sent." : "Waiting for a supported run. Stopped, failed and unconfirmed runs cannot be continued."}</span><button className="primary" disabled={(!canContinue && !canQueueFeedback) || !message.trim() || message.includes("\0") || new TextEncoder().encode(message).length > 16 * 1024}>{output.status === "running" ? "Queue follow-up" : "Send & continue"}</button></div>
             </form>}
             <footer className="output-footer">{output && <span>Harness: {output.status}{output.recoverable ? " (completion not confirmed)" : ""}. CLI success alone does not verify saved changes.<br /></span>}Available output only. No hidden model reasoning is requested.</footer>
           </section>

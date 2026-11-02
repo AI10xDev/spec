@@ -53,6 +53,8 @@ The output pane is associated with the active filename and recovers its latest s
 
 Click **Save** or press **Ctrl+S / Cmd+S** while focused in the editor. The Rust API writes a temporary file, syncs it, atomically replaces the destination, and syncs the workspace directory. Files written by the app have mode `0600`.
 
+Changed text in the active sheet also autosaves after a 500 ms debounce while the browser window is focused. Background sheets and untouched new files are not automatically written. Saves are serialized, preserve newer edits, and pause after a write error or revision conflict until an explicit Save retry.
+
 Each loaded file has a SHA-256 content revision. The browser supplies its last acknowledged revision on save. If the file has changed since then, the API returns `409 Conflict` and keeps the browser's unsaved buffer intact.
 
 To resolve a conflict:
