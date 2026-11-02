@@ -351,6 +351,57 @@ test("output recovery failures leave editing available and stale recovery cannot
   await expect(page.getByLabel("Run output")).not.toContainText("stale recovered output")
 })
 
+for (const remoteStatus of ["completed", "failed (exit status: 255)"]) {
+  test(`load nohup distinguishes SSH exit 255 from verified ${remoteStatus}`, async ({ page }) => {
+    const name = remoteStatus === "completed" ? "ssh-255-completed.md" : "ssh-255-failed.md"
+    await page.goto(url)
+    await page.getByRole("textbox", { name: "New filename" }).fill(name)
+    await page.getByRole("button", { name: "Create file" }).click()
+    const editor = page.getByRole("textbox", { name: `Edit ${name}`, exact: true })
+    await editor.fill("Saved spec")
+    await page.getByRole("button", { name: "Save", exact: true }).click()
+    await expect(page.getByRole("status")).toHaveText(`Saved ${name}`)
+    const cached = { id: randomUUID(), name, status: "failed (exit status: 255)", output: "Cached build output\n[failed (exit status: 255)]", recoverable: true, continuable: true, truncated: false }
+    let connected = false
+    await page.route(`**/api/files/${name}/run`, (route) => route.fulfill({ json: cached }))
+    await page.route(`**/api/runs/${cached.id}`, (route) => route.fulfill({ json: cached }))
+    await page.route(`**/api/files/${name}/run/log`, (route) => route.fulfill({ json: connected
+      ? { ...cached, status: remoteStatus, output: "Verified remote log", recoverable: false }
+      : { ...cached, status: "unavailable (SSH log recovery exited with status 255; Permission denied (publickey))" } }))
+    await page.reload()
+    await expect(page.getByLabel("Run output")).toHaveText(cached.output)
+    await page.clock.install()
+    await page.clock.pauseAt(new Date(Date.now() + 1000))
+    const writes: string[] = []
+    page.on("request", (request) => { if (request.url().includes("/api/") && request.method() !== "GET") writes.push(request.url()) })
+    await editor.fill("Unsaved edits stay in the editor")
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(page.getByText("Exit 255 does not confirm", { exact: false })).toBeVisible()
+    await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+    await expect(page.getByRole("button", { name: "Send & continue" })).toBeDisabled()
+    await page.getByRole("button", { name: "Load nohup output" }).click()
+    await expect(page.getByRole("alert")).toContainText("Permission denied (publickey)")
+    await expect(page.getByRole("alert")).toContainText("Showing cached output")
+    await expect(page.getByLabel("Run output")).toHaveText(cached.output)
+    await expect(page.getByRole("status")).not.toContainText("Loaded")
+
+    connected = true
+    await page.getByRole("button", { name: "Load nohup output" }).click()
+    await expect(page.getByLabel("Run output")).toHaveText("Verified remote log")
+    await expect(page.getByRole("status")).toHaveText(`Loaded ${name}.out`)
+    await expect(page.getByRole("alert")).toBeHidden()
+    await expect(page.getByText("Exit 255 does not confirm", { exact: false })).toBeHidden()
+    if (remoteStatus === "completed") await expect(page.getByRole("button", { name: "Use recommended & continue" })).toBeEnabled()
+    else {
+      await expect(page.getByText("The remote run recorded exit 255.", { exact: false })).toBeVisible()
+      await expect(page.getByRole("button", { name: "Use recommended & continue" })).toBeDisabled()
+    }
+    await expect(editor).toHaveValue("Unsaved edits stay in the editor")
+    expect(writes).toEqual([])
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  })
+}
+
 test("unavailable recovered runs keep polling without permitting duplicate builds", async ({ page }) => {
   await page.goto(url)
   await page.getByRole("textbox", { name: "New filename" }).fill("recover-poll.md")

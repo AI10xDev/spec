@@ -799,6 +799,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
                     Ok(exit) if exit.success() => "completed".to_owned(),
                     Ok(exit) if exit.code() == Some(124) => "timed out".to_owned(),
                     Ok(exit) if exit.code() == Some(130) => "cancelled".to_owned(),
+                    Ok(exit) if exit.code() == Some(255) => "detached (SSH exit status: 255; remote completion unconfirmed)".to_owned(),
                     Ok(exit) => format!("failed ({exit})"),
                     Err(error) => format!("failed ({error})"),
                 },

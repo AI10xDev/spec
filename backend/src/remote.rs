@@ -492,6 +492,12 @@ impl Remote {
             }
             let exit = child.wait().await.map_err(|e| e.to_string())?;
             if !exit.success() {
+                if exit.code() == Some(255) {
+                    return Err(format!(
+                        "SSH log recovery exited with status 255; the remote run's exit status was not retrieved. Check SSH connectivity, authentication, and host-key verification. {}",
+                        String::from_utf8_lossy(&err).trim()
+                    ));
+                }
                 return Err(format!(
                     "remote recovery {exit}: {}",
                     String::from_utf8_lossy(&err).trim()

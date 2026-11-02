@@ -73,6 +73,8 @@ describe("report metric extraction", () => {
     (event: string) => `<!--\n${event}\n-->`,
     (event: string) => `[example]: /example "title\n${event}\n"`,
     (event: string) => `\x1b]8;;https://example.test\x1b\\\`\`\`json\x1b]8;;\x1b\\\n${event}\n\`\`\``,
+    (event: string) => `[example]: /example\n\t${event}`,
+    (event: string) => `[example]:\n  /example "title"\n    ${event}\n\n\t{broken`,
   ])("excludes CommonMark report quotes without hiding the following real event %#", (quote) => {
     const example = quote(record({ quality: 1 }))
     const only = extractMetrics(example)
@@ -130,6 +132,13 @@ describe("report metric extraction", () => {
     const metrics = extractMetrics(`${example}\n${real}\n\n${example}`)
     expect(metrics.metrics[0].samples.map(({ value }) => value)).toEqual([0.5])
     expect(evaluate({ ...suite, checks: [{ ...check, aggregate: "last" }] }, metrics, false)[0]).toMatchObject({ value: 0.5, status: "fail" })
+    expect(metrics.incomplete).toBe(false)
+  })
+
+  it.each([">", ">>", "> >", "  >\t"])("ends an atomic quoted JSON record without swallowing subsequent records: %s", (prefix) => {
+    const quoted = JSON.stringify({ event: "eval", metrics: { quality: 1 }, note: "` <!--" })
+    const metrics = extractMetrics(`${prefix} ${quoted}\n${record({ quality: 0.5 })}\n${record({ quality: 0.4 })}`)
+    expect(metrics.metrics).toEqual([{ name: "quality", samples: [{ line: 2, value: 0.5 }, { line: 3, value: 0.4 }] }])
     expect(metrics.incomplete).toBe(false)
   })
 

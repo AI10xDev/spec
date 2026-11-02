@@ -1018,6 +1018,150 @@ async fn latest_is_null_without_a_run_and_tracks_newest_while_old_ids_remain_rea
 }
 
 #[tokio::test]
+async fn ssh_exit_255_remains_recoverable_until_nohup_confirms_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = app(root.path());
+    let remote = remote_fixture(root.path(), &root.path().join("unused"));
+    fs::write(
+        &remote.binary,
+        "#!/bin/sh\nprintf 'ssh: connection closed by remote host\\n' >&2\nsleep 0.05\nexit 255\n",
+    )
+    .unwrap();
+    state.remote = Some(remote.clone());
+    fs::write(root.path().join("a.md"), "fixture").unwrap();
+    let revision = read(root.path(), "a.md").ok().unwrap().revision;
+    let response = request(
+        state.clone(),
+        "POST",
+        "/api/runs",
+        serde_json::json!({"name":"a.md", "revision":revision}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let id = json(response).await["id"].as_str().unwrap().to_owned();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if state
+                .jobs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|job| job.id == id && !job.attached && job.status.starts_with("unavailable"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let output = json(
+        request(
+            state.clone(),
+            "GET",
+            "/api/files/a.md/run/log",
+            serde_json::Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(output["recoverable"], true);
+    assert!(
+        output["status"]
+            .as_str()
+            .unwrap()
+            .contains("SSH log recovery exited with status 255")
+    );
+    let log = output["output"].as_str().unwrap();
+    assert!(log.contains("ssh: connection closed by remote host"));
+    assert!(log.contains("[detached (SSH exit status: 255; remote completion unconfirmed)]"));
+    assert!(!log.contains("[failed (exit status: 255)]"));
+    assert!(recovery::load(&state, &id).ok().unwrap().recover);
+
+    fs::write(
+        &remote.binary,
+        "#!/bin/sh\nprintf 'SPEC-RUN-1 0 0\\nbuild completed while SSH was disconnected'\n",
+    )
+    .unwrap();
+    let output = json(
+        request(
+            state.clone(),
+            "GET",
+            "/api/files/a.md/run/log",
+            serde_json::Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(output["status"], "completed");
+    assert_eq!(output["recoverable"], false);
+    assert_eq!(
+        output["output"],
+        "build completed while SSH was disconnected"
+    );
+    assert!(!recovery::load(&state, &id).ok().unwrap().recover);
+}
+
+#[tokio::test]
+async fn output_log_distinguishes_transport_255_from_authoritative_remote_255() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = app(root.path());
+    let remote = remote_fixture(root.path(), &root.path().join("must-not-launch"));
+    let id = Uuid::new_v4().to_string();
+    let job = persisted_job(&id, remote.identity(), true);
+    recovery::persist(&state, &job).ok().unwrap();
+    recovery::set_latest(&state, &job).ok().unwrap();
+    state.remote = Some(remote.clone());
+    // Even a valid-looking header cannot override an unsuccessful SSH read.
+    fs::write(&remote.binary, "#!/bin/sh\nprintf 'SPEC-RUN-1 0 0\\nuntrusted completion'\nprintf 'Permission denied (publickey)' >&2\nexit 255\n").unwrap();
+    let output = json(
+        request(
+            state.clone(),
+            "GET",
+            "/api/files/a.md/run/log",
+            serde_json::Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(output["output"], "saved output");
+    assert_eq!(output["recoverable"], true);
+    assert!(
+        output["status"]
+            .as_str()
+            .unwrap()
+            .starts_with("unavailable (SSH log recovery exited with status 255")
+    );
+    assert!(
+        output["status"]
+            .as_str()
+            .unwrap()
+            .contains("Permission denied (publickey)")
+    );
+
+    fs::write(
+        &remote.binary,
+        "#!/bin/sh\nprintf 'SPEC-RUN-1 255 0\\nremote command actually failed'\n",
+    )
+    .unwrap();
+    let output = json(
+        request(
+            state.clone(),
+            "GET",
+            "/api/files/a.md/run/log",
+            serde_json::Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(output["status"], "failed (exit status: 255)");
+    assert_eq!(output["recoverable"], false);
+    assert_eq!(output["output"], "remote command actually failed");
+    assert!(!recovery::load(&state, &id).ok().unwrap().recover);
+    assert!(!root.path().join("must-not-launch").exists());
+}
+
+#[tokio::test]
 async fn terminal_log_read_resolves_admission_across_remote_failure_and_restart() {
     let root = tempfile::tempdir().unwrap();
     let mut state = app(root.path());

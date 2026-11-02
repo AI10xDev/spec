@@ -10,6 +10,7 @@ import { BuildProgress } from "./progress"
 import { Settings } from "./settings"
 import { ProjectPicker } from "./project-picker"
 import { ActiveRuns } from "./active-runs"
+import { RecoveryNotice } from "./recovery-notice"
 import type { ProjectSearch } from "./project-picker"
 import "./style.css"
 
@@ -84,7 +85,8 @@ function App() {
   const canContinue = !!output && !historical && outputView === "file" && execution && !busy && !optimization?.recoverable && !queuedFeedback[output.id] && output.status === "completed" && !output.recoverable && output.continuable === true
   const canQueueFeedback = !!output && !historical && outputView === "file" && execution && !actionBusy && !optimization?.recoverable && !queuedFeedback[output.id] && !stoppedIds.current.has(output.id) && output.continuable === true && (output.status === "running" || (output.status === "completed" && !output.recoverable))
   const message = output ? feedback[output.id] ?? "" : ""
-  const pendingRuns = [...Object.values(outputs), ...(optimization ? [optimization] : [])].filter((item) => item.recoverable).map((item) => item.id).join(",")
+  const blockingRuns = [...Object.values(outputs), ...(optimization ? [optimization] : [])].filter((item) => item.recoverable)
+  const pendingRuns = blockingRuns.map((item) => item.id).join(",")
   const queuedForFile = Object.values(queuedFeedback).some((item) => item.name === active)
 
   async function api<T>(path: string, body?: unknown, method = "POST", signal?: AbortSignal): Promise<T> {
@@ -582,7 +584,7 @@ function App() {
   if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} realtime={realtime} azureRealtime={azureRealtime} />
 
   return <div className="app">
-    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Optimization: {optimization.status}</span>}<div className="analysis-actions">{execution && <button ref={activeRunsButton} aria-expanded={activeRuns} aria-controls="active-runs" onClick={() => setActiveRuns(!activeRuns)}>Active runs</button>}<button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button ref={performanceButton} className="primary" title="performance" aria-expanded={performance && !settings} aria-controls="performance-form" disabled={settings || !execution || busy || !!pendingRuns} onClick={() => { if (!performance) setUseEditorSpec(false); setPerformance(!performance) }}>Performance</button></div></div></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Optimization: {optimization.status}</span>}<div className="analysis-actions">{execution && <button ref={activeRunsButton} aria-expanded={activeRuns} aria-controls="active-runs" onClick={() => setActiveRuns(!activeRuns)}>Active runs</button>}<button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button ref={performanceButton} className="primary" title="performance" aria-expanded={performance && !settings} aria-controls="performance-form" disabled={settings} onClick={() => { if (!performance) setUseEditorSpec(false); setPerformance(!performance) }}>Performance</button></div></div></header>
     <ActiveRuns key={token} open={activeRuns && execution} api={api} knownOutputs={[...Object.values(outputs), ...(optimization ? [optimization] : [])]} onClose={() => { setActiveRuns(false); activeRunsButton.current?.focus() }} onOutput={(next) => {
       // A delayed recoverable response cannot undo confirmed completion of the same run.
       const updated = (previous: Output) => !previous.recoverable && next.recoverable ? previous : next.status.startsWith("unavailable")
@@ -595,11 +597,19 @@ function App() {
     {performance && !settings && <form id="performance-form" className="performance-form" aria-label="Performance pipelines" onSubmit={(event) => { event.preventDefault(); void optimize() }}>
       <h2>Run performance pipelines</h2>
       <p id="performance-config">Run <code>dataset_pipe</code> + <code>model_pipeline</code> using the project's <code>performance.json</code> by default. No editor tab is needed.</p>
+      <div id="performance-availability" aria-live="polite">
+        {!execution ? <p>Remote execution is disabled. Configure SPEC_SSH_TARGET and SPEC_SSH_WORKSPACE on the backend and restart it to enable pipelines. Opening Performance does not start a run.</p>
+          : busy ? <p>Another request is in progress. Pipeline launch will be available after it finishes and any run blockers are resolved.</p>
+          : pendingRuns ? <p>Pipeline launch is blocked by active or unresolved runs. Inspect their output to confirm completion, or explicitly stop them if appropriate. Opening this form does not rerun or cancel anything.</p>
+          : projectSearching ? <p>Wait for project search to finish before running pipelines.</p>
+          : <p>Ready to request a pipeline run. The backend will verify remote run status before starting.</p>}
+        {!!blockingRuns.length && <ul aria-label="Blocking runs" style={{ overflowWrap: "anywhere" }}>{blockingRuns.map((run) => <li key={run.id}><strong>{run.name}</strong> / <code>{run.id}</code> / {run.status}</li>)}</ul>}
+      </div>
       <ProjectPicker value={project} onChange={setProject} disabled={busy || !execution} onSearchingChange={setProjectSearching} search={(query, signal) => api<ProjectSearch>("/projects/search", { query }, "POST", signal)} />
       <label className="performance-option"><input type="checkbox" checked={useEditorSpec} disabled={busy} onChange={(event) => setUseEditorSpec(event.target.checked)} aria-describedby="performance-spec" /> Use current editor as spec</label>
       <p id="performance-spec">Optional JSON pipeline config, any extension. Unsaved content is included without saving locally (maximum 1 MiB).{useEditorSpec && <> Current editor: <strong>{tab?.name ?? "No tab selected"}</strong>.</>}</p>
       {error && <div role="alert" className="error">{error}</div>}
-      <div className="performance-actions"><button type="submit" className="primary" disabled={busy || projectSearching || !execution || !!pendingRuns}>Run pipelines</button><button type="button" disabled={busy} onClick={() => { setPerformance(false); performanceButton.current?.focus() }}>Cancel</button></div>
+      <div className="performance-actions"><button type="submit" className="primary" aria-describedby="performance-availability" disabled={busy || projectSearching || !execution || !!pendingRuns}>Run pipelines</button>{execution && <button type="button" onClick={() => setActiveRuns(true)}>Inspect active runs</button>}<button type="button" disabled={busy} onClick={() => { setPerformance(false); performanceButton.current?.focus() }}>Cancel</button></div>
     </form>}
     {analytics && <Analytics api={api} active={active} onClose={() => setAnalytics(false)} />}
     {settings && <Settings api={api} onClose={() => setSettings(false)} onChanged={refreshConfig} />}
@@ -685,6 +695,7 @@ function App() {
               <button onClick={() => { retainedRequest.current++; setRetained(null) }}>Return to associated output</button>
             </div>}
             {!historical && outputView === "file" && output?.continuable && <BuildProgress key={output.id} output={output} />}
+            {output && <RecoveryNotice output={output} />}
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
             <pre ref={log} className="output" aria-label="Run output">{output ? <LogOutput value={output.output} /> : (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery. To run dataset_pipe + model_pipeline, click Performance and enter a project folder relative to the remote workspace or an absolute remote path. The project's performance.json is used by default; no editor tab is needed. Optionally use the current editor's JSON pipeline config, with any filename extension. Unsaved content is included without saving locally. Metrics and pipeline output appear here." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
             {!historical && output && outputView === "file" && output.continuable === true && <form className="chat-composer build-feedback" onSubmit={(event) => { event.preventDefault(); submitFeedback() }}>

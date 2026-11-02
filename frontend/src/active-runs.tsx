@@ -1,5 +1,6 @@
 import { useEffect, useEffectEvent, useRef, useState } from "react"
 import { LogOutput } from "./highlighting"
+import { RecoveryNotice } from "./recovery-notice"
 import type { Output } from "./tabs"
 
 type Run = { id: string; name: string; status: string; kind: "build" | "repository-save" | "optimization" }
@@ -142,6 +143,7 @@ export function ActiveRuns({ open, knownOutputs, api, onOutput, onClose }: Props
         {stopError && <p role="alert" className="error">{stopError}</p>}
         <p>{current && !current.recoverable ? "This run is terminal and no longer blocks the repository. Other active or unresolved runs may still block it. CLI success alone does not verify saved changes." : "Completion is not confirmed. This active or unresolved run still blocks the repository."}</p>
         {current?.status.startsWith("unavailable") && <p>Remote output is unavailable. Showing cached output, which may be incomplete.</p>}
+        {current && <RecoveryNotice output={current} />}
         {current?.truncated && <p>Older output was truncated; showing the latest 256 KiB.</p>}
         <pre className="output" aria-label="Active run output">{current ? <LogOutput value={current.output} /> : "No output loaded yet."}</pre>
       </div>}

@@ -11,6 +11,15 @@ execution. Results appear in **Optimization** under **Output & logs**. This uses
 the same authenticated SSH transport, recovery, and **Stop run** controls as the
 existing optimizer, without requiring a previous build or an editor tab.
 
+The **Performance** button opens the form even while a run is unresolved, a save
+is in progress, or remote execution is disabled. Only **Run pipelines** is gated:
+the form explains the blocker and lists known run names, IDs, and statuses. Use
+**Inspect active runs** from the form to check them without launching anything.
+Opening the form never clears a guard or automatically retries a pipeline. If
+execution is disabled, configure `SPEC_SSH_TARGET` and `SPEC_SSH_WORKSPACE` on the
+backend and restart it; the form displays these instructions rather than leaving
+the header button unclickable.
+
 If another run blocks submission, **Active runs** in the header lists the backend's
 active/unresolved run IDs, filenames and last-known statuses. Select **Load output**
 to check the blocker even when its source file is unopened or deleted. Inspection

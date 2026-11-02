@@ -260,7 +260,10 @@ for (const measured of [true, false]) {
     await expect(progress).not.toHaveClass(/indeterminate/)
     await expect(page.locator(".output-pane .badge")).toHaveText("running (connection unavailable)")
     await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
-    await expect(page.getByRole("button", { name: "Performance" })).toBeDisabled()
+    await expect(page.getByRole("button", { name: "Performance" })).toBeEnabled()
+    await page.getByRole("button", { name: "Performance" }).click()
+    await expect(page.getByRole("button", { name: "Run pipelines", exact: true })).toBeDisabled()
+    await expect(page.locator("#performance-availability")).toContainText("Pipeline launch is blocked by active or unresolved runs")
     await expect(page.getByRole("button", { name: "Save repo changes" })).toBeDisabled()
     await expect(page.getByRole("button", { name: "Stop run" })).toBeEnabled()
     mode = "transport"
