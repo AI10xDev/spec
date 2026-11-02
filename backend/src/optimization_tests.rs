@@ -453,8 +453,6 @@ async fn optimization_bad_requests_do_not_create_jobs_or_uploads() {
     let valid = objective("pass");
     for name in [
         "",
-        "objective.md",
-        "objective.optim.txt",
         "../objective.optim",
         "/objective.optim",
         "nested/objective.optim",
@@ -505,6 +503,184 @@ async fn optimization_bad_requests_do_not_create_jobs_or_uploads() {
         json(request(state, "GET", "/api/optimize", Value::Null).await).await,
         Value::Null
     );
+}
+
+#[tokio::test]
+async fn performance_validates_project_and_optional_spec_before_launch() {
+    let root = tempfile::tempdir().unwrap();
+    let state = fixture(root.path());
+    for project in [
+        "",
+        "  ",
+        "../other",
+        "a/../../other",
+        "bad\npath",
+        "bad\0path",
+    ] {
+        let response = request(
+            state.clone(),
+            "POST",
+            "/api/optimize",
+            body!({"project": project, "spec": null}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    for spec in [
+        body!({"name": "instructions.opt", "content": ""}),
+        body!({"name": "instructions.md", "content": "\0"}),
+        body!({"name": "../instructions", "content": "{}"}),
+        body!({"name": "instructions", "content": "\"".repeat(600_000)}),
+    ] {
+        let response = request(
+            state.clone(),
+            "POST",
+            "/api/optimize",
+            body!({"project": ".", "spec": spec}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    // Mixed contracts cannot fall back to the legacy optimizer and ignore the project.
+    let response = request(
+        state.clone(),
+        "POST",
+        "/api/optimize",
+        body!({"project": ".", "name": "legacy.optim", "content": "{}"}),
+    )
+    .await;
+    assert!(response.status().is_client_error());
+    assert!(state.jobs.lock().unwrap().is_empty());
+    assert!(!root.path().join(".spec-runs").exists());
+}
+
+#[tokio::test]
+async fn performance_project_runs_embedded_pipelines_and_recovers_metrics() {
+    for spec_name in [
+        None,
+        Some("instructions.opt"),
+        Some("instructions.md"),
+        Some("instructions"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let state = fixture(root.path());
+        let project = root.path().join("project with spaces;literal");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(project.join("curated")).unwrap();
+        fs::create_dir(project.join("spec-training")).unwrap();
+        // Transport fixtures, not claims of actual Docker or model performance.
+        fs::write(project.join("spec-training/environment.py"),
+            "def evaluate_directory(**kwargs):\n    return {'score': 1.0, 'tests': ['pass'], 'snapshot_sha256': 'a' * 64}\n").unwrap();
+        let binary = project.join("fixture-model");
+        fs::write(&binary, r#"#!/usr/bin/python3
+import json, pathlib, sys
+out = pathlib.Path(sys.argv[-1])
+out.mkdir()
+metrics = {'accuracy': 0.5, 'mean_nll': 0.7, 'trajectory_exact_match': 0.5,
+           'per_trajectory_accuracy': {'episode': 0.5},
+           'predictions': {f'step-{i:05}': 0 for i in range(12000)}}
+report = {'before': metrics, 'after': metrics,
+          'benchmark': {'status': 'not_run', 'reason': 'transport fixture'},
+          'validation_nll_improved': False, 'validation_nll_plateau': False,
+          'convergence_scope': 'Transport fixture only', 'policy_value_scope': 'No policy value measured'}
+(out / 'report.json').write_text(json.dumps(report))
+header = json.dumps({'weight': {'dtype': 'F32', 'shape': [1], 'data_offsets': [0, 4]}}).encode()
+(out / 'student.safetensors').write_bytes(len(header).to_bytes(8, 'little') + header + b'\0' * 4)
+"#).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let manifest = body!({
+            "pipeline_root": ".",
+            "dataset": {"source_dir": "curated", "editable_files": ["solution.py"],
+                "test_commands": [["python3", "test_solution.py"]],
+                "image": format!("fixture@sha256:{}", "a".repeat(64))},
+            "model": {"binary": "fixture-model", "args": ["--fixture"], "timeout_seconds": 10}
+        })
+        .to_string();
+        let spec = match spec_name {
+            Some(name) => body!({"name": name, "content": manifest}),
+            None => {
+                fs::write(project.join("performance.json"), &manifest).unwrap();
+                Value::Null
+            }
+        };
+        let id = start_optimization(
+            &state,
+            body!({"project": "project with spaces;literal", "spec": spec}),
+        )
+        .await;
+        let output = terminal(&state, &id, "completed").await;
+        assert_eq!(output["name"], "optimization");
+        assert_eq!(output["continuable"], false);
+        let directory = root.path().join(format!(".spec-runs/run-{id}"));
+        let report = fs::read_to_string(directory.join("report.jsonl")).unwrap();
+        let final_event: Value = serde_json::from_str(report.lines().last().unwrap()).unwrap();
+        assert_eq!(final_event["outcome"], "completed");
+        assert_eq!(final_event["project"], project.to_str().unwrap());
+        assert_eq!(final_event["metrics"]["dataset_pipe"]["score"], 1.0);
+        assert_eq!(
+            final_event["metrics"]["model_pipeline"]["after"]["accuracy"],
+            0.5
+        );
+        assert!(output["output"].as_str().unwrap().contains("stage_metrics"));
+        assert!(
+            fs::metadata(directory.join("model/report.json"))
+                .unwrap()
+                .len()
+                > MAX_OUTPUT as u64
+        );
+        assert!(final_event["metrics"]["model_pipeline"]["after"]["predictions"].is_null());
+        let (_, recovered, _) = state
+            .remote
+            .as_ref()
+            .unwrap()
+            .snapshot(&id, false, "optimization")
+            .await
+            .unwrap();
+        let recovered_final: Value = serde_json::from_slice(
+            recovered
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recovered_final, final_event);
+        assert!(
+            final_event["artifacts"]["model_pipeline"]
+                .as_str()
+                .unwrap()
+                .ends_with("/model/report.json")
+        );
+        assert!(!directory.join("invocation").exists());
+        assert!(!directory.join("snapshot.md").exists());
+        if let Some(name) = spec_name {
+            assert_eq!(final_event["spec"], name);
+            assert!(!project.join(name).exists());
+            assert!(!root.path().join(name).exists());
+        }
+        let mut fresh = app(root.path());
+        fresh.remote = state.remote.clone();
+        assert_eq!(
+            json(request(fresh, "GET", "/api/optimize", Value::Null).await).await,
+            output
+        );
+    }
+}
+
+#[tokio::test]
+async fn performance_missing_configuration_reports_failure_without_prior_build_discovery() {
+    let root = tempfile::tempdir().unwrap();
+    let state = fixture(root.path());
+    let id = start_optimization(&state, body!({"project": ".", "spec": null})).await;
+    let output = terminal(&state, &id, "failed (exit status: 1)").await;
+    assert!(
+        output["output"]
+            .as_str()
+            .unwrap()
+            .contains("performance.json")
+    );
+    assert!(output["output"].as_str().unwrap().contains("configuration"));
+    assert!(!output["output"].as_str().unwrap().contains("no initial"));
 }
 
 #[tokio::test]

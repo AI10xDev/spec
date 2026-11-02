@@ -14,14 +14,15 @@ the project owner.
 
 ## Integration Contract
 
-The top-right **Performance** button uploads the active, nonempty `.optim` editor
-buffer through the existing authenticated SSH harness, including unsaved changes.
-It does not save the file locally or change the editor's saved revision. Confirm
-execution only for trusted commands. View live progress under **Optimization** in Output & logs; **Stop run**
+The top-right **Performance** button now runs the project-based pipelines described
+in [PERFORMANCE.md](PERFORMANCE.md). This recursive optimizer remains available
+through the standalone CLI and its shipped API contract; uploaded spec names no
+longer need a `.optim` extension. It does not save the spec locally. Submit
+only trusted commands. View live progress under **Optimization** in Output & logs; **Stop run**
 cancels the run. Reloading restores its status, and selecting Optimization retries
 a failed initial recovery. Remote execution must be configured as for Save & run.
 
-The UI sends `POST /api/optimize` with `{"name":"task.optim","content":"..."}`.
+Existing clients can send `POST /api/optimize` with `{"name":"task.md","content":"..."}`.
 The harness puts the unchanged bytes of `backend/src/optimize.py` in the run's
 `snapshot.md`, then uploads the spec unchanged to a unique mode-0600
 `~/projects/spec-optimization.XXXXXXXX.optim` on the remote host. It resolves that

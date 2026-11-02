@@ -48,6 +48,10 @@ function App() {
   const [outputs, setOutputs] = useState<Record<string, Output>>({})
   const [feedback, setFeedback] = useState<Record<string, string>>({})
   const [optimization, setOptimization] = useState<Output | null>(null)
+  const [performance, setPerformance] = useState(false)
+  const [project, setProject] = useState("")
+  const [useEditorSpec, setUseEditorSpec] = useState(false)
+  const performanceButton = useRef<HTMLButtonElement>(null)
   const [analytics, setAnalytics] = useState(false)
   const [settings, setSettings] = useState(false)
   const configRequest = useRef(0)
@@ -398,23 +402,39 @@ function App() {
   }
 
   async function optimize() {
-    if (busy || submitting.current || !execution || pendingRuns) return
-    if (!tab || !tab.name.endsWith(".optim") || !tab.content.trim()) {
-      setNotice("")
-      setError("Open or create a file with a name ending in .optim, enter your optimization instructions, and select that tab before clicking Performance.")
+    if (settings || analytics || busy || submitting.current || !execution || pendingRuns) return
+    setNotice("")
+    if (!project.trim() || project.includes("\0")) {
+      setError("Enter a project folder relative to the remote workspace or an absolute remote path, without NUL bytes.")
       return
+    }
+    if (useEditorSpec && !tab) {
+      setError("Select an editor tab to use as the spec, or uncheck Use current editor as spec.")
+      return
+    }
+    const spec = useEditorSpec && tab ? { name: tab.name, content: tab.content } : null
+    if (spec) {
+      if (!spec.content.trim() || spec.content.includes("\0") || new TextEncoder().encode(spec.content).length > 1024 * 1024) {
+        setError("The editor spec must be nonempty JSON, without NUL bytes, and at most 1 MiB.")
+        return
+      }
+      try { JSON.parse(spec.content) } catch {
+        setError("The editor spec must be valid JSON pipeline config. Any filename extension is accepted.")
+        return
+      }
     }
     submitting.current = true
     try {
-      if (!window.confirm(`Upload the current .optim editor buffer (${tab.name}) to remote ~/projects and run optimization using its absolute remote path? Unsaved editor changes are included; this does not save the file locally. Only run trusted .optim commands or prose instructions. Prose mode sends project context to model providers and uses OpenCode builder and review tools. Both modes can modify files, execute tools, access the network, and incur provider costs. The optimizer loops until convergence, with no automatic time or iteration cap. Use Stop run to stop it manually.`)) return
+      if (!window.confirm(`Run dataset_pipe and model_pipeline for project ${project.trim()}? ${spec ? `Use the current editor JSON pipeline config (${spec.name}). Unsaved editor changes are included; this does not save the file locally.` : "Use the project's performance.json config; no editor content is sent."} Only run trusted config: it can execute pipeline commands, write artifacts, and incur compute or provider costs. Use Stop run to stop manually.`)) return
       setBusy(true)
       setError("")
-      setNotice("Starting optimization...")
-      const job = await api<{ id: string }>("/optimize", { name: tab.name, content: tab.content })
+      setNotice("Starting pipelines...")
+      const job = await api<{ id: string }>("/optimize", { project: project.trim(), spec })
       setOptimization({ ...job, name: "optimization", output: "Starting...", status: "running", truncated: false, recoverable: true, continuable: false })
       setOutputView("optimization")
       setFollow(true)
-      setNotice("Optimization started. Progress and gain reports appear in Output & logs. Use Stop run to stop manually.")
+      setPerformance(false)
+      setNotice("Performance pipelines started. Metrics and progress appear in Optimization output. Use Stop run to stop manually.")
     } catch (error) { setNotice(""); fail(error) } finally { submitting.current = false; setBusy(false) }
   }
 
@@ -456,7 +476,18 @@ function App() {
   if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} realtime={realtime} azureRealtime={azureRealtime} />
 
   return <div className="app">
-    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Optimization: {optimization.status}</span>}<div className="analysis-actions"><button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button className="primary" title="performance" disabled={settings || !execution || busy || !!pendingRuns} onClick={() => void optimize()}>Performance</button></div></div></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Optimization: {optimization.status}</span>}<div className="analysis-actions"><button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button ref={performanceButton} className="primary" title="performance" aria-expanded={performance && !settings} aria-controls="performance-form" disabled={settings || !execution || busy || !!pendingRuns} onClick={() => { if (!performance) setUseEditorSpec(false); setPerformance(!performance) }}>Performance</button></div></div></header>
+    {performance && !settings && <form id="performance-form" className="performance-form" aria-label="Performance pipelines" onSubmit={(event) => { event.preventDefault(); void optimize() }}>
+      <h2>Run performance pipelines</h2>
+      <p id="performance-config">Run <code>dataset_pipe</code> + <code>model_pipeline</code> using the project's <code>performance.json</code> by default. No editor tab is needed.</p>
+      <label htmlFor="performance-project">Project folder</label>
+      <input id="performance-project" autoFocus aria-describedby="performance-path" placeholder="my-project or /remote/path/to/project" value={project} disabled={busy} onChange={(event) => setProject(event.target.value)} />
+      <p id="performance-path">Relative to the remote workspace, or an absolute remote path.</p>
+      <label className="performance-option"><input type="checkbox" checked={useEditorSpec} disabled={busy} onChange={(event) => setUseEditorSpec(event.target.checked)} aria-describedby="performance-spec" /> Use current editor as spec</label>
+      <p id="performance-spec">Optional JSON pipeline config, any extension. Unsaved content is included without saving locally (maximum 1 MiB).{useEditorSpec && <> Current editor: <strong>{tab?.name ?? "No tab selected"}</strong>.</>}</p>
+      {error && <div role="alert" className="error">{error}</div>}
+      <div className="performance-actions"><button type="submit" className="primary" disabled={busy || !execution || !!pendingRuns}>Run pipelines</button><button type="button" disabled={busy} onClick={() => { setPerformance(false); performanceButton.current?.focus() }}>Cancel</button></div>
+    </form>}
     {analytics && <Analytics api={api} active={active} onClose={() => setAnalytics(false)} />}
     {settings && <Settings api={api} onClose={() => setSettings(false)} onChanged={refreshConfig} />}
     <div className="workspace" hidden={settings} inert={settings}>
@@ -494,7 +525,7 @@ function App() {
           </div>)}
           {!tabs.length && <span className="empty-tabs">Open a saved file or create something new</span>}
         </nav>
-        {error && <div role="alert" className="error">{error}<button aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
+        {error && !performance && <div role="alert" className="error">{error}<button aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
         <div className="panes">
           <section className="editor-pane" aria-label="Spec editing pane">
             <div className="pane-heading"><div><span className="eyebrow">01 / SPEC</span><h2>{tab?.name ?? "Your next idea"}</h2></div><span className="badge">{tab ? dirty(tab) ? "Unsaved" : "Saved" : "Editor"}</span></div>
@@ -531,7 +562,7 @@ function App() {
             </div>}
             {!historical && outputView === "file" && output?.continuable && <BuildProgress key={output.id} output={output} />}
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
-            <pre ref={log} className="output" aria-label="Run output">{output ? <LogOutput value={output.output} /> : (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery. To start a new run, open or create a nonempty .optim file and select its tab, then click Performance. The current editor buffer, including unsaved changes, is uploaded to remote ~/projects and its absolute path is sent to the optimizer. No local save is performed." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
+            <pre ref={log} className="output" aria-label="Run output">{output ? <LogOutput value={output.output} /> : (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery. To run dataset_pipe + model_pipeline, click Performance and enter a project folder relative to the remote workspace or an absolute remote path. The project's performance.json is used by default; no editor tab is needed. Optionally use the current editor's JSON pipeline config, with any filename extension. Unsaved content is included without saving locally. Metrics and pipeline output appear here." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
             {!historical && output && outputView === "file" && output.continuable === true && <form className="chat-composer build-feedback" onSubmit={(event) => { event.preventDefault(); void continueRun(message) }}>
               <label htmlFor="build-feedback">Feedback to build session</label>
               <textarea id="build-feedback" aria-describedby="feedback-help feedback-limit" placeholder="Answer the agent or explain what to change..." value={message} disabled={busy} onChange={(event) => setFeedback((items) => ({ ...items, [output.id]: event.target.value }))} />

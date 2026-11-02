@@ -44,6 +44,12 @@ input { background: var(--surface-deep); border: 1px solid var(--border); color:
 .topbar-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
 .topbar-actions .badge { overflow-wrap: anywhere; }
 .analysis-actions { display: flex; gap: 8px; }
+.performance-form { display: grid; gap: 8px; flex-shrink: 0; max-height: 50dvh; overflow: auto; padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--surface); font-size: 12px; overflow-wrap: anywhere; }
+.performance-form h2, .performance-form p { margin: 0; }
+.performance-form p { color: var(--muted); line-height: 1.6; }
+.performance-form > input { width: 100%; max-width: 640px; }
+.performance-option { display: flex; align-items: center; gap: 8px; }
+.performance-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 .app { height: 100dvh; display: flex; flex-direction: column; }
 .workspace { flex: 1; min-height: 0; display: flex; }
 .workspace[hidden] { display: none; }

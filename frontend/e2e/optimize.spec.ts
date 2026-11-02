@@ -43,8 +43,9 @@ test.afterAll(async () => {
   if (directory) await rm(directory, { recursive: true, force: true })
 })
 
-const completed = { id: "optimizer", name: "optimization", status: "completed", output: "Converged: gain 0.0001, marginal difference 0.00001", truncated: false, recoverable: false, continuable: false }
-const running = { ...completed, status: "running", output: "Iteration 1: gain 0.12", recoverable: true }
+const pipelineConfig = '{"dataset_pipe":{},"model_pipeline":{}}'
+const completed = { id: "optimizer", name: "optimization", status: "completed", output: "model_pipeline completed: accuracy 0.92, latency 12 ms", truncated: false, recoverable: false, continuable: false }
+const running = { ...completed, status: "running", output: "dataset_pipe: preparing dataset", recoverable: true }
 const fileOutput = { ...completed, id: "file-run", output: "Independent file logs", continuable: true }
 
 async function workspace(page: Page, options: { latest?: typeof completed | null; fileRun?: typeof completed; execution?: boolean; recoveryError?: number } = {}) {
@@ -72,7 +73,7 @@ async function workspace(page: Page, options: { latest?: typeof completed | null
     if (pathname === "/api/files") return route.fulfill({ json: ["optimization", "objectives.optim", "second.md"].map((name) => ({ name, modified: 0, bytes: 10 })) })
     if (pathname === "/api/repository") return route.fulfill({ json: { connected: true, dirty: true, directory: "/fixture", model: "fixture-model" } })
     for (const name of ["optimization", "objectives.optim", "second.md"]) {
-      if (pathname === `/api/files/${name}`) return route.fulfill({ json: { name, content: `Saved ${name}`, revision: "revision-1" } })
+      if (pathname === `/api/files/${name}`) return route.fulfill({ json: { name, content: name === "objectives.optim" ? pipelineConfig : `Saved ${name}`, revision: "revision-1" } })
       if (pathname === `/api/files/${name}/run`) return route.fulfill({ json: { ...(options.fileRun ?? fileOutput), name } })
     }
     if (pathname === `/api/runs/${running.id}`) return route.fulfill({ json: options.latest ?? running })
@@ -84,10 +85,77 @@ async function workspace(page: Page, options: { latest?: typeof completed | null
   return { writes, dialogs, errors, auth }
 }
 
-test("Performance uploads the active .optim buffer, confirms risks, prevents same-tick duplicates, and polls reports", async ({ page }) => {
+async function configurePerformance(page: Page, project = "my-project", useEditor = false) {
+  await page.getByRole("button", { name: "Performance", exact: true }).click()
+  await page.getByRole("textbox", { name: "Project folder", exact: true }).fill(project)
+  await page.getByRole("checkbox", { name: "Use current editor as spec", exact: true }).setChecked(useEditor)
+}
+
+for (const width of [1440, 390, 320]) {
+  for (const selectedTab of [false, true]) {
+    test(`project-only Performance at ${width}px with ${selectedTab ? "an ignored editor" : "no selected tab"}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 })
+      const { writes, dialogs, errors } = await workspace(page)
+      if (selectedTab) {
+        await page.getByRole("tabpanel").getByRole("button", { name: /second\.md/ }).click()
+        await page.getByRole("textbox", { name: "Edit second.md", exact: true }).fill("Unsaved prose, not pipeline config")
+      }
+      const button = page.getByRole("button", { name: "Performance", exact: true })
+      await button.click()
+      await expect(button).toHaveAttribute("aria-expanded", "true")
+      const form = page.getByRole("form", { name: "Performance pipelines", exact: true })
+      const project = page.getByRole("textbox", { name: "Project folder", exact: true })
+      await expect(project).toBeFocused()
+      await expect(form).toContainText("performance.json")
+      await expect(form).toContainText("Relative to the remote workspace, or an absolute remote path")
+      await expect(page.getByRole("checkbox", { name: "Use current editor as spec", exact: true })).not.toBeChecked()
+      expect(writes).toEqual([])
+      expect(dialogs).toEqual([])
+      await project.fill("  team/my project  ")
+      for (const control of [project, page.getByRole("button", { name: "Run pipelines", exact: true }), page.getByRole("button", { name: "Cancel", exact: true })]) {
+        await control.scrollIntoViewIfNeeded()
+        const bounds = await control.boundingBox()
+        expect(bounds!.x).toBeGreaterThanOrEqual(0)
+        expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width)
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+      await page.route("**/api/runs/optimizer", (route) => route.fulfill({ json: completed }))
+      await project.press("Enter")
+      await expect(page.getByLabel("Run output")).toHaveText(completed.output)
+      await expect(form).toBeHidden()
+      expect(writes).toEqual([{ path: "/api/optimize", method: "POST", body: { project: "team/my project", spec: null } }])
+      expect(dialogs).toHaveLength(1)
+      expect(dialogs[0]).toContain("performance.json config; no editor content is sent")
+      if (selectedTab) {
+        await expect(page.getByRole("textbox", { name: "Edit second.md", exact: true })).toHaveValue("Unsaved prose, not pipeline config")
+        await expect(page.locator(".editor-pane .badge")).toHaveText("Unsaved")
+      } else {
+        await expect(page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button")).toHaveCount(0)
+      }
+      expect(errors).toEqual([])
+    })
+  }
+}
+
+test("cancel closes the form without confirmation or writes and resets editor opt-in when reopened", async ({ page }) => {
+  const { writes, dialogs } = await workspace(page)
+  await configurePerformance(page, "my-project", true)
+  await page.getByRole("button", { name: "Cancel", exact: true }).click()
+  const button = page.getByRole("button", { name: "Performance", exact: true })
+  await expect(button).toBeFocused()
+  await expect(button).toHaveAttribute("aria-expanded", "false")
+  await expect(page.getByRole("form", { name: "Performance pipelines" })).toBeHidden()
+  await button.click()
+  await expect(page.getByRole("checkbox", { name: "Use current editor as spec", exact: true })).not.toBeChecked()
+  expect(writes).toEqual([])
+  expect(dialogs).toEqual([])
+})
+
+test("Performance submits optional editor config, confirms risks, prevents same-tick duplicates, and polls reports", async ({ page }) => {
   const { writes, dialogs, errors, auth } = await workspace(page)
   await page.getByRole("tabpanel").getByRole("button", { name: /objectives\.optim/ }).click()
-  await expect(page.getByRole("textbox", { name: "Edit objectives.optim", exact: true })).toHaveValue("Saved objectives.optim")
+  await expect(page.getByRole("textbox", { name: "Edit objectives.optim", exact: true })).toHaveValue(pipelineConfig)
+  await configurePerformance(page, "  /remote/projects/my project  ", true)
   let release!: () => void
   const held = new Promise<void>((resolve) => { release = resolve })
   await page.route("**/api/optimize", async (route) => {
@@ -98,17 +166,18 @@ test("Performance uploads the active .optim buffer, confirms risks, prevents sam
   await page.route("**/api/runs/optimizer", (route) => route.fulfill({ json: ++polls === 1 ? running : completed }))
   const button = page.getByRole("button", { name: "Performance", exact: true })
   await page.getByLabel("Follow output").uncheck()
-  await button.evaluate((element: HTMLButtonElement) => { element.click(); element.click() })
+  const submit = page.getByRole("button", { name: "Run pipelines", exact: true })
+  await submit.evaluate((element: HTMLButtonElement) => { element.click(); element.click() })
   await expect(button).toBeDisabled()
-  await expect(page.getByRole("status")).toHaveText("Starting optimization...")
+  await expect(submit).toBeDisabled()
+  await expect(page.getByRole("status")).toHaveText("Starting pipelines...")
   expect(dialogs).toHaveLength(1)
-  expect(dialogs[0]).toMatch(/trusted \.optim commands.*modify files.*incur provider costs/)
-  expect(dialogs[0]).toContain("current .optim editor buffer (objectives.optim) to remote ~/projects")
-  expect(dialogs[0]).toContain("absolute remote path")
+  expect(dialogs[0]).toMatch(/trusted config.*execute pipeline commands.*write artifacts.*costs/)
+  expect(dialogs[0]).toContain("current editor JSON pipeline config (objectives.optim)")
+  expect(dialogs[0]).toContain("dataset_pipe and model_pipeline for project /remote/projects/my project?")
   expect(dialogs[0]).toContain("Unsaved editor changes are included")
-  expect(dialogs[0]).toContain("Prose mode sends project context to model providers")
-  expect(dialogs[0]).toContain("loops until convergence, with no automatic time or iteration cap")
-  expect(dialogs[0]).toContain("Use Stop run to stop it manually")
+  expect(dialogs[0]).not.toMatch(/convergence|iteration cap|Prose mode/)
+  expect(dialogs[0]).toContain("Use Stop run to stop manually")
   expect(dialogs[0]).toContain("does not save the file locally")
   release()
   await expect(page.getByLabel("Run output")).toHaveText(running.output)
@@ -120,73 +189,75 @@ test("Performance uploads the active .optim buffer, confirms risks, prevents sam
   await expect(button).toBeEnabled()
   await expect(page.getByRole("button", { name: "Use recommended & continue" })).toBeHidden()
   await expect(page.locator(".editor-pane .badge")).toHaveText("Saved")
-  expect(writes).toEqual([{ path: "/api/optimize", method: "POST", body: { name: "objectives.optim", content: "Saved objectives.optim" } }])
+  expect(writes).toEqual([{ path: "/api/optimize", method: "POST", body: { project: "/remote/projects/my project", spec: { name: "objectives.optim", content: pipelineConfig } } }])
   expect(auth.every((value) => value === `Bearer ${new URL(url).hash.slice(7)}`)).toBe(true)
   expect(errors).toEqual([])
   expect(polls).toBe(2)
 })
 
-test("Performance requires a selected nonempty .optim tab without confirming or writing", async ({ page }) => {
+test("Performance validates project and explicitly opted-in editor content before confirming or writing", async ({ page }) => {
   const { writes, dialogs } = await workspace(page)
-  const button = page.getByRole("button", { name: "Performance", exact: true })
   await page.getByRole("button", { name: "Optimization", exact: true }).click()
-  await expect(page.getByLabel("Run output")).toContainText("current editor buffer, including unsaved changes, is uploaded to remote ~/projects")
-  await expect(page.getByLabel("Run output")).toContainText("No local save is performed")
+  await expect(page.getByLabel("Run output")).toContainText("performance.json is used by default; no editor tab is needed")
+  await configurePerformance(page, "   ")
+  const button = page.getByRole("button", { name: "Run pipelines", exact: true })
   await button.click()
-  await expect(page.getByRole("alert")).toContainText("Open or create a file with a name ending in .optim")
+  await expect(page.getByRole("alert")).toContainText("Enter a project folder")
+  await page.getByRole("textbox", { name: "Project folder", exact: true }).fill("my-project")
+  await page.getByRole("checkbox", { name: "Use current editor as spec", exact: true }).check()
+  await button.click()
+  await expect(page.getByRole("alert")).toContainText("Select an editor tab")
   await page.getByRole("tabpanel").getByRole("button", { name: /objectives\.optim/ }).click()
   const editor = page.getByRole("textbox", { name: "Edit objectives.optim", exact: true })
-  for (const content of ["", " \n\t "]) {
+  for (const content of ["", " \n\t ", '{"bad":"\0"}', `"${"\u00e9".repeat(512 * 1024)}"`]) {
     await editor.fill(content)
     await button.click()
-    await expect(page.getByRole("alert")).toContainText("enter your optimization instructions")
+    await expect(page.getByRole("alert")).toContainText("nonempty JSON, without NUL bytes, and at most 1 MiB")
     await expect(button).toBeEnabled()
   }
-  await editor.fill("Valid instructions in an inactive tab")
-  for (const name of ["second.md", "objectives.optim.txt", "objectives.OPTIM"]) {
-    await page.getByRole("textbox", { name: "New filename" }).fill(name)
-    await page.getByRole("button", { name: "Create file", exact: true }).click()
-    await page.getByRole("textbox", { name: `Edit ${name}`, exact: true }).fill("Not an .optim file")
-    await button.click()
-    await expect(page.getByRole("alert")).toContainText("select that tab before clicking Performance")
-    await expect(button).toBeEnabled()
-  }
+  await editor.fill("Not JSON")
+  await button.click()
+  await expect(page.getByRole("alert")).toContainText("valid JSON pipeline config")
   expect(dialogs).toEqual([])
   expect(writes).toEqual([])
 })
 
-test("a newly created unsaved .optim uploads without creating a local file or revision", async ({ page }) => {
-  const { writes } = await workspace(page)
-  const name = "new.optim"
-  const content = "Measure throughput and improve it.\n"
-  await page.getByRole("textbox", { name: "New filename" }).fill(name)
-  await page.getByRole("button", { name: "Create file", exact: true }).click()
-  const editor = page.getByRole("textbox", { name: `Edit ${name}`, exact: true })
-  await editor.fill(content)
-  await page.route("**/api/runs/optimizer", (route) => route.fulfill({ json: completed }))
-  await page.getByRole("button", { name: "Performance", exact: true }).click()
-  await expect(page.getByLabel("Run output")).toHaveText(completed.output)
-  await expect(editor).toHaveValue(content)
-  await expect(page.locator(".editor-pane .badge")).toHaveText("Unsaved")
-  await expect(page.getByRole("tabpanel").getByRole("button", { name: /new\.optim/ })).toHaveCount(0)
-  expect(writes).toEqual([{ path: "/api/optimize", method: "POST", body: { name, content } }])
-  await page.route("**/api/files/new.optim", (route) => route.fulfill({ json: { name, content, revision: "revision-2" } }))
-  await page.getByRole("button", { name: "Save", exact: true }).click()
-  await expect(page.locator(".editor-pane .badge")).toHaveText("Saved")
-  expect(writes[1]).toEqual({ path: "/api/files/new.optim", method: "PUT", body: { content, revision: null } })
-})
+for (const name of ["new.optim", "new.opt", "new.md", "config"]) {
+  test(`optional unsaved ${name} uploads without creating a local file or revision`, async ({ page }) => {
+    if (name === "new.md") await page.setViewportSize({ width: 320, height: 844 })
+    const { writes } = await workspace(page)
+    const content = `  ${pipelineConfig}\n`
+    await page.getByRole("textbox", { name: "New filename" }).fill(name)
+    await page.getByRole("button", { name: "Create file", exact: true }).click()
+    const editor = page.getByRole("textbox", { name: `Edit ${name}`, exact: true })
+    await editor.fill(content)
+    await page.route("**/api/runs/optimizer", (route) => route.fulfill({ json: completed }))
+    await configurePerformance(page, "my-project", true)
+    await page.getByRole("button", { name: "Run pipelines", exact: true }).click()
+    await expect(page.getByLabel("Run output")).toHaveText(completed.output)
+    await expect(editor).toHaveValue(content)
+    await expect(page.locator(".editor-pane .badge")).toHaveText("Unsaved")
+    await expect(page.getByRole("tabpanel").getByRole("button", { name: new RegExp(name.replaceAll(".", "\\.")) })).toHaveCount(0)
+    expect(writes).toEqual([{ path: "/api/optimize", method: "POST", body: { project: "my-project", spec: { name, content } } }])
+    await page.route(`**/api/files/${name}`, (route) => route.fulfill({ json: { name, content, revision: "revision-2" } }))
+    await page.getByRole("button", { name: "Save", exact: true }).click()
+    await expect(page.locator(".editor-pane .badge")).toHaveText("Saved")
+    expect(writes[1]).toEqual({ path: `/api/files/${name}`, method: "PUT", body: { content, revision: null } })
+  })
+}
 
 test("dismissing confirmation submits nothing", async ({ page }) => {
   const { writes } = await workspace(page)
   await page.getByRole("tabpanel").getByRole("button", { name: /objectives\.optim/ }).click()
   const editor = page.getByRole("textbox", { name: "Edit objectives.optim", exact: true })
-  await editor.fill("Unsaved instructions")
+  await editor.fill(` ${pipelineConfig}`)
   page.removeAllListeners("dialog")
   let confirmations = 0
   page.on("dialog", (dialog) => { confirmations++; return dialog.dismiss() })
-  await page.getByRole("button", { name: "Performance", exact: true }).click()
+  await configurePerformance(page, "my-project", true)
+  await page.getByRole("button", { name: "Run pipelines", exact: true }).click()
   await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeEnabled()
-  await expect(editor).toHaveValue("Unsaved instructions")
+  await expect(editor).toHaveValue(` ${pipelineConfig}`)
   await expect(page.locator(".editor-pane .badge")).toHaveText("Unsaved")
   expect(confirmations).toBe(1)
   expect(writes).toEqual([])
@@ -200,14 +271,15 @@ test("optimization is separate from a same-named file and preserves unsaved tabs
   await expect(page.getByLabel("Run output")).toHaveText(fileOutput.output)
   await page.getByRole("tabpanel").getByRole("button", { name: /objectives\.optim/ }).click()
   const objectives = page.getByRole("textbox", { name: "Edit objectives.optim", exact: true })
-  const content = "  Optimize latency using measurements.\nPreserve behavior.\n"
+  const content = `  ${pipelineConfig}\n`
   await objectives.fill(content)
+  await configurePerformance(page, "my-project", true)
   let release!: () => void
   const held = new Promise<void>((resolve) => { release = resolve })
   await page.route("**/api/optimize", async (route) => { await held; await route.fulfill({ json: { id: running.id } }) })
   let finish = false
   await page.route("**/api/runs/optimizer", (route) => route.fulfill({ json: finish ? completed : running }))
-  await page.getByRole("button", { name: "Performance", exact: true }).click()
+  await page.getByRole("button", { name: "Run pipelines", exact: true }).click()
   await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled()
   await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
   await expect(page.getByRole("button", { name: "Save repo changes" })).toBeDisabled()
@@ -238,9 +310,9 @@ test("optimization is separate from a same-named file and preserves unsaved tabs
   await page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button", { name: /^objectives\.optim/ }).click()
   await expect(objectives).toHaveValue("Edited while submitting")
   await expect(page.locator(".editor-pane .badge")).toHaveText("Unsaved")
-  await objectives.fill("Saved objectives.optim")
+  await objectives.fill(pipelineConfig)
   await expect(page.locator(".editor-pane .badge")).toHaveText("Saved")
-  expect(writes).toEqual([{ path: "/api/optimize", method: "POST", body: { name: "objectives.optim", content } }])
+  expect(writes).toEqual([{ path: "/api/optimize", method: "POST", body: { project: "my-project", spec: { name: "objectives.optim", content } } }])
   expect(errors).toEqual([])
 })
 
@@ -264,14 +336,16 @@ test("submission errors retain previous logs and allow retry", async ({ page }) 
   const { writes } = await workspace(page, { latest: completed })
   await page.getByRole("tabpanel").getByRole("button", { name: /objectives\.optim/ }).click()
   await page.getByRole("button", { name: "Optimization", exact: true }).click()
-  await page.route("**/api/optimize", (route) => route.fulfill({ status: 409, json: { error: "No trusted .optim file found" } }))
-  await page.getByRole("button", { name: "Performance", exact: true }).click()
-  await expect(page.getByRole("alert")).toContainText("No trusted .optim file found")
+  await configurePerformance(page)
+  await page.route("**/api/optimize", (route) => route.fulfill({ status: 409, json: { error: "No performance.json config found" } }))
+  await page.getByRole("button", { name: "Run pipelines", exact: true }).click()
+  await expect(page.getByRole("alert")).toContainText("No performance.json config found")
   await expect(page.getByLabel("Run output")).toHaveText(completed.output)
   await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeEnabled()
   await page.route("**/api/optimize", (route) => route.fulfill({ json: { id: running.id } }))
   await page.route("**/api/runs/optimizer", (route) => route.fulfill({ json: running }))
-  await page.getByRole("button", { name: "Performance", exact: true }).click()
+  await expect(page.getByRole("textbox", { name: "Project folder", exact: true })).toHaveValue("my-project")
+  await page.getByRole("button", { name: "Run pipelines", exact: true }).click()
   await expect(page.getByLabel("Run output")).toHaveText(running.output)
   await expect(page.getByRole("alert")).toBeHidden()
   expect(writes).toHaveLength(2)

@@ -135,10 +135,25 @@ struct Run {
     revision: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Optimize {
     name: String,
     content: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Performance {
+    project: String,
+    spec: Option<Optimize>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OptimizeRequest {
+    Performance(Performance),
+    Optimize(Optimize),
 }
 
 #[derive(Deserialize)]
@@ -160,6 +175,7 @@ enum RunInput {
     RepositorySave(Run),
     Continue(String, String),
     Optimize(Optimize),
+    Performance(Performance),
 }
 
 const CONTINUE_RECOMMENDED: &str = "Use the recommended option from your last response and continue the build session. Implement it now; do not stop at a plan. If no recommended option was provided, explain what input is needed rather than guessing.";
@@ -367,21 +383,50 @@ async fn start(State(app): State<App>, Json(input): Json<Run>) -> Result<Json<se
 
 async fn optimize(
     State(app): State<App>,
-    Json(input): Json<Optimize>,
+    Json(input): Json<OptimizeRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    validate(&input.name)?;
-    if !input.name.ends_with(".optim") {
-        return Err(invalid("Select a .optim file to optimize"));
+    let spec = match &input {
+        OptimizeRequest::Performance(input) => {
+            if input.project.trim().is_empty()
+                || input.project.len() > 4096
+                || input.project.chars().any(char::is_control)
+                || (!FsPath::new(&input.project).is_absolute()
+                    && FsPath::new(&input.project)
+                        .components()
+                        .any(|part| part == std::path::Component::ParentDir))
+            {
+                return Err(invalid(
+                    "Project must be a remote folder path (at most 4096 bytes), without control characters or relative parent traversal",
+                ));
+            }
+            if serde_json::to_vec(input).unwrap().len() > 1024 * 1024 {
+                return Err(invalid(
+                    "The encoded project and optional spec request must fit within 1 MiB",
+                ));
+            }
+            input.spec.as_ref()
+        }
+        OptimizeRequest::Optimize(input) => Some(input),
+    };
+    if let Some(spec) = spec {
+        validate(&spec.name)?;
+        if spec.content.trim().is_empty()
+            || spec.content.contains('\0')
+            || spec.content.len() > 1024 * 1024
+        {
+            return Err(invalid(
+                "Specs must be nonempty UTF-8 without NUL bytes and at most 1 MiB",
+            ));
+        }
     }
-    if input.content.trim().is_empty()
-        || input.content.contains('\0')
-        || input.content.len() > 1024 * 1024
-    {
-        return Err(invalid(
-            "Optimization specs must be nonempty UTF-8 without NUL bytes and at most 1 MiB",
-        ));
-    }
-    start_run(app, RunInput::Optimize(input)).await
+    start_run(
+        app,
+        match input {
+            OptimizeRequest::Performance(input) => RunInput::Performance(input),
+            OptimizeRequest::Optimize(input) => RunInput::Optimize(input),
+        },
+    )
+    .await
 }
 
 async fn latest_optimization(State(app): State<App>) -> Result<Json<Option<Output>>> {
@@ -437,7 +482,13 @@ async fn repository_save(
 
 async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>> {
     // Capture once per admission; never persist credentials with the job or snapshot.
-    let profile = app.settings.profile();
+    let performance = matches!(&input, RunInput::Performance(_));
+    // The fixed pipelines do not use model-provider credentials.
+    let profile = if performance {
+        None
+    } else {
+        app.settings.profile()
+    };
     let profile_bytes = profile
         .as_ref()
         .map(serde_json::to_vec)
@@ -448,7 +499,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         return Err(invalid("Execution provider settings exceed 64 KiB"));
     }
     let repository_save = matches!(&input, RunInput::RepositorySave(_));
-    let optimization = matches!(&input, RunInput::Optimize(_));
+    let optimization = performance || matches!(&input, RunInput::Optimize(_));
     let remote = app.remote.as_ref().ok_or_else(|| Error(
         if repository_save { StatusCode::FORBIDDEN } else { StatusCode::BAD_REQUEST },
         "Remote execution is disabled. Set SPEC_SSH_TARGET and SPEC_SSH_WORKSPACE on the local Rust server, then restart it.".into(),
@@ -472,6 +523,15 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
     };
     let mut optimization_spec = String::new();
     let (name, content, session_id) = match input {
+        RunInput::Performance(input) => {
+            optimization_spec = serde_json::to_string(&input).unwrap();
+            let support = serde_json::to_string(include_str!("optimize.py")).unwrap();
+            let snapshot = format!(
+                "import sys, types\noptimize = types.ModuleType('optimize')\noptimize.__file__ = __file__\nsys.modules['optimize'] = optimize\nexec({support}, optimize.__dict__)\n{}",
+                include_str!("performance.py")
+            );
+            ("optimization".into(), snapshot, None)
+        }
         RunInput::Optimize(input) => {
             optimization_spec = input.content;
             (
@@ -673,8 +733,10 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
                 b"[started] Submitting feedback and continuing the same build session with automatic tool approval.\n"
             } else if repository_save {
                 b"[started] remote repository save over SSH with the saved snapshot as context and the existing repository workflow. Output and logs only.\n"
+            } else if performance {
+                b"[started] Running dataset_pipe and model_pipeline for the explicit remote project. Stage metrics and artifact paths follow. Stop run cancels.\n"
             } else if optimization {
-                b"[started] Uploading the editor's .optim spec to remote ~/projects and optimizing the latest detached build using its absolute path. No iteration or time limit; Stop run cancels. Progress and gain reports follow.\n"
+                b"[started] Uploading the editor spec to remote ~/projects and optimizing the latest detached build using its absolute path. No iteration or time limit; Stop run cancels. Progress and gain reports follow.\n"
             } else {
                 b"[started] remote spec build over SSH: running the saved snapshot with automatic tool approval requested. Output and logs only.\n"
             },
