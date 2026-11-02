@@ -230,7 +230,7 @@ pub(super) fn restore<'a>(app: &'a App, id: &str) -> Result<std::sync::MutexGuar
     if !jobs.iter().any(|job| job.id == id) {
         let job = load(app, id)?;
         if jobs.len() >= 32
-            && let Some(index) = jobs.iter().position(|job| !job.recover)
+            && let Some(index) = jobs.iter().position(|job| !job.recover && !job.attached)
         {
             jobs.remove(index);
         }
@@ -276,8 +276,8 @@ pub(super) async fn refresh_locked(app: &App, id: &str, cancel: bool) -> Result<
         checkpoint(app, id);
     }
     let (identity, name) = {
-        let jobs = app.jobs.lock().unwrap();
-        let Some(job) = jobs.iter().find(|job| job.id == id) else {
+        let mut jobs = app.jobs.lock().unwrap();
+        let Some(job) = jobs.iter_mut().find(|job| job.id == id) else {
             // A resolved run may have been evicted while this refresh was queued.
             return Ok(());
         };
@@ -286,6 +286,25 @@ pub(super) async fn refresh_locked(app: &App, id: &str, cancel: bool) -> Result<
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Run persistence failed: {error}"),
             ));
+        }
+        if job.attached && job.stop.is_closed() {
+            // Losing local control says nothing about remote completion. Preserve
+            // verified terminal evidence; otherwise recover through a snapshot.
+            job.attached = false;
+            if job.recover {
+                job.status = "detached (local control closed)".into();
+            }
+            job.dirty = true;
+            match persist(app, job) {
+                Ok(()) => {
+                    job.dirty = false;
+                    job.persistence_error = None;
+                }
+                Err(error) => {
+                    job.persistence_error = Some(error.1.clone());
+                    return Err(error);
+                }
+            }
         }
         if job.attached || !job.recover {
             return Ok(());

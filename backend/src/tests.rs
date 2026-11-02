@@ -117,6 +117,7 @@ async fn all_api_routes_require_authentication() {
         ("POST", "/api/realtime"),
         ("POST", "/api/realtime/azure"),
         ("POST", "/api/runs"),
+        ("GET", "/api/runs"),
         ("GET", "/api/optimize"),
         ("POST", "/api/optimize"),
         ("POST", "/api/projects/search"),
@@ -1017,6 +1018,74 @@ async fn latest_is_null_without_a_run_and_tracks_newest_while_old_ids_remain_rea
 }
 
 #[tokio::test]
+async fn terminal_log_read_resolves_admission_across_remote_failure_and_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = app(root.path());
+    let remote = remote_fixture(root.path(), &root.path().join("unused"));
+    fs::write(
+        &remote.binary,
+        "#!/bin/sh\nprintf 'SPEC-RUN-1 0 0\\nverified remote output'\n",
+    )
+    .unwrap();
+    let id = Uuid::new_v4().to_string();
+    let job = persisted_job(&id, remote.identity(), true);
+    state.remote = Some(remote.clone());
+    recovery::persist(&state, &job).ok().unwrap();
+    recovery::set_latest(&state, &job).ok().unwrap();
+
+    let response = request(
+        state.clone(),
+        "GET",
+        "/api/files/a.md/run/log",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let output = json(response).await;
+    assert_eq!(output["status"], "completed");
+    assert_eq!(output["recoverable"], false);
+    assert_eq!(output["output"], "verified remote output");
+    assert!(
+        !recovery::load(&state, &id).ok().unwrap().recover,
+        "verified terminal log must resolve persisted admission state"
+    );
+    // The disk-view output must not replace the separately retained stream buffer.
+    assert_eq!(recovery::load(&state, &id).ok().unwrap().output, job.output);
+    fs::write(&remote.binary, "#!/bin/sh\nexit 99\n").unwrap();
+    drop(state);
+    let mut fresh = app(root.path());
+    fresh.remote = Some(remote);
+    assert_eq!(
+        json(request(fresh.clone(), "GET", "/api/runs", serde_json::Value::Null).await).await,
+        serde_json::json!([])
+    );
+    let output = json(
+        request(
+            fresh.clone(),
+            "GET",
+            &format!("/api/runs/{id}"),
+            serde_json::Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(output["status"], "completed");
+    assert_eq!(output["recoverable"], false);
+    let response = request(
+        fresh,
+        "POST",
+        "/api/optimize",
+        serde_json::json!({"project":".","spec":null}),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "confirmed old completion must not require another successful SSH read"
+    );
+}
+
+#[tokio::test]
 async fn output_log_reads_disk_without_replacing_cached_or_attached_output() {
     let root = tempfile::tempdir().unwrap();
     let mut state = app(root.path());
@@ -1049,6 +1118,7 @@ async fn output_log_reads_disk_without_replacing_cached_or_attached_output() {
     for attached in [false, true] {
         let mut live_job = persisted_job(&id, job.remote_identity.clone(), attached);
         live_job.attached = attached;
+        let control = live_job.stop.subscribe();
         state.jobs.lock().unwrap().clear();
         state.jobs.lock().unwrap().push(live_job);
         let response = request(state.clone(), "GET", endpoint, serde_json::Value::Null).await;
@@ -1058,6 +1128,22 @@ async fn output_log_reads_disk_without_replacing_cached_or_attached_output() {
         assert_eq!(output["output"], "fresh disk output");
         assert_eq!(output["status"], "completed");
         assert_eq!(output["recoverable"], false);
+        if attached {
+            assert!(*control.borrow() == RunControl::Detach);
+            assert!(state.jobs.lock().unwrap()[0].attached);
+            let response = request(
+                state.clone(),
+                "POST",
+                "/api/optimize",
+                serde_json::json!({"project":".","spec":null}),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "wait for live local attachment teardown after remote completion"
+            );
+        }
         assert_eq!(state.jobs.lock().unwrap()[0].output, job.output);
         assert_eq!(recovery::load(&state, &id).ok().unwrap().output, job.output);
     }
@@ -1080,8 +1166,156 @@ async fn output_log_reads_disk_without_replacing_cached_or_attached_output() {
                 .unwrap()
                 .starts_with("unavailable")
         );
-        assert_eq!(output["recoverable"], true);
+        assert_eq!(
+            output["recoverable"], false,
+            "missing logs must not undo previously verified completion"
+        );
         assert_eq!(state.jobs.lock().unwrap()[0].output, job.output);
+    }
+}
+
+#[tokio::test]
+async fn terminal_log_read_survives_real_local_attachment_finalization() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = app(root.path());
+    let remote = remote_fixture(root.path(), &root.path().join("unused"));
+    // The attachment stays alive until Detach; independent status reads confirm
+    // a terminal remote run. No real model, SSH daemon or build is invoked.
+    fs::write(
+        &remote.binary,
+        r#"#!/bin/bash
+if [[ ${!#} == *SPEC-RUN-1* ]]; then
+    printf 'SPEC-RUN-1 0 0\nverified completion'
+else
+    printf 'attached stream\n'
+    cat >/dev/null
+    sleep 60
+fi
+"#,
+    )
+    .unwrap();
+    state.remote = Some(remote.clone());
+    fs::write(root.path().join("a.md"), "fixture").unwrap();
+    let revision = read(root.path(), "a.md").ok().unwrap().revision;
+    let response = request(
+        state.clone(),
+        "POST",
+        "/api/runs",
+        serde_json::json!({"name":"a.md", "revision":revision}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let id = json(response).await["id"].as_str().unwrap().to_owned();
+    let response = request(
+        state.clone(),
+        "GET",
+        "/api/files/a.md/run/log",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json(response).await["status"], "completed");
+    fs::write(&remote.binary, "#!/bin/sh\nexit 99\n").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !state
+                .jobs
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|job| job.id == id)
+                .unwrap()
+                .attached
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let job = recovery::load(&state, &id).ok().unwrap();
+    assert!(!job.recover);
+    assert_eq!(
+        job.status, "completed",
+        "local Detach must not overwrite remote terminal evidence"
+    );
+    assert_eq!(
+        json(request(state, "GET", "/api/runs", serde_json::Value::Null).await).await,
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
+async fn terminal_log_read_persistence_failure_does_not_clear_pending_state() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = app(root.path());
+    let remote = remote_fixture(root.path(), &root.path().join("unused"));
+    let id = Uuid::new_v4().to_string();
+    let job = persisted_job(&id, remote.identity(), true);
+    recovery::persist(&state, &job).ok().unwrap();
+    recovery::set_latest(&state, &job).ok().unwrap();
+    fs::write(
+        &remote.binary,
+        format!(
+            "#!/bin/sh\nchmod 755 '{}'\nprintf 'SPEC-RUN-1 0 0\\nverified completion'\n",
+            root.path().join(".spec-output").display()
+        ),
+    )
+    .unwrap();
+    state.remote = Some(remote);
+    let response = request(
+        state.clone(),
+        "GET",
+        "/api/files/a.md/run/log",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(state.jobs.lock().unwrap()[0].recover);
+    fs::set_permissions(
+        root.path().join(".spec-output"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    assert!(recovery::load(&state, &id).ok().unwrap().recover);
+}
+
+#[tokio::test]
+async fn cancel_closed_attachment_uses_remote_control_and_reports_failure() {
+    for unknown in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = app(root.path());
+        let remote = remote_fixture(root.path(), &root.path().join("unused"));
+        fs::write(&remote.binary, if unknown { "#!/bin/sh\nexit 125\n" } else { "#!/bin/bash\n[[ ${!#} == *\" cancel '\"* ]] || exit 99\nprintf 'SPEC-RUN-1 130 0\\ncancelled remotely'\n" }).unwrap();
+        let id = Uuid::new_v4().to_string();
+        let mut job = persisted_job(&id, remote.identity(), true);
+        job.attached = true;
+        assert!(job.stop.is_closed());
+        recovery::persist(&state, &job).ok().unwrap();
+        state.jobs.lock().unwrap().push(job);
+        state.remote = Some(remote);
+        let response = request(
+            state.clone(),
+            "POST",
+            &format!("/api/runs/{id}/cancel"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            if unknown {
+                StatusCode::BAD_GATEWAY
+            } else {
+                StatusCode::OK
+            }
+        );
+        let jobs = state.jobs.lock().unwrap();
+        assert!(!jobs[0].attached);
+        assert_eq!(jobs[0].recover, unknown);
+        if !unknown {
+            assert_eq!(jobs[0].status, "cancelled");
+        }
     }
 }
 
@@ -1101,11 +1335,14 @@ async fn output_log_missing_run_preserves_cached_output_and_unresolved_status() 
     fs::create_dir(&parent).unwrap();
     fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
     for attached in [false, true] {
+        let _control;
         if attached {
             let mut live = persisted_job(&id, job.remote_identity.clone(), true);
             live.attached = true;
+            _control = live.stop.subscribe();
             live.output = b"newer attached output".to_vec().into();
             live.truncated = true;
+            state.jobs.lock().unwrap().clear();
             state.jobs.lock().unwrap().push(live);
         }
         for _ in 0..2 {

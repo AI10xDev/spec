@@ -173,6 +173,9 @@ async fn repository_save_blocks_other_spec_runs_including_recovered_unknown_harn
                 true,
             );
             prior.repository_save = !saving;
+            let _control = attached.then(|| prior.stop.subscribe());
+            let prior_id = prior.id.clone();
+            let prior_name = prior.name.clone();
             recovery::persist(&state, &prior).ok().unwrap();
             if attached {
                 prior.attached = true;
@@ -192,12 +195,11 @@ async fn repository_save_blocks_other_spec_runs_including_recovered_unknown_harn
             )
             .await;
             assert_eq!(response.status(), StatusCode::CONFLICT);
-            assert!(
-                json(response).await["error"]
-                    .as_str()
-                    .unwrap()
-                    .contains("repository")
-            );
+            let detail = json(response).await["error"].as_str().unwrap().to_owned();
+            assert!(detail.contains("repository"));
+            assert!(detail.contains(&prior_id));
+            assert!(detail.contains(&prior_name));
+            assert!(detail.contains("Active runs"));
             assert_eq!(state.jobs.lock().unwrap().len(), 1);
             assert!(!root.path().join(".spec-runs").exists());
         }

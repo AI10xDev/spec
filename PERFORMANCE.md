@@ -11,6 +11,20 @@ execution. Results appear in **Optimization** under **Output & logs**. This uses
 the same authenticated SSH transport, recovery, and **Stop run** controls as the
 existing optimizer, without requiring a previous build or an editor tab.
 
+If another run blocks submission, **Active runs** in the header lists the backend's
+active/unresolved run IDs, filenames and last-known statuses. Select **Load output**
+to check the blocker even when its source file is unopened or deleted. Inspection
+does not run pipelines, relink file output or cancel work. **Stop run** asks for
+confirmation. An unavailable status preserves the guard and cached logs; a verified
+terminal status resolves only that run, not other blockers. **Refresh list** alone
+does not contact the execution host.
+
+Verified terminal status from **Load nohup output** is saved for admission and
+survives later SSH failures/restarts without replacing the cached stream output.
+Closed local attachment channels are recovered through the remote status protocol,
+not silently treated as active or successfully cancelled. Unknown remote status
+still blocks conflicting launches.
+
 ## Project Name Search
 
 Enter part of a folder name in **Project folder**, then click **Search with

@@ -193,6 +193,14 @@ struct Output {
     continuable: bool,
 }
 
+#[derive(Serialize)]
+struct ActiveRun {
+    id: String,
+    name: String,
+    status: String,
+    kind: &'static str,
+}
+
 struct Error(StatusCode, String);
 type Result<T> = std::result::Result<T, Error>;
 
@@ -512,7 +520,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         .lock()
         .unwrap()
         .iter()
-        .filter(|job| job.recover && !job.attached)
+        .filter(|job| (job.recover && !job.attached) || (job.attached && job.stop.is_closed()))
         .map(|job| job.id.clone())
         .collect();
     for id in pending {
@@ -597,13 +605,24 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         }
     };
     // A changed SSH configuration cannot prove that an old harness finished.
-    if app.jobs.lock().unwrap().iter().any(|job| {
-        job.recover && (repository_save || optimization || job.repository_save || job.optimization)
-    }) {
-        return Err(Error(
-            StatusCode::CONFLICT,
-            "A run is active or its remote status is unresolved for this repository. Load its output before retrying.".into(),
-        ));
+    {
+        let jobs = app.jobs.lock().unwrap();
+        let mut blockers = jobs.iter().filter(|job| {
+            (job.recover || job.attached)
+                && (repository_save || optimization || job.repository_save || job.optimization)
+        });
+        if let Some(job) = blockers.next() {
+            return Err(Error(
+                StatusCode::CONFLICT,
+                format!(
+                    "This repository has {} active or unresolved conflicting run(s). Blocking run: {:?} (run {}, status: {}). Open Active runs and load its output to check remote status before retrying. Unavailable status does not prove completion.",
+                    1 + blockers.count(),
+                    job.name,
+                    job.id,
+                    job.status,
+                ),
+            ));
+        }
     }
     if repository_save {
         let status = remote
@@ -621,25 +640,36 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
     let (stop, mut stopped) = watch::channel(RunControl::Running);
     {
         let mut jobs = app.jobs.lock().unwrap();
-        if let Some(job) = jobs.iter().find(|job| job.name == name && job.recover) {
+        if let Some(job) = jobs
+            .iter()
+            .find(|job| job.name == name && (job.recover || job.attached))
+        {
             return Err(Error(
                 StatusCode::CONFLICT,
                 format!(
-                    "A run is active or its remote status is unresolved for this file (run {}, status: {}). Load its output or stop it before retrying.",
+                    "A run is active or its remote status is unresolved for this file (run {}, status: {}). Open Active runs to load its output or explicitly stop it before retrying.",
                     job.id, job.status
                 ),
             ));
         }
-        if jobs.iter().filter(|job| job.recover).count() >= MAX_RUNS {
+        if jobs
+            .iter()
+            .filter(|job| job.recover || job.attached)
+            .count()
+            >= MAX_RUNS
+        {
             return Err(Error(
                 StatusCode::CONFLICT,
                 format!(
-                    "The {MAX_RUNS}-run limit was reached. Wait for an active run to finish, stop one, or resolve its remote status before retrying."
+                    "The {MAX_RUNS}-run limit was reached. Open Active runs to check output and remote status. Wait for a run to finish or explicitly stop one before retrying."
                 ),
             ));
         }
         if jobs.len() >= 32 {
-            let index = jobs.iter().position(|job| !job.recover).unwrap();
+            let index = jobs
+                .iter()
+                .position(|job| !job.recover && !job.attached)
+                .unwrap();
             jobs.remove(index);
         }
         let mut job = Job {
@@ -809,7 +839,11 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         append(&app, &id, format!("\n[{status}]\n").as_bytes());
         let _guard = recovery::run_gate(&app, &id).await;
         if let Some(job) = app.jobs.lock().unwrap().iter_mut().find(|job| job.id == id) {
-            job.status = status;
+            // A concurrent disk-log read may already have persisted authoritative
+            // terminal evidence. Local SSH teardown must not overwrite it.
+            if job.recover {
+                job.status = status;
+            }
             job.attached = false;
             job.dirty = true;
         }
@@ -820,6 +854,33 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         }
     });
     Ok(response)
+}
+
+async fn active_runs(State(app): State<App>) -> Result<Json<Vec<ActiveRun>>> {
+    // Listing must work without source files or SSH, including after a restart.
+    // Only an explicit output check can change an unresolved run's remote status.
+    recovery::initialize(&app)?;
+    let mut runs: Vec<_> = app
+        .jobs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|job| job.recover || job.attached)
+        .map(|job| ActiveRun {
+            id: job.id.clone(),
+            name: job.name.clone(),
+            status: job.status.clone(),
+            kind: if job.optimization {
+                "optimization"
+            } else if job.repository_save {
+                "repository-save"
+            } else {
+                "build"
+            },
+        })
+        .collect();
+    runs.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    Ok(Json(runs))
 }
 
 async fn output(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Output>> {
@@ -862,6 +923,8 @@ async fn output_log(
     let Some(id) = recovery::latest(&app, &name)? else {
         return Ok(Json(None));
     };
+    let _guard = recovery::run_gate(&app, &id).await;
+    drop(recovery::restore(&app, &id)?);
     let job = recovery::load(&app, &id)?;
     let remote = app
         .remote
@@ -891,11 +954,40 @@ async fn output_log(
             })));
         }
     };
+    let (status, recoverable) = {
+        // Completed entries can be evicted while SSH is in flight. Restore and
+        // retain the cache guard through publication, as ordinary output reads do.
+        let mut jobs = recovery::restore(&app, &id)?;
+        let cached = jobs.iter_mut().find(|job| job.id == id).unwrap();
+        if cached.recover && status != "running" && !status.starts_with("unknown") {
+            // Keep disk-view bytes separate, but persist confirmed completion so
+            // admission does not depend on another successful SSH connection.
+            let previous_status = std::mem::replace(&mut cached.status, status.clone());
+            cached.recover = false;
+            if let Err(error) = recovery::persist(&app, cached) {
+                cached.status = previous_status;
+                cached.recover = true;
+                return Err(error);
+            }
+            cached.dirty = false;
+            cached.persistence_error = None;
+        }
+        if !cached.recover {
+            // The remote run is done; finish local attachment teardown without
+            // cancelling remote work. Admission still waits on attached=true.
+            if cached.attached && cached.stop.send(RunControl::Detach).is_err() {
+                cached.attached = false;
+            }
+            (cached.status.clone(), false)
+        } else {
+            (status, true)
+        }
+    };
     // A disk snapshot must not replace the buffer an attached SSH stream is appending to.
     Ok(Json(Some(Output {
         id,
         name,
-        recoverable: status == "running" || status.starts_with("unknown"),
+        recoverable,
         status,
         output: String::from_utf8_lossy(&bytes).into_owned(),
         truncated,
@@ -911,8 +1003,7 @@ async fn cancel(State(app): State<App>, Path(id): Path<String>) -> Result<Json<s
             .iter()
             .find(|job| job.id == id)
             .ok_or_else(|| Error(StatusCode::NOT_FOUND, "Run not found".into()))?;
-        if job.attached {
-            let _ = job.stop.send(RunControl::Cancel);
+        if job.attached && job.stop.send(RunControl::Cancel).is_ok() {
             return Ok(Json(serde_json::json!({"ok": true})));
         }
     }
@@ -1015,7 +1106,7 @@ fn router(app: App) -> Router {
             "/api/files/{name}/retained-runs/{id}/log",
             get(retained_log),
         )
-        .route("/api/runs", post(start))
+        .route("/api/runs", get(active_runs).post(start))
         .route("/api/optimize", get(latest_optimization).post(optimize))
         .route(
             "/api/projects/search",

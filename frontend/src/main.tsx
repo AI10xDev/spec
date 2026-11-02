@@ -9,6 +9,7 @@ import { Analytics } from "./analytics"
 import { BuildProgress } from "./progress"
 import { Settings } from "./settings"
 import { ProjectPicker } from "./project-picker"
+import { ActiveRuns } from "./active-runs"
 import type { ProjectSearch } from "./project-picker"
 import "./style.css"
 
@@ -58,6 +59,8 @@ function App() {
   const stoppedIds = useRef(new Set<string>())
   const [optimization, setOptimization] = useState<Output | null>(null)
   const [performance, setPerformance] = useState(false)
+  const [activeRuns, setActiveRuns] = useState(false)
+  const activeRunsButton = useRef<HTMLButtonElement>(null)
   const [project, setProject] = useState("")
   const [projectSearching, setProjectSearching] = useState(false)
   const [useEditorSpec, setUseEditorSpec] = useState(false)
@@ -230,10 +233,11 @@ function App() {
       try {
         const next = await api<Output>(`/runs/${output.id}`)
         if (cancelled) return
-        if (optimizer) setOptimization((item) => item?.id === next.id ? next : item)
+        if (optimizer) setOptimization((item) => item?.id === next.id && (item.recoverable || !next.recoverable) ? next : item)
         else setOutputs((items) => {
           const previous = items[next.name]
           if (previous?.id !== next.id) return items
+          if (!previous.recoverable && next.recoverable) return items
           // Failed recovery can return an older cache than an explicit disk read.
           const output = next.status.startsWith("unavailable")
             ? { ...next, output: previous.output, truncated: previous.truncated }
@@ -578,7 +582,16 @@ function App() {
   if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} realtime={realtime} azureRealtime={azureRealtime} />
 
   return <div className="app">
-    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Optimization: {optimization.status}</span>}<div className="analysis-actions"><button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button ref={performanceButton} className="primary" title="performance" aria-expanded={performance && !settings} aria-controls="performance-form" disabled={settings || !execution || busy || !!pendingRuns} onClick={() => { if (!performance) setUseEditorSpec(false); setPerformance(!performance) }}>Performance</button></div></div></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Optimization: {optimization.status}</span>}<div className="analysis-actions">{execution && <button ref={activeRunsButton} aria-expanded={activeRuns} aria-controls="active-runs" onClick={() => setActiveRuns(!activeRuns)}>Active runs</button>}<button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button ref={performanceButton} className="primary" title="performance" aria-expanded={performance && !settings} aria-controls="performance-form" disabled={settings || !execution || busy || !!pendingRuns} onClick={() => { if (!performance) setUseEditorSpec(false); setPerformance(!performance) }}>Performance</button></div></div></header>
+    <ActiveRuns key={token} open={activeRuns && execution} api={api} knownOutputs={[...Object.values(outputs), ...(optimization ? [optimization] : [])]} onClose={() => { setActiveRuns(false); activeRunsButton.current?.focus() }} onOutput={(next) => {
+      // A delayed recoverable response cannot undo confirmed completion of the same run.
+      const updated = (previous: Output) => !previous.recoverable && next.recoverable ? previous : next.status.startsWith("unavailable")
+        ? { ...next, output: previous.output, truncated: previous.truncated }
+        : next
+      // Inspection never associates an unknown run or replaces an unrelated latest run.
+      setOutputs((items) => Object.fromEntries(Object.entries(items).map(([name, previous]) => [name, previous.id === next.id ? updated(previous) : previous])))
+      setOptimization((previous) => previous?.id === next.id ? updated(previous) : previous)
+    }} />
     {performance && !settings && <form id="performance-form" className="performance-form" aria-label="Performance pipelines" onSubmit={(event) => { event.preventDefault(); void optimize() }}>
       <h2>Run performance pipelines</h2>
       <p id="performance-config">Run <code>dataset_pipe</code> + <code>model_pipeline</code> using the project's <code>performance.json</code> by default. No editor tab is needed.</p>

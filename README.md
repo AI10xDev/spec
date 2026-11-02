@@ -281,6 +281,31 @@ Validation must succeed on the final tool state of each model-guided step; a lat
 
 #### Output and safety
 
+If a run is active or its remote status is unresolved, open **Active runs** in the
+header. The conflict message identifies the blocking filename, run ID and status.
+The list includes recoverable runs from other tabs and restored server sessions,
+even if their source files were deleted. **Load output** and **Check status** use
+the run ID directly, without opening a file or changing its latest-run association.
+The selected run is polled while the panel is open. **Stop run** requires explicit
+confirmation; it never runs automatically on an admission error.
+
+**Refresh list** reads the web backend's known state; it does not contact SSH or
+prove remote completion. Without previously verified completion, missing logs,
+SSH failures and changed remote settings keep a run unresolved and preserve
+cached output. Restore access to the original
+execution host/workspace and inspect the run, or explicitly stop it if appropriate.
+Do not delete `.spec-output`/`.spec-runs` records or invent a terminal status to
+bypass this guard. Resolving one run may leave other blockers. Standalone CLI runs
+not tracked by this backend are still protected by remote harness admission.
+
+**Load nohup output** also persists verified terminal status without replacing the
+separate stream buffer. Once completion is recorded, a later connection failure
+or backend restart cannot make that same run pending again. A still-attached local
+SSH reader is asked to detach and must finish teardown before a conflicting launch.
+If its control channel has already closed, inspection, cancellation and admission
+fall back to authoritative remote recovery instead of treating it as perpetually
+attached. A closed local channel alone never proves the remote run finished.
+
 Select **Optimization** in **Output & logs** for optimization progress, or **Current file** for the selected file's build output. Optimization has a separate persisted latest-run association and recovers after browser/server restart without an open file. Selecting Optimization retries failed initial recovery. **Stop run** requests cancellation; optimization cannot use **Use recommended & continue**. Active or unresolved harnesses block conflicting optimization, build, continuation, and repository-save operations, while local editing and saving remain available after submission.
 
 Timestamped reports include baselines, iteration scores, signed and cumulative gains, marginal differences, stability streaks, and convergence/failure/interruption. Prose mode also reports planning, builder results, tool calls, validation, and step summaries. Full diagnostics remain in remote `progress.log`, `report.jsonl`, and bounded `commands.log` files. The browser retains the latest 256 KiB, and recovery reads a bounded latest-256-KiB tail. Like builds and repository saves, optimization has no overall supervisor runtime limit or UI attachment deadline and receives supervisor keep-alives every 60 seconds; these indicate process liveness, not model progress. Unlike ordinary builds, optimization output remains uncapped; report-bearing run directories are excluded from automatic seven-day pruning. Budget storage and remove finished reports manually.
