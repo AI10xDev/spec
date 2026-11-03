@@ -127,7 +127,7 @@ and legacy Optimization have additional prerequisites in their linked guides.
 Tools may modify remote files, use the network, access that user's credentials,
 and incur costs. Automatic tool approval is requested. Use a least-privilege
 account or isolated environment; the UI is not a sandbox. Read the full
-[remote execution contract](../README.md#remote-shell-requirements).
+[remote execution contract](../REFERENCE.md#remote-shell-requirements).
 
 ## Optional AI Features
 
@@ -144,7 +144,7 @@ runs. If those are different hosts, arrange a service on each as needed.
 Keys are stored privately on the server, not encrypted at rest. Remote execution
 transfers its selected profile over SSH into a private temporary file. Never put
 keys in a spec, screenshot, URL, or Git commit. Completions can send **unsaved
-text** to the provider. See [AI settings](../README.md#ai-settings) for precedence,
+text** to the provider. See [AI settings](../REFERENCE.md#ai-settings) for precedence,
 storage, reset behavior, and environment alternatives.
 
 ## Upgrade
@@ -181,7 +181,7 @@ already-running supervisors. Releases use Git tags; package manifests still say
 | Unauthorized after restart | Reconnect using the new token, not a bookmark containing an old token. |
 | Autosave paused / stale revision | Preserve the draft using Download, reopen the disk version, and reconcile; repeated Save cannot resolve a stale revision. |
 | `opencode-source: command not found` | Install the engine on the execution host and export its executable path from remote `~/.bash_aliases`. |
-| SSH exit 255 or missing run directory | Recover/check status before retrying. Missing logs are not proof of completion. See [recovery](../README.md#sessions-and-cancellation). |
+| SSH exit 255 or missing run directory | Recover/check status before retrying. Missing logs are not proof of completion. See [recovery](../REFERENCE.md#sessions-and-cancellation). |
 | Model requests fail | Check the selected profile, model access/tool support, and the host making the request; saving settings is not a connectivity test. |
 
-For developer builds and automated checks, see [Validation](../README.md#validation).
+For developer builds and automated checks, see [Validation](../REFERENCE.md#validation).

@@ -1,6 +1,6 @@
 # Vite version: feature guide
 
-This guide covers the core workspace. See the [README](../README.md#features) for the complete current feature list, including [optimization](../README.md#optimization), [repository saving](../README.md#save-edited-repository-changes), and [session chat, context inspection, and voice](../README.md#session-chat).
+This guide covers the core workspace. See the [technical reference](../REFERENCE.md#features) for the complete current feature list, including [optimization](../REFERENCE.md#optimization), [repository saving](../REFERENCE.md#save-edited-repository-changes), and [session chat, context inspection, and voice](../REFERENCE.md#session-chat).
 
 ## 1. Connect to your local workspace
 
@@ -43,7 +43,7 @@ The spec editor is a plain UTF-8 textarea with spellcheck disabled. It supports 
 
 Press `/` to toggle the current line's leading `# ` completion marker, preserving indentation, caret, and native undo. Alt+/ types a literal slash; slash input inside fenced code and IME composition remains native. Supplemental build instructions tell the agent to retain marked lines as context and implement only pending lines. Completion applies to that line only, not the following section. Headings (`##`), inline hashes, and hashes inside code blocks are not completion markers.
 
-With a [completion provider configured](../README.md#trailing-sentence-part-completions), **Trailing completions** offers muted ghost text after 500 ms idle at a line's end. It completes the current word or sentence part, stopping at the first clause/sentence boundary, up to 160 characters. Press **Tab** or click **Accept part** to insert it; press **Escape** to dismiss until the next edit. Acceptance also waits for the next edit before suggesting another part, even without final punctuation. The toggle disables provider requests across editor tabs; editing works without any provider configuration.
+With a [completion provider configured](../REFERENCE.md#trailing-sentence-part-completions), **Trailing completions** offers muted ghost text after 500 ms idle at a line's end. It completes the current word or sentence part, stopping at the first clause/sentence boundary, up to 160 characters. Press **Tab** or click **Accept part** to insert it; press **Escape** to dismiss until the next edit. Acceptance also waits for the next edit before suggesting another part, even without final punctuation. The toggle disables provider requests across editor tabs; editing works without any provider configuration.
 
 Suggestions never modify saved/downloaded text until accepted. Selection, composition, blur, and tab switches clear them; stale requests cannot replace a newer suggestion. Existing text after the caret on the same line suppresses completion. The ghost stays on one visual line, clipped to the pane; its full suffix is in the Accept part tooltip. Native undo includes accepted text in supported browsers; browsers without `insertText` support use a direct insertion fallback. Provider errors appear beside the toggle, without blocking saves or launching a build.
 
@@ -81,7 +81,7 @@ A failure to launch the local SSH client is reported immediately. SSH connection
 
 ### Run limits and lifecycle
 
-Builds (including continuations), repository saves, and [optimization](../README.md#output-and-safety) have no overall supervisor runtime limit or UI attachment deadline. Ordinary builds and repository saves cap agent output; optimization output remains uncapped and has separate retention rules.
+Builds (including continuations), repository saves, and [optimization](../REFERENCE.md#output-and-safety) have no overall supervisor runtime limit or UI attachment deadline. Ordinary builds and repository saves cap agent output; optimization output remains uncapped and has separate retention rules.
 
 - At most one unresolved run per filename and 16 in total, including recovered or detached sessions whose completion is unconfirmed. Admission errors distinguish a blocked filename from the total run limit.
 - Latest 256 KiB of output per retained run. Recovery reads a bounded latest-256-KiB tail for all modes. Truncation is explicitly indicated.
@@ -91,7 +91,7 @@ Builds (including continuations), repository saves, and [optimization](../README
 - Normal process exit and explicit cancellation still end runs. The 10-second startup-readiness check, cleanup safety timers, SSH network keepalives, and individual provider/tool timeouts are unchanged. Network loss may prevent Stop confirmation. Exit code `124` can still indicate a child timeout or an older supervisor's watchdog timeout.
 - Ctrl+C/SIGTERM detaches on normal server shutdown; uploaded builds continue remotely.
 - Closing a browser page does not stop execution.
-- Run records and file associations persist in private local `.spec-output/` storage. Reopen a saved spec after restarting to recover output without another build; use the new server token when reconnecting. Unfinished sessions require the same remote configuration; finished cached output needs no SSH. Remote sessions retain private `<spec filename>.out` (spec-named instead of shared `nohup.out`) and atomic exit `status` under `.spec-runs/`. Ordinary builds and repository saves retain the first 8 MiB of agent stdout/stderr and drain/discard excess agent output. Supervisor keep-alives bypass this cap, so the total log can exceed 8 MiB and slowly grows while the process remains alive. Legacy `output.log` sessions remain recoverable. Completed ordinary remote sessions older than seven days are pruned on subsequent launches; optimization reports are exempt. See [recovery and cancellation](../README.md#sessions-and-cancellation). Interactive replay and session steering are not implemented.
+- Run records and file associations persist in private local `.spec-output/` storage. Reopen a saved spec after restarting to recover output without another build; use the new server token when reconnecting. Unfinished sessions require the same remote configuration; finished cached output needs no SSH. Remote sessions retain private `<spec filename>.out` (spec-named instead of shared `nohup.out`) and atomic exit `status` under `.spec-runs/`. Ordinary builds and repository saves retain the first 8 MiB of agent stdout/stderr and drain/discard excess agent output. Supervisor keep-alives bypass this cap, so the total log can exceed 8 MiB and slowly grows while the process remains alive. Legacy `output.log` sessions remain recoverable. Completed ordinary remote sessions older than seven days are pruned on subsequent launches; optimization reports are exempt. See [recovery and cancellation](../REFERENCE.md#sessions-and-cancellation). Interactive replay and session steering are not implemented.
 - Tools that detach into separate process groups may escape group cancellation. Use OS-level sandboxing for stronger containment.
 
 The Rust backend embeds the supervisor and sends it over SSH. To deploy this behavior, rebuild and restart the actual SSH-launching backend, not just the execution VM. Already-running supervisors retain their original behavior, including older watchdog deadlines.
@@ -106,7 +106,7 @@ The Rust backend embeds the supervisor and sends it over SSH. To deploy this beh
 | Spec/output split | Desktop two-pane view; stacked mobile view |
 | Background shell build | Opt-in remote foreground build over SSH; local web server, capped agent output plus uncapped keep-alives, cancellation, no overall runtime limit |
 | Basename mirror saves | No mirroring; saves only the named workspace file |
-| Persistent V2 session inbox | Not ported; explicit [continuation of completed builds](../README.md#continue-a-completed-build) resumes the captured engine session |
+| Persistent V2 session inbox | Not ported; explicit [continuation of completed builds](../REFERENCE.md#continue-a-completed-build) resumes the captured engine session |
 | Azure inline completion/filename ranking | Optional sentence-part trailing completions; filename ranking not ported |
 | `/eval`, `/telle`, legacy eval, plan picker | Not ported |
 | Terminal keybindings/syntax highlighting | Browser editing, save/run shortcuts, slash completion-marker toggle, and display-only source highlighting |

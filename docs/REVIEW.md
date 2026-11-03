@@ -2,7 +2,7 @@
 
 Review date: 2026-10-05. Scope: the active shell function/executable, customized editor save/history/output paths, build dispatch, and the persistent-session integration contract. This is a focused review, not a complete security audit of Kibi, OpenCode, providers, telemetry, or the host machine.
 
-This is historical review evidence, not the current feature inventory. See the [README](../README.md) and [release notes](https://github.com/AI10xDev/spec/releases) for later features and validation. The current frontend unit command is `bun run test:unit`; `bun run test` now runs the timed output smoke test.
+This is historical review evidence, not the current feature inventory. See the [technical reference](../REFERENCE.md) and [release notes](https://github.com/AI10xDev/spec/releases) for later features and validation. The current frontend unit command is `bun run test:unit`; `bun run test` now runs the timed output smoke test.
 
 ## Source identification
 
