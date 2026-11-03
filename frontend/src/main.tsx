@@ -19,6 +19,7 @@ type Repository = { connected: boolean; dirty: boolean; directory: string | null
 type Output = RunOutput & { continuable: boolean }
 type RetainedRuns = { runs: { id: string; modified: number }[]; truncated: boolean }
 type PerformanceRun = Pick<Output, "id" | "name" | "status">
+type QueuedBuild = { parent_id: string; name: string; revision: string; status: "waiting" | "started" | "paused"; id?: string; reason?: string }
 const chatName = new URLSearchParams(location.search).get("chat")
 
 function App() {
@@ -59,6 +60,9 @@ function App() {
   const [queuedFeedback, setQueuedFeedback] = useState<Record<string, { name: string; message: string; paused?: string }>>({})
   const queuedIds = useRef(new Set<string>())
   const stoppedIds = useRef(new Set<string>())
+  const [queuedBuilds, setQueuedBuilds] = useState<QueuedBuild[] | null>(null)
+  const [queueError, setQueueError] = useState("")
+  const [queueRefresh, setQueueRefresh] = useState(0)
   const [optimization, setOptimization] = useState<Output | null>(null)
   const [performanceBusy, setPerformanceBusy] = useState(false)
   const performanceSubmitting = useRef(false)
@@ -91,14 +95,16 @@ function App() {
   const historical = retainedView?.output
   const output = outputView === "optimization" ? optimization : historical ?? fileOutput
   const actionBusy = busy && !saving?.automatic
-  const canContinue = !!output && !historical && outputView === "file" && execution && !busy && !queuedFeedback[output.id] && output.status === "completed" && !output.recoverable && output.continuable === true
-  const canQueueFeedback = !!output && !historical && outputView === "file" && execution && !actionBusy && !queuedFeedback[output.id] && !stoppedIds.current.has(output.id) && output.continuable === true && (output.status === "running" || (output.status === "completed" && !output.recoverable))
+  const queuedEditorForFile = queuedBuilds?.some((item) => item.name === active && item.status !== "started") ?? false
+  const canContinue = !!output && !historical && outputView === "file" && execution && !busy && !queuedEditorForFile && !queuedFeedback[output.id] && output.status === "completed" && !output.recoverable && output.continuable === true
+  const canQueueFeedback = !!output && !historical && outputView === "file" && execution && !actionBusy && !queuedEditorForFile && !queuedFeedback[output.id] && !stoppedIds.current.has(output.id) && output.continuable === true && (output.status === "running" || (output.status === "completed" && !output.recoverable))
   const message = output ? feedback[output.id] ?? "" : ""
   const blockingRuns = Object.values(outputs).filter((item) => item.recoverable)
   const pendingRuns = blockingRuns.map((item) => item.id).join(",")
   const performanceBlockers = [...(performanceRuns ?? []).filter((run) => run.id !== optimization?.id), ...(optimization?.recoverable ? [optimization] : [])]
   const performanceBlocked = !performanceRecovered || performanceRuns === null || !!performanceListError || !!performanceBlockers.length
-  const queuedForFile = Object.values(queuedFeedback).some((item) => item.name === active)
+  const queuedForFile = queuedEditorForFile || Object.values(queuedFeedback).some((item) => item.name === active)
+  const canQueueBuild = !!queuedBuilds && !queueError && !!fileOutput?.recoverable && fileOutput.continuable && !stoppedIds.current.has(fileOutput.id)
 
   async function api<T>(path: string, body?: unknown, method = "POST", signal?: AbortSignal): Promise<T> {
     // Every cancellation surface must revoke queued execution before any network I/O.
@@ -120,7 +126,9 @@ function App() {
       })()
       throw Object.assign(new Error(message || `HTTP ${response.status}`), { status: response.status })
     }
-    return response.json() as Promise<T>
+    const result = await response.json()
+    if (typeof result?.queue_error === "string") setError(`Stop requested, but queued build revocation could not be confirmed: ${result.queue_error}. Check the saved build queue before leaving.`)
+    return result as T
   }
 
   function fail(error: unknown) {
@@ -267,10 +275,43 @@ function App() {
     return () => { cancelled = true; timers.forEach(clearTimeout) }
   }, [pendingRuns, loadingOutput, token])
 
+  const associateQueuedBuilds = useEffectEvent(async (items: QueuedBuild[], signal: AbortSignal) => {
+    for (const item of items) {
+      if (item.status !== "started" || !item.id || outputs[item.name]?.id !== item.parent_id) continue
+      // Read the latest association, not a stale queued child from an earlier build.
+      const latest = await api<Output | null>(`/files/${encodeURIComponent(item.name)}/run`, undefined, "GET", signal)
+      if (signal.aborted) return
+      if (latest && latest.name === item.name && latest.id !== item.parent_id) {
+        setOutputs((previous) => previous[item.name]?.id === item.parent_id ? { ...previous, [item.name]: latest } : previous)
+      }
+    }
+  })
+  useEffect(() => {
+    if (!connected || chatName) return
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    async function poll() {
+      try {
+        const items = await api<QueuedBuild[]>("/queued-builds", undefined, "GET", controller.signal)
+        if (controller.signal.aborted) return
+        setQueuedBuilds(items)
+        await associateQueuedBuilds(items, controller.signal)
+        if (!controller.signal.aborted) setQueueError("")
+      } catch (error) {
+        if (controller.signal.aborted) return
+        setQueueError(`Could not check saved build queue: ${error instanceof Error ? error.message : String(error)}. Queued work may still execute; refresh before resubmitting.`)
+      }
+      if (!controller.signal.aborted) timer = setTimeout(() => void poll(), 2000)
+    }
+    void poll()
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [connected, token, queueRefresh])
+
   const dispatchQueuedFeedback = useEffectEvent(() => {
     if (!connected || !execution || busy || submitting.current || settings || analytics) return
     for (const [id, queued] of Object.entries(queuedFeedback)) {
       if (queued.paused || !queuedIds.current.has(id) || stoppedIds.current.has(id)) continue
+      if (queuedBuilds?.some((item) => item.name === queued.name && item.status !== "started")) continue
       const current = outputs[queued.name]
       if (!current || current.id !== id || (!current.recoverable && current.status !== "completed")) {
         setQueuedFeedback((items) => ({ ...items, [id]: { ...queued, paused: "The original run changed or did not complete successfully. Feedback was not sent." } }))
@@ -282,7 +323,7 @@ function App() {
       }
     }
   })
-  useEffect(() => { dispatchQueuedFeedback() }, [queuedFeedback, outputs, connected, execution, busy, settings, analytics])
+  useEffect(() => { dispatchQueuedFeedback() }, [queuedFeedback, queuedBuilds, outputs, connected, execution, busy, settings, analytics])
 
   useEffect(() => {
     if (follow && log.current) log.current.scrollTop = log.current.scrollHeight
@@ -483,8 +524,10 @@ function App() {
     if (active === item.name) setActive(remaining.at(-1)?.name ?? "")
   }
 
-  async function save(mode: "file" | "build" | "repository" = "file", automatic = false) {
+  async function save(mode: "file" | "build" | "queue" | "repository" = "file", automatic = false) {
     if (settings || analytics || !tab || busy || submitting.current || (mode !== "file" && queuedForFile)) return
+    const parent = mode === "queue" ? fileOutput : null
+    if (mode === "queue" && (!parent || !canQueueBuild)) return
     submitting.current = true
     setBusy(true)
     setError("")
@@ -499,6 +542,12 @@ function App() {
       setNotice(`Saved ${document.name}`)
       await refresh().catch(fail)
       if (mode === "file") return
+      if (parent) {
+        const item = await api<QueuedBuild>(`/runs/${parent.id}/queued-build`, { name: document.name, revision: document.revision })
+        setQueuedBuilds((items) => [...(items ?? []).filter((queued) => queued.parent_id !== item.parent_id), item])
+        setNotice(`Saved and queued ${document.name}. This snapshot runs after confirmed successful finalization, even if this page closes. Later edits are not included.`)
+        return
+      }
       const job = await api<{ id: string }>(mode === "repository" ? "/repository/save" : "/runs", { name: document.name, revision: document.revision })
       setOutputs((items) => ({ ...items, [document.name]: { ...job, name: document.name, output: "Starting…", status: "running", truncated: false, recoverable: true, continuable: mode !== "repository" } }))
       setOutputView("file")
@@ -510,12 +559,26 @@ function App() {
         setNotice(`Autosave paused for ${tab.name}. Use Save to retry.`)
       }
       fail(automatic ? `Autosave failed for ${tab.name}: ${error instanceof Error ? error.message : String(error)}` : error)
-    } finally { submitting.current = false; setSaving(null); setBusy(false) }
+    } finally { if (parent) setQueueRefresh((value) => value + 1); submitting.current = false; setSaving(null); setBusy(false) }
   }
 
   function requestBuild() {
-    if (settings || analytics || !tab || busy || submitting.current || !execution || queuedForFile || fileOutput?.recoverable) return
-    if (window.confirm("Send this saved spec over SSH and run remote spec build? Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.")) void save("build")
+    if (settings || analytics || !tab || busy || submitting.current || !execution || queuedForFile || (fileOutput?.recoverable && !canQueueBuild)) return
+    const queue = !!fileOutput?.recoverable
+    const action = queue ? "Save and queue this editor snapshot for a fresh spec build after the current build finishes successfully? The queue survives page closure and server restart. Later saves do not replace this snapshot. Failure or Stop pauses the queue." : "Send this saved spec over SSH and run remote spec build?"
+    if (window.confirm(`${action} Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.`)) void save(queue ? "queue" : "build")
+  }
+
+  async function removeQueuedBuild(item: QueuedBuild) {
+    if (busy || submitting.current) return
+    submitting.current = true
+    setBusy(true)
+    try {
+      await api(`/runs/${item.parent_id}/queued-build`, {}, "DELETE")
+      setQueuedBuilds((items) => items?.filter((queued) => queued.parent_id !== item.parent_id) ?? null)
+      setNotice(`Removed queued entry for ${item.name}. If dispatch already started, use Stop run to cancel its build.`)
+    } catch (error) { fail(error) }
+    finally { setQueueRefresh((value) => value + 1); submitting.current = false; setBusy(false) }
   }
 
   useEffect(() => {
@@ -744,7 +807,20 @@ function App() {
               setTabs((items) => items.map((item) => item.name === editor.name ? { ...item, content } : item))
             }} />)}
             {!tab && <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
-            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || queuedForFile || fileOutput?.recoverable} title="Save & run (Ctrl/Cmd+Enter)" aria-keyshortcuts="Control+Enter Meta+Enter" onClick={requestBuild}>Save & run ↗</button></div></footer>
+            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || queuedForFile || (!!fileOutput?.recoverable && !canQueueBuild)} title={fileOutput?.recoverable ? "Save & run: queue snapshot until successful finalization (Ctrl/Cmd+Enter)" : "Save & run (Ctrl/Cmd+Enter)"} aria-keyshortcuts="Control+Enter Meta+Enter" onClick={requestBuild}>Save & run ↗</button></div></footer>
+            {fileOutput?.recoverable && <p className="hint">Save &amp; run queues the saved editor snapshot until this build finishes successfully. Save and autosave never schedule execution.</p>}
+            {(!!queuedBuilds?.length || !!queueError) && <section className="build-feedback chat-composer" aria-label="Saved build queue">
+              <strong>Saved build queue</strong>
+              <span>Snapshots are stored on the server and survive closing this page. One per parent run. Later saves do not change them.</span>
+              {queueError && <p>{queueError}</p>}
+              {queuedBuilds?.map((item) => <div key={item.parent_id}>
+                <strong>{item.name}</strong>
+                <p style={{ overflowWrap: "anywhere" }}>Revision <code>{item.revision.slice(0, 12)}</code> / {item.status}{item.reason ? `: ${item.reason}` : item.status === "waiting" ? ": waiting for successful finalization and no conflicting runs" : ""}</p>
+                {item.id && <p style={{ overflowWrap: "anywhere" }}>Build: <code>{item.id}</code></p>}
+                <button disabled={busy} onClick={() => void removeQueuedBuild(item)}>{item.status === "waiting" ? "Cancel queued build" : "Dismiss queued build"} for {item.name}</button>
+              </div>)}
+              <button disabled={busy} onClick={() => setQueueRefresh((value) => value + 1)}>Refresh saved build queue</button>
+            </section>}
             {execution && <div className="repository-controls">
               <span>{repositoryError || (repository?.connected ? `${repository.directory} / ${repository.dirty ? "Uncommitted changes" : "No uncommitted changes"}` : repository ? "No repository connected in the remote directory." : "Checking remote repository...")}</span>
               {repository?.connected && repository.dirty && <button disabled={!tab?.content.trim() || busy || queuedForFile || !!pendingRuns} title={`Use ${repository.model} with the existing repository workflow`} onClick={() => {

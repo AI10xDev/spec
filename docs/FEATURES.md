@@ -79,6 +79,21 @@ With `SPEC_SSH_TARGET` and `SPEC_SSH_WORKSPACE` set on the **local** Rust server
 
 A failure to launch the local SSH client is reported immediately. SSH connection/authentication and remote startup errors appear in the run output. An SSH attachment exit 255 leaves remote completion unconfirmed; it is not proof the remote command failed. A verified remote exit status is shown as completed or failed; completion means **CLI exit success**, not independent verification that generated software is correct. Snapshot creation must succeed before launch; the snapshot is removed after process cleanup. Some remote launchers strip trailing newlines when reading the prompt.
 
+### Queue saved editor follow-ups
+
+During an active supported build, **Save & run** (or **Ctrl+Enter / Cmd+Enter**) offers to save and queue the current editor snapshot instead of starting overlapping work. Ordinary Save and autosave still never schedule execution.
+
+- The backend captures the acknowledged saved revision, not a later editor buffer. Later edits and autosaves do not replace queued instructions or get overwritten when the queue dispatches.
+- One snapshot may be queued per parent run. The **Saved build queue** shows its filename, revision, and waiting, started, or paused state. Cancel the entry before replacing it.
+- Snapshots persist in private local `.spec-output/` storage. Execution does not require the browser to stay open; restarting the backend resumes waiting entries with the same remote configuration.
+- A fresh spec build starts only after authoritative successful parent completion, attachment cleanup, and conflicting runs have resolved. Unknown remote status waits; failed or stopped parents pause the entry. A changed latest-run association or remote configuration also prevents dispatch.
+- **Cancel queued build** removes waiting work; dismissing an already-started entry does not stop its child. Use **Stop run** for a dispatched build. Stop on the parent revokes its queued work even if final success races the cancellation.
+- An uncertain launch is never automatically resubmitted. Inspect the recorded child output before scheduling another build. The queue holds up to 32 entries, with a maximum 120 KiB per snapshot; dismiss old entries to release space.
+
+This differs from the answer-area chat follow-up queue: chat messages continue the same agent session and remain page-local. Saved editor follow-ups execute a fresh build using the preserved spec snapshot, including its completion markers.
+
+API: `GET /api/queued-builds` lists queue metadata; `POST /api/runs/{id}/queued-build` accepts `{name, revision}`; `DELETE /api/runs/{id}/queued-build` removes that parent's entry without cancelling an already-started child. All require the existing server token.
+
 ### Run limits and lifecycle
 
 Builds (including continuations), repository saves, and [optimization](../REFERENCE.md#output-and-safety) have no overall supervisor runtime limit or UI attachment deadline. Ordinary builds and repository saves cap agent output; optimization output remains uncapped and has separate retention rules.

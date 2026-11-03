@@ -25,6 +25,9 @@ mod analytics_tests;
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
 
+#[path = "queued_build_tests.rs"]
+mod queued_build_tests;
+
 pub(super) fn app(root: &FsPath) -> App {
     App {
         root: root.to_owned(),

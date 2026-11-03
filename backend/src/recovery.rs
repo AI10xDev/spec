@@ -16,7 +16,7 @@ pub(super) async fn run_gate(app: &App, id: &str) -> tokio::sync::OwnedMutexGuar
     gate.lock_owned().await
 }
 
-fn valid_id(id: &str) -> Result<()> {
+pub(super) fn valid_id(id: &str) -> Result<()> {
     if !Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id) {
         return Err(invalid("Invalid run ID"));
     }
@@ -25,7 +25,7 @@ fn valid_id(id: &str) -> Result<()> {
 
 // Anchor all subsequent access to the opened directory, not a re-resolved path.
 // The workspace is already protected by the server's exclusive lock.
-fn directory(app: &App, create: bool) -> Result<File> {
+pub(super) fn directory(app: &App, create: bool) -> Result<File> {
     let path = app.root.join(if app.performance {
         ".performance-output"
     } else {
@@ -64,7 +64,7 @@ fn path(directory: &File, name: &str) -> PathBuf {
     PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())).join(name)
 }
 
-fn bytes(directory: &File, name: &str, limit: usize) -> Result<Vec<u8>> {
+pub(super) fn bytes(directory: &File, name: &str, limit: usize) -> Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
@@ -82,7 +82,7 @@ fn bytes(directory: &File, name: &str, limit: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn atomic(directory: &File, name: &str, bytes: &[u8]) -> Result<()> {
+pub(super) fn atomic(directory: &File, name: &str, bytes: &[u8]) -> Result<()> {
     // Refuse unsafe pre-existing destinations rather than silently repairing them.
     match fs::symlink_metadata(path(directory, name)) {
         Ok(metadata) => private(&metadata, false)?,

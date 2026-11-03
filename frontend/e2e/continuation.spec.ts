@@ -49,6 +49,7 @@ const completed = { id: "prior-harness", name: "first.md", status: "completed", 
 const running = { ...completed, status: "running", recoverable: true }
 const second = { ...completed, id: "other-harness", name: "second.md", output: "Independent second-file logs" }
 const buttonName = "Use recommended & continue"
+const savedBuild = { parent_id: running.id, name: "first.md", revision: "acknowledged-snapshot", status: "waiting" }
 
 async function workspace(page: Page, output: (Output & { continuable?: boolean }) | null = completed, execution = true) {
   const writes: { path: string; method: string; body: unknown }[] = []
@@ -68,6 +69,7 @@ async function workspace(page: Page, output: (Output & { continuable?: boolean }
     if (pathname === "/api/repository") return route.fulfill({ json: { connected: true, dirty: true, directory: "/fixture", model: "fixture-model" } })
     if (pathname === "/api/performance") return route.fulfill({ json: null })
     if (pathname === "/api/performance/runs") return route.fulfill({ json: [] })
+    if (pathname === "/api/queued-builds") return route.fulfill({ json: [] })
     for (const name of ["first.md", "second.md"]) {
       if (pathname === `/api/files/${name}`) return route.fulfill({ json: { name, content: `Saved ${name}`, revision: "revision-1" } })
       if (pathname === `/api/files/${name}/run` || pathname === `/api/files/${name}/run/log`) return route.fulfill({ json: name === "first.md" ? output : second })
@@ -741,6 +743,8 @@ test("feedback validation and failed requests retain the draft and original logs
 })
 
 test("Save & run hotkey shares confirmation and guards with the button", async ({ page }) => {
+  await page.clock.install()
+  await page.clock.pauseAt(new Date(Date.now() + 1000))
   const { writes, dialogs } = await workspace(page)
   const editor = page.getByRole("textbox", { name: "Edit first.md" })
   await editor.fill("Snapshot from shortcut")
@@ -760,12 +764,303 @@ test("Save & run hotkey shares confirmation and guards with the button", async (
   await page.route("**/api/runs/shortcut-harness", (route) => route.fulfill({ json: { ...completed, id: "shortcut-harness", status: "running", recoverable: true, output: "Running shortcut" } }))
   await editor.press("Meta+Enter")
   await expect(page.getByLabel("Run output")).toHaveText("Running shortcut")
-  await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Save & run" })).toBeEnabled()
+  const queued = { ...savedBuild, parent_id: "shortcut-harness", revision: "saved-shortcut" }
+  await page.route("**/api/queued-builds", (route) => route.fulfill({ json: [queued] }))
+  await page.route("**/api/runs/shortcut-harness/queued-build", (route) => route.fulfill({ json: queued }))
   await editor.press("Control+Enter")
+  await expect(page.getByRole("region", { name: "Saved build queue" })).toContainText("waiting")
+  await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+  await editor.press("Meta+Enter")
   expect(writes).toEqual([
     { path: "/api/files/first.md", method: "PUT", body: { content: "Snapshot from shortcut", revision: "revision-1" } },
     { path: "/api/runs", method: "POST", body: { name: "first.md", revision: "saved-shortcut" } },
+    { path: "/api/files/first.md", method: "PUT", body: { content: "Snapshot from shortcut", revision: "saved-shortcut" } },
+    { path: "/api/runs/shortcut-harness/queued-build", method: "POST", body: { name: "first.md", revision: "saved-shortcut" } },
   ])
+})
+
+test.describe("saved editor queue", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.clock.install()
+    await page.clock.pauseAt(new Date(Date.now() + 1000))
+  })
+
+  test("active-run execution stays blocked until the saved queue list loads successfully", async ({ page }) => {
+    const { writes, dialogs } = await workspace(page, running)
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    let available = false
+    await page.route("**/api/queued-builds", async (route) => {
+      await held
+      return available ? route.fulfill({ json: [] }) : route.fulfill({ status: 503, json: { error: "Queue list unavailable" } })
+    })
+    try {
+      await page.reload()
+      await expect(page.getByLabel("Run output")).toHaveText(running.output)
+      await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+      await page.getByRole("textbox", { name: "Edit first.md" }).press("Control+Enter")
+      expect(dialogs).toEqual([])
+      expect(writes).toEqual([])
+    } finally { release() }
+    const queue = page.getByRole("region", { name: "Saved build queue" })
+    await expect(queue).toContainText("Queue list unavailable")
+    await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+    await page.getByRole("textbox", { name: "Edit first.md" }).press("Meta+Enter")
+    expect(dialogs).toEqual([])
+    expect(writes).toEqual([])
+    available = true
+    await page.clock.runFor(2000)
+    await expect(queue).toBeHidden()
+    await expect(page.getByRole("button", { name: "Save & run" })).toBeEnabled()
+  })
+
+  test("declining button and hotkey confirmation writes nothing", async ({ page }) => {
+    const { writes, dialogs } = await workspace(page, running)
+    const editor = page.getByRole("textbox", { name: "Edit first.md" })
+    await editor.fill("Unapproved snapshot")
+    await page.getByRole("button", { name: "Save & run" }).click()
+    await editor.press("Control+Enter")
+    expect(dialogs).toHaveLength(2)
+    for (const message of dialogs) {
+      expect(message).toMatch(/queue this editor snapshot.*current build finishes successfully/)
+      expect(message).toContain("survives page closure and server restart")
+      expect(message).toContain("Later saves do not replace this snapshot")
+      expect(message).toContain("provider costs")
+    }
+    await expect(editor).toHaveValue("Unapproved snapshot")
+    await expect(page.getByLabel("Run output")).toHaveText(running.output)
+    await expect(page.getByRole("region", { name: "Saved build queue" })).toBeHidden()
+    expect(writes).toEqual([])
+  })
+
+  test("held save queues only its acknowledged revision and original parent, retaining newer edits and logs", async ({ page }) => {
+    const { writes, errors } = await workspace(page, running)
+    page.removeAllListeners("dialog")
+    const dialogs: string[] = []
+    page.on("dialog", async (dialog) => { dialogs.push(dialog.message()); await dialog.accept() })
+    const editor = page.getByRole("textbox", { name: "Edit first.md" })
+    const build = page.getByRole("button", { name: "Save & run" })
+    const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+    await editor.fill("Snapshot approved for execution")
+    await feedback.fill("Do not send competing chat")
+    await page.getByLabel("Follow output").uncheck()
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    await page.route("**/api/files/first.md", async (route) => {
+      await held
+      await route.fulfill({ json: { name: "first.md", content: "Snapshot approved for execution", revision: savedBuild.revision } })
+    })
+    let queued = false
+    await page.route("**/api/queued-builds", (route) => route.fulfill({ json: queued ? [savedBuild] : [] }))
+    await page.route("**/api/runs/prior-harness/queued-build", (route) => {
+      queued = true
+      return route.fulfill({ json: savedBuild })
+    })
+    try {
+      await build.evaluate((element: HTMLButtonElement) => { element.click(); element.click() })
+      await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled()
+      await expect(build).toBeDisabled()
+      await expect(page.getByRole("button", { name: "Queue follow-up", exact: true })).toBeDisabled()
+      await expect(page.getByLabel("Run output")).toHaveText(running.output)
+      await editor.press("Control+Enter")
+      await editor.fill("Newer edits must not enter the snapshot")
+      // Change the displayed association while PUT is pending: enqueue still belongs to the captured parent.
+      await page.route("**/api/files/first.md/run/log", (route) => route.fulfill({ json: { ...running, id: "replacement-parent", output: "Replacement association" } }))
+      await page.getByRole("button", { name: "Load nohup output" }).click()
+      await expect(page.getByLabel("Run output")).toHaveText("Replacement association")
+      expect(writes).toEqual([{ path: "/api/files/first.md", method: "PUT", body: { content: "Snapshot approved for execution", revision: "revision-1" } }])
+    } finally { release() }
+    await expect(page.getByRole("status")).toContainText("Saved and queued first.md")
+    await expect(page.getByRole("region", { name: "Saved build queue" })).toContainText(savedBuild.revision.slice(0, 12))
+    await expect(editor).toHaveValue("Newer edits must not enter the snapshot")
+    await expect(page.getByRole("region", { name: "Spec editing pane" }).getByText("Unsaved", { exact: true })).toBeVisible()
+    await expect(page.getByLabel("Run output")).toHaveText("Replacement association")
+    await expect(page.getByLabel("Follow output")).not.toBeChecked()
+    await expect(build).toBeDisabled()
+    await expect(page.getByRole("button", { name: "Queue follow-up", exact: true })).toBeDisabled()
+    await feedback.press("Enter")
+    await editor.press("Meta+Enter")
+    expect(dialogs).toHaveLength(1)
+    expect(writes).toEqual([
+      { path: "/api/files/first.md", method: "PUT", body: { content: "Snapshot approved for execution", revision: "revision-1" } },
+      { path: "/api/runs/prior-harness/queued-build", method: "POST", body: { name: "first.md", revision: savedBuild.revision } },
+    ])
+    expect(errors).toEqual([])
+  })
+
+  test("queued chat blocks editor execution until canceled", async ({ page }) => {
+    const { writes, dialogs } = await workspace(page, running)
+    const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+    await feedback.fill("Only continue this session")
+    await feedback.press("Enter")
+    await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+    await page.getByRole("textbox", { name: "Edit first.md" }).press("Control+Enter")
+    await expect(page.getByRole("region", { name: "Saved build queue" })).toBeHidden()
+    await page.getByRole("button", { name: "Cancel queued follow-up for first.md", exact: true }).click()
+    await expect(page.getByRole("button", { name: "Save & run" })).toBeEnabled()
+    expect(writes).toEqual([])
+    expect(dialogs).toEqual([])
+  })
+
+  test("server dispatch in a background tab recovers the latest association without changing either editor", async ({ page }) => {
+    const { writes, errors } = await workspace(page, running)
+    const queue = page.getByRole("region", { name: "Saved build queue" })
+    let started = false
+    let polls = 0
+    await page.route("**/api/queued-builds", (route) => {
+      polls++
+      return route.fulfill({ json: [{ ...savedBuild, ...(started ? { status: "started", id: "queued-child" } : {}) }] })
+    })
+    await page.clock.runFor(2000)
+    await expect(queue).toContainText("waiting")
+    await expect(page.getByLabel("Run output")).toHaveText(running.output)
+    await page.getByRole("textbox", { name: "Edit first.md" }).fill("Independent first buffer")
+    await page.getByRole("tabpanel").getByRole("button", { name: /second\.md/ }).click()
+    await page.getByRole("textbox", { name: "Edit second.md" }).fill("Independent second buffer")
+    // Keep autosave out of this association-only test while advancing server polls.
+    await page.evaluate(() => window.dispatchEvent(new Event("blur")))
+    const latest = { ...completed, id: "newer-than-queued-child", output: "Latest first-file build" }
+    await page.route("**/api/files/first.md/run", (route) => route.fulfill({ json: latest }))
+    started = true
+    const recovered = page.waitForResponse("**/api/files/first.md/run")
+    await page.clock.runFor(2000)
+    await recovered
+    await expect(queue).toContainText("started")
+    await expect(page.getByLabel("Run output")).toHaveText(second.output)
+    await expect(page.getByRole("textbox", { name: "Edit second.md" })).toHaveValue("Independent second buffer")
+    await page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button", { name: /^first\.md/ }).click()
+    await expect(page.getByLabel("Run output")).toHaveText(latest.output)
+    await expect(page.getByRole("textbox", { name: "Edit first.md" })).toHaveValue("Independent first buffer")
+    await expect(queue.getByRole("button", { name: "Dismiss queued build for first.md" })).toBeVisible()
+    expect(polls).toBe(2)
+    expect(writes).toEqual([])
+    expect(errors).toEqual([])
+  })
+
+  test("saved queue is restored from the server after reload and cancel only deletes the queue entry", async ({ page }) => {
+    const { writes, dialogs } = await workspace(page, running)
+    page.removeAllListeners("dialog")
+    page.on("dialog", (dialog) => dialog.accept())
+    let items: typeof savedBuild[] = []
+    let polls = 0
+    await page.route("**/api/queued-builds", (route) => { polls++; return route.fulfill({ json: items }) })
+    await page.route("**/api/files/first.md", (route) => route.fulfill({ json: { name: "first.md", content: "Saved first.md", revision: savedBuild.revision } }))
+    await page.route("**/api/runs/prior-harness/queued-build", (route) => {
+      items = route.request().method() === "DELETE" ? [] : [savedBuild]
+      return route.fulfill({ json: items[0] ?? { ok: true } })
+    })
+    await page.getByRole("button", { name: "Save & run" }).click()
+    const queue = page.getByRole("region", { name: "Saved build queue" })
+    await expect(queue).toContainText("waiting")
+    await expect(page.getByLabel("Run output")).toHaveText(running.output)
+    const beforeReload = polls
+    await page.reload()
+    await expect(queue).toContainText(savedBuild.revision.slice(0, 12))
+    expect(polls).toBeGreaterThan(beforeReload)
+    await expect(page.getByRole("textbox", { name: "Edit first.md" })).toHaveValue("Saved first.md")
+    await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+    await queue.getByRole("button", { name: "Cancel queued build for first.md" }).click()
+    await expect(queue).toBeHidden()
+    await expect(page.getByRole("button", { name: "Save & run" })).toBeEnabled()
+    await page.clock.runFor(6000)
+    await expect(queue).toBeHidden()
+    await expect(page.getByLabel("Run output")).toHaveText(running.output)
+    expect(writes).toEqual([
+      { path: "/api/files/first.md", method: "PUT", body: { content: "Saved first.md", revision: "revision-1" } },
+      { path: "/api/runs/prior-harness/queued-build", method: "POST", body: { name: "first.md", revision: savedBuild.revision } },
+      { path: "/api/runs/prior-harness/queued-build", method: "DELETE", body: {} },
+    ])
+    expect(dialogs).toEqual([])
+  })
+
+  for (const failure of ["save", "enqueue"]) {
+    test(`${failure} errors retain logs and never automatically retry enqueue`, async ({ page }) => {
+      const { writes } = await workspace(page, running)
+      page.removeAllListeners("dialog")
+      page.on("dialog", (dialog) => dialog.accept())
+      const editor = page.getByRole("textbox", { name: "Edit first.md" })
+      await editor.fill("Snapshot with failed request")
+      await page.route("**/api/files/first.md", (route) => failure === "save"
+        ? route.fulfill({ status: 409, json: { error: "Save revision conflict" } })
+        : route.fulfill({ json: { name: "first.md", content: "Snapshot with failed request", revision: savedBuild.revision } }))
+      await page.route("**/api/runs/prior-harness/queued-build", (route) => route.fulfill({ status: 503, json: { error: "Enqueue result unavailable" } }))
+      await page.getByRole("button", { name: "Save & run" }).click()
+      await expect(page.getByRole("alert")).toContainText(failure === "save" ? "Save revision conflict" : "Enqueue result unavailable")
+      await page.clock.runFor(10_000)
+      await expect(page.getByLabel("Run output")).toHaveText(running.output)
+      await expect(editor).toHaveValue("Snapshot with failed request")
+      await expect(page.getByRole("region", { name: "Saved build queue" })).toBeHidden()
+      expect(writes).toEqual([
+        { path: "/api/files/first.md", method: "PUT", body: { content: "Snapshot with failed request", revision: "revision-1" } },
+        ...(failure === "enqueue" ? [{ path: "/api/runs/prior-harness/queued-build", method: "POST", body: { name: "first.md", revision: savedBuild.revision } }] : []),
+      ])
+    })
+  }
+
+  for (const state of ["paused", "remote unavailable"]) {
+    test(`${state} queue never client-dispatches a build, even after parent completion`, async ({ page }) => {
+      const { writes } = await workspace(page, running)
+      const item = { ...savedBuild, ...(state === "paused" ? { status: "paused", reason: "Parent stopped; explicit action required" } : {}) }
+      let unavailable = false
+      await page.route("**/api/queued-builds", (route) => unavailable
+        ? route.fulfill({ status: 503, json: { error: "Remote unavailable" } })
+        : route.fulfill({ json: [item] }))
+      await page.clock.runFor(2000)
+      const queue = page.getByRole("region", { name: "Saved build queue" })
+      await expect(queue).toContainText(item.status)
+      await page.route("**/api/runs/prior-harness", (route) => route.fulfill({ json: completed }))
+      unavailable = state === "remote unavailable"
+      await page.clock.runFor(10_000)
+      await expect(page.getByLabel("Run output")).toHaveText(completed.output)
+      await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+      if (unavailable) await expect(queue).toContainText("Could not check saved build queue: Remote unavailable")
+      else await expect(queue).toContainText(item.reason!)
+      await page.getByRole("textbox", { name: "Edit first.md" }).press("Control+Enter")
+      expect(writes).toEqual([])
+      if (!unavailable) {
+        await page.route("**/api/runs/prior-harness/queued-build", (route) => route.fulfill({ json: { ok: true } }))
+        await page.route("**/api/queued-builds", (route) => route.fulfill({ json: [] }))
+        await queue.getByRole("button", { name: "Dismiss queued build for first.md" }).click()
+        await expect(queue).toBeHidden()
+        expect(writes).toEqual([{ path: "/api/runs/prior-harness/queued-build", method: "DELETE", body: {} }])
+      }
+    })
+  }
+
+  test("Stop reports queue revocation errors even when cancellation was requested", async ({ page }) => {
+    const { writes } = await workspace(page, running)
+    await page.route("**/api/runs/prior-harness/cancel", (route) => route.fulfill({ json: { ok: true, queue_error: "Queue storage unavailable" } }))
+    await page.getByRole("button", { name: "Stop run", exact: true }).click()
+    await expect(page.getByRole("alert")).toContainText("Stop requested, but queued build revocation could not be confirmed: Queue storage unavailable")
+    expect(writes).toEqual([{ path: "/api/runs/prior-harness/cancel", method: "POST", body: {} }])
+  })
+
+  test("plain Save and focused autosave never enqueue or replace a saved snapshot", async ({ page }) => {
+    const { writes, dialogs } = await workspace(page, running)
+    const editor = page.getByRole("textbox", { name: "Edit first.md" })
+    let revision = 1
+    await page.route("**/api/files/first.md", (route) => route.fulfill({ json: { name: "first.md", content: route.request().postDataJSON().content, revision: `revision-${++revision}` } }))
+    await editor.fill("Plain saved content")
+    await page.getByRole("button", { name: "Save", exact: true }).click()
+    await expect(page.getByRole("status")).toHaveText("Saved first.md")
+    await page.route("**/api/queued-builds", (route) => route.fulfill({ json: [savedBuild] }))
+    await page.clock.runFor(2000)
+    const queue = page.getByRole("region", { name: "Saved build queue" })
+    await expect(queue).toContainText(savedBuild.revision.slice(0, 12))
+    await editor.fill("Autosaved later content")
+    await page.clock.runFor(500)
+    await expect(page.getByRole("region", { name: "Spec editing pane" }).getByText("Saved", { exact: true })).toBeVisible()
+    await page.clock.runFor(6000)
+    await expect(editor).toHaveValue("Autosaved later content")
+    await expect(queue).toContainText(savedBuild.revision.slice(0, 12))
+    await expect(page.getByLabel("Run output")).toHaveText(running.output)
+    expect(writes).toEqual([
+      { path: "/api/files/first.md", method: "PUT", body: { content: "Plain saved content", revision: "revision-1" } },
+      { path: "/api/files/first.md", method: "PUT", body: { content: "Autosaved later content", revision: "revision-2" } },
+    ])
+    expect(dialogs).toEqual([])
+  })
 })
 
 test("syntax lines and log colors are display-only and safely render HTML as text", async ({ page }) => {

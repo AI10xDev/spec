@@ -61,6 +61,7 @@ async function workspace(page: Page, options: { content?: string; completion?: b
     else if (endpoint === "/repository") json = { connected: true, dirty: true, directory: "/fixture", model: "fixture" }
     else if (endpoint === "/performance") json = null
     else if (endpoint === "/performance/runs") json = []
+    else if (endpoint === "/queued-builds") json = []
     else if (endpoint.startsWith("/runs/")) json = options.runs?.find((item) => item.id === endpoint.split("/")[2]) ?? null
     else if (endpoint.endsWith("/run")) json = options.runs?.find((item) => item.name === endpoint.split("/")[2]) ?? null
     else if (endpoint.startsWith("/files/") && endpoint.slice(7) in files) {
@@ -260,7 +261,8 @@ for (const measured of [true, false]) {
     await expect(progress).toHaveAttribute("aria-valuetext", /progress may be stale/)
     await expect(progress).not.toHaveClass(/indeterminate/)
     await expect(page.locator(".output-pane .badge")).toHaveText("running (connection unavailable)")
-    await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
+    await expect(page.getByRole("button", { name: "Save & run" })).toBeEnabled()
+    await expect(page.getByRole("button", { name: "Save & run" })).toHaveAttribute("title", /queue snapshot until successful finalization/)
     await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeEnabled()
     await page.getByRole("button", { name: "Performance", exact: true }).click()
     await expect(page.getByRole("button", { name: "Run Gemma RL (built)", exact: true })).toBeEnabled()

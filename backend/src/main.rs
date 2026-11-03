@@ -35,6 +35,7 @@ mod azure_realtime;
 mod chat;
 mod completion;
 mod project_search;
+mod queued_builds;
 mod realtime;
 mod recovery;
 mod remote;
@@ -197,6 +198,7 @@ impl Default for Continue {
 
 enum RunInput {
     Build(Run),
+    Queued(String),
     RepositorySave(Run),
     Continue(String, String),
     Optimize(Optimize),
@@ -528,6 +530,10 @@ async fn repository_save(
 }
 
 async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>> {
+    let queued_parent = match &input {
+        RunInput::Queued(id) => Some(id.clone()),
+        _ => None,
+    };
     // Capture once per admission; never persist credentials with the job or snapshot.
     let performance = matches!(&input, RunInput::Performance(_));
     let project_optimization = matches!(&input, RunInput::ProjectOptimization(_));
@@ -569,13 +575,52 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
     for id in pending {
         recovery::refresh(&app, &id, false).await?;
     }
+    let _parent_guard = match &queued_parent {
+        Some(id) => Some(recovery::run_gate(&app, id).await),
+        None => None,
+    };
+    if let Some(id) = &queued_parent {
+        drop(recovery::restore(&app, id)?);
+        // Terminal, detached parents are absent from the recovery scan above.
+        // Retry their final checkpoint under the run gate before admission.
+        recovery::checkpoint(&app, id);
+        let ready_name = {
+            let jobs = recovery::restore(&app, id)?;
+            let parent = jobs.iter().find(|job| job.id == *id).unwrap();
+            (!parent.recover
+                && !parent.attached
+                && parent.persistence_error.is_none()
+                && parent.status == "completed"
+                && parent.remote_identity == remote.identity())
+            .then(|| parent.name.clone())
+        };
+        if let Some(name) = ready_name {
+            // A disconnected remote must leave the snapshot waiting, rather
+            // than consume its one launch attempt. Stop does not wait on this IO.
+            let (status, _, _) = remote
+                .snapshot(id, false, &name)
+                .await
+                .map_err(|error| Error(StatusCode::BAD_GATEWAY, error))?;
+            if status != "completed" {
+                return Ok(Json(serde_json::json!({"waiting": true})));
+            }
+        }
+    }
     let _recovery_guard = app.recovery_gate.lock().await;
     let parent_id = match &input {
         RunInput::Continue(id, _) => Some(id.clone()),
         _ => None,
     };
     let mut optimization_spec = String::new();
+    let mut queued_id = None;
     let (name, content, session_id) = match input {
+        RunInput::Queued(id) => {
+            let Some((name, content, child_id)) = queued_builds::prepare(&app, &id)? else {
+                return Ok(Json(serde_json::json!({"waiting": true})));
+            };
+            queued_id = Some(child_id);
+            (name, content, None)
+        }
         RunInput::ProjectOptimization(input) => {
             optimization_spec = serde_json::to_string(&input).unwrap();
             let support = serde_json::to_string(include_str!("optimize.py")).unwrap();
@@ -661,6 +706,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         let mut blockers = jobs.iter().filter(|job| {
             (job.recover || job.attached)
                 && (performance
+                    || queued_parent.is_some()
                     || repository_save
                     || optimization
                     || job.repository_save
@@ -691,9 +737,10 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             ));
         }
     }
-    let id = Uuid::new_v4().to_string();
+    let id = queued_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let (stop, mut stopped) = watch::channel(RunControl::Running);
     {
+        let _files = queued_parent.as_ref().map(|_| app.files.lock().unwrap());
         let mut jobs = app.jobs.lock().unwrap();
         if let Some(job) = jobs
             .iter()
@@ -726,6 +773,9 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
                 .position(|job| !job.recover && !job.attached)
                 .unwrap();
             jobs.remove(index);
+        }
+        if let Some(parent) = &queued_parent {
+            queued_builds::claim(&app, parent, &id)?;
         }
         let mut job = Job {
             id: id.clone(),
@@ -1062,18 +1112,39 @@ async fn output_log(
 
 async fn cancel(State(app): State<App>, Path(id): Path<String>) -> Result<Json<serde_json::Value>> {
     recovery::initialize(&app)?;
-    {
-        let jobs = recovery::restore(&app, &id)?;
-        let job = jobs
-            .iter()
-            .find(|job| job.id == id)
-            .ok_or_else(|| Error(StatusCode::NOT_FOUND, "Run not found".into()))?;
-        if job.attached && job.stop.send(RunControl::Cancel).is_ok() {
-            return Ok(Json(serde_json::json!({"ok": true})));
-        }
+    let queue_error = queued_builds::stop(&app, &id).err().map(|error| error.1);
+    if let Some(error) = &queue_error {
+        eprintln!("Run {id} queued build revocation: {error}");
     }
-    recovery::refresh(&app, &id, true).await?;
-    Ok(Json(serde_json::json!({"ok": true})))
+    // Queue persistence must never prevent an attempt to stop actual work.
+    let result = async {
+        {
+            let jobs = recovery::restore(&app, &id)?;
+            let job = jobs
+                .iter()
+                .find(|job| job.id == id)
+                .ok_or_else(|| Error(StatusCode::NOT_FOUND, "Run not found".into()))?;
+            if job.attached && job.stop.send(RunControl::Cancel).is_ok() {
+                return Ok(());
+            }
+        }
+        recovery::refresh(&app, &id, true).await
+    }
+    .await;
+    if let Err(mut error) = result {
+        if let Some(queue_error) = queue_error {
+            error.1 = format!(
+                "{}; queued build revocation also failed: {queue_error}",
+                error.1
+            );
+        }
+        return Err(error);
+    }
+    let mut response = serde_json::json!({"ok": true});
+    if let Some(error) = queue_error {
+        response["queue_error"] = error.into();
+    }
+    Ok(Json(response))
 }
 
 fn retained_remote<'a>(app: &'a App, name: &str) -> Result<&'a Remote> {
@@ -1181,6 +1252,11 @@ fn router(app: App) -> Router {
             get(retained_log),
         )
         .route("/api/runs", get(active_runs).post(start))
+        .route("/api/queued-builds", get(queued_builds::list))
+        .route(
+            "/api/runs/{id}/queued-build",
+            post(queued_builds::enqueue).delete(queued_builds::delete),
+        )
         .route("/api/optimize", get(latest_optimization).post(optimize))
         .route(
             "/api/projects/search",
@@ -1314,6 +1390,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             "WARNING: SSH spec build requests automatic tool approval (SPEC_BUILD_AUTO=1) with remote user privileges. Only run trusted specs."
         );
     }
+    let queue_worker = queued_builds::spawn(app.clone());
     let server = router(app.clone())
         .fallback_service(ServeDir::new(ui))
         .layer(middleware::from_fn(
@@ -1336,6 +1413,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let mut term =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
             tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
+            queue_worker.abort();
+            let _ = queue_worker.await;
             detach_and_wait(&app).await;
         })
         .await?;
