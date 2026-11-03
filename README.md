@@ -306,3 +306,8 @@ evidence that it worked.
 For more detail, see [Development workflows](docs/WORKFLOWS.md), the
 [workspace guide](docs/FEATURES.md), and
 [installation troubleshooting](docs/INSTALLATION.md#troubleshooting).
+
+## Direct Support
+
+Need help installing or using Spec? Visit [00z.ai](https://00z.ai) for direct
+support.
