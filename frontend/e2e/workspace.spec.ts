@@ -43,6 +43,9 @@ test.afterAll(async () => {
 })
 
 test.beforeEach(async ({ page, context }) => {
+  // Performance has its own contract; these tests exercise the real spec/file APIs.
+  await context.route("**/api/performance", (route) => route.fulfill({ json: null }))
+  await context.route("**/api/performance/runs", (route) => route.fulfill({ json: [] }))
   pageErrors = []
   const record = (error: Error) => pageErrors.push(error.message)
   page.on("pageerror", record)

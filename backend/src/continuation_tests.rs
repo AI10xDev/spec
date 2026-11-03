@@ -245,6 +245,12 @@ async fn continuation_invalid_feedback_is_rejected_before_ssh_or_persistence() {
     assert_eq!(
         fs::read_dir(root.path().join(".spec-runs"))
             .unwrap()
+            .filter(|entry| entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("run-"))
             .count(),
         1
     );
@@ -280,6 +286,12 @@ async fn continuation_local_spawn_failure_preserves_parent_and_allows_retry() {
     assert_eq!(
         fs::read_dir(root.path().join(".spec-runs"))
             .unwrap()
+            .filter(|entry| entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("run-"))
             .count(),
         1
     );
@@ -527,6 +539,12 @@ async fn continuation_legacy_missing_session_metadata_does_not_launch_or_overwri
     assert_eq!(
         fs::read_dir(root.path().join(".spec-runs"))
             .unwrap()
+            .filter(|entry| entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("run-"))
             .count(),
         1
     );

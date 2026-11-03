@@ -1,45 +1,62 @@
-# Performance Runner
-
-`backend/src/performance.py` runs the implemented dataset and model pipelines for
-an explicit project directory. It does not discover a previous build or require
-an `.opt`, `.optim`, or any other filename extension. This document describes the
-runner contract used by the Performance button.
+# Performance
 
 Click **Performance**, enter the remote **Project folder**, optionally select
-**Use current editor as spec**, then click **Run pipelines** and confirm trusted
-execution. Results appear in **Optimization** under **Output & logs**. This uses
-the same authenticated SSH transport, recovery, and **Stop run** controls as the
-existing optimizer, without requiring a previous build or an editor tab.
+**Use current editor as instructions**, then click **Run Gemma RL (built)** and
+confirm trusted execution. Results appear in **Performance output**. No editor tab
+or previous spec session is needed. Optional unsaved instructions accept prose or
+JSON with any filename extension, without saving the file locally (at most 1 MiB).
 
-The **Performance** button opens the form even while a run is unresolved, a save
-is in progress, or remote execution is disabled. Only **Run pipelines** is gated:
-the form explains the blocker and lists known run names, IDs, and statuses. Use
-**Inspect active runs** from the form to check them without launching anything.
-Opening the form never clears a guard or automatically retries a pipeline. If
-execution is disabled, configure `SPEC_SSH_TARGET` and `SPEC_SSH_WORKSPACE` on the
-backend and restart it; the form displays these instructions rather than leaving
-the header button unclickable.
+`backend/src/performance-session.py` starts a fresh builder session to inspect the
+project's existing documentation/configuration and run its built Gemma RL workflow
+(`gemma4-policy`), not distillation. The agent is instructed not to rebuild, download
+models/data, invent datasets/evaluators, or substitute synthetic results. Missing
+prerequisites must be reported rather than silently provisioned. These instructions
+are not a sandbox; authorized tools can modify remote files and incur costs.
 
-If another run blocks submission, **Active runs** in the header lists the backend's
-active/unresolved run IDs, filenames and last-known statuses. Select **Load output**
-to check the blocker even when its source file is unopened or deleted. Inspection
-does not run pipelines, relink file output or cancel work. **Stop run** asks for
-confirmation. An unavailable status preserves the guard and cached logs; a verified
-terminal status resolves only that run, not other blockers. **Refresh list** alone
-does not contact the execution host.
+Performance has its own admission, busy, recovery, polling, and cancellation state.
+Spec saving, autosave, continuation, and queued feedback retain their existing
+guards. An unresolved spec such as `ref_web`, or failure to list spec runs, does not
+block Performance admission. **Active runs** remains the spec/legacy Optimization inspector;
+Performance does not clear, cancel, or relink those runs. Concurrent workflows can
+run in different physical projects. The remote launcher still enforces shared
+repository locks and unresolved-run guards for the selected project: Performance
+cannot overlap a conflicting harness in the same Git worktree or non-Git project.
+These locks are coordination, not a sandbox for arbitrary tools or external jobs.
 
-Verified terminal status from **Load nohup output** is saved for admission and
-survives later SSH failures/restarts without replacing the cached stream output.
-Closed local attachment channels are recovered through the remote status protocol,
-not silently treated as active or successfully cancelled. Unknown remote status
-still blocks conflicting launches.
+The Performance form lists only its own blockers. **Refresh Performance runs**
+refreshes that list; **Load Performance output** inspects a selected session.
+**Recover latest Performance** restores the latest session, including after reload.
+**Stop run** in Performance output cancels only the displayed Performance session.
+Its own active/unresolved sessions and unavailable initial recovery/list status
+block duplicate launches. Opening or refreshing the form never launches or cancels.
+If execution is disabled, configure `SPEC_SSH_TARGET` and `SPEC_SSH_WORKSPACE` on
+the backend and restart it. The header remains available outside Settings.
+
+Authenticated endpoints:
+
+- `POST /api/performance`: `{"project":"my-project","spec":null}`, or a `spec`
+  object with `name` and `content` containing optional builder instructions.
+- `GET /api/performance`: latest Performance output, or null.
+- `GET /api/performance/runs`: active/unresolved Performance sessions.
+- `GET /api/performance/runs/{id}`: session output/status.
+- `POST /api/performance/runs/{id}/cancel`: cancel that session only.
+
+The legacy `POST /api/optimize` contracts (`{name, content}` and `{project, spec}`)
+retain their original optimizer/pipeline behavior, spec admission guards,
+`GET /api/optimize` association, and `/api/runs/{id}` recovery/cancellation.
+Only the new Performance button uses `/api/performance` and the Gemma builder.
+
+Local recovery records use `.performance-output`; remote session files use
+`.performance-runs`. Missing directories remain unresolved, never assumed complete.
+Preflight dependency failures after private storage creation publish a confirmed
+rejection status instead of leaving an ambiguous missing remote session.
 
 ## Project Name Search
 
 Enter part of a folder name in **Project folder**, then click **Search with
 Explore**. Choose a result from **Matching projects** to fill its absolute remote
 path. Duplicate folder names are distinguished by their paths. Selecting a result
-does not start pipelines or save the editor; **Run pipelines** remains separate.
+does not start execution or save the editor; **Run Gemma RL (built)** remains separate.
 Manual relative or absolute paths still work without search.
 
 Search runs only on explicit clicks, never on typing or opening Performance. It
@@ -81,19 +98,21 @@ It returns `{"projects":[{"name":"project-name","path":"/remote/project-name"}],
 helper code travel to SSH only over stdin; neither raw provider errors nor keys
 are returned to the browser.
 
-## Invocation And Request
+## Standalone Pipeline Runner
+
+The remaining sections document the separate `backend/src/performance.py`
+dataset/distillation runner and its fixtures, not the Performance button's builder
+session or its API. Its manifest and metrics are not a Gemma RL execution contract.
 
 ```sh
 python3 -B -u backend/src/performance.py RUN_DIRECTORY WORKSPACE REQUEST_CONFIG_PATH
 ```
 
-The backend embeds this runner as `snapshot.md`, with `optimize` registered by
-its bootstrap. Its CLI is unchanged. `--supervise ARGV...` delegates to
+The runner needs the sibling `optimize` module. `--supervise ARGV...` delegates to
 `optimize.supervise_command`, including when the optimizer module's `__file__`
 points at the embedded snapshot. Python 3.11+ and Linux/procfs are required.
 
-The authenticated `POST /api/optimize` UTF-8 request JSON has these fields
-(`spec` can be omitted at the HTTP boundary and is normalized to null):
+The standalone runner's `REQUEST_CONFIG_PATH` contains this UTF-8 JSON shape:
 
 ```json
 {"project": "my-project", "spec": null}

@@ -44,10 +44,10 @@ trap '' HUP
 trap 'exit 125' INT TERM
 mkfifo "$directory/pipe"
 # Builds keep the first 8 MiB of agent output, then drain without breaking the pipe.
-# Optimization progress must keep streaming for the entire unbounded run.
+# Optimization and Performance output must keep streaming through final metrics.
 # Only the supervisor retains the repository lock, never escaped build descendants.
 log_command='stdbuf -o0 head -c 8388608; cat >/dev/null'
-[[ $mode != optimize ]] || log_command='cat'
+[[ $mode != optimize && $mode != performance ]] || log_command='cat'
 if [[ -n ${SPEC_EXECUTION_PROFILE:-} ]]; then
     # Keep secrets out of retained/live logs even if an engine prints its config.
     log_command='exec bash --noprofile --norc "${SPEC_EXECUTION_PROFILE%/*}/provider-setup.bash" redact "$1"'

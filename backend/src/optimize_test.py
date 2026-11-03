@@ -463,6 +463,104 @@ class OptimizerTest(unittest.TestCase):
         with optimize.project_lock(self.project):
             pass
 
+    def test_relocated_performance_registry_requires_terminal_evidence(self):
+        for git in (False, True):
+            with self.subTest(git=git):
+                self.project = self.workspace / f"performance-target-{git}"
+                self.project.mkdir()
+                if git:
+                    subprocess.run(["git", "init", "-q", str(self.project)], check=True)
+                self.record(run=f"run-{git}", timestamp=1 + int(git))
+                self.config([self.objective(
+                    measure=python("from pathlib import Path; Path('measured').touch(); print(1)"),
+                    command=python("from pathlib import Path; Path('changed').touch()"), patience=2)])
+                lock = self.project / (".git/spec-harness" if git else ".spec-runs")
+                lock.mkdir(mode=0o700)
+                registry = lock if git else lock / "spec-harness"
+                registry.mkdir(mode=0o700, exist_ok=True)
+                prior = self.workspace / ".performance-runs" / f"run-prior-{git}"
+                prior.parent.mkdir(mode=0o700, exist_ok=True)
+                prior.mkdir(mode=0o700)
+                record = registry / prior.name
+                evidence = os.fsencode(prior) + b"\0performance\0"
+                record.write_bytes(evidence)
+                record.chmod(0o600)
+                for status in (None, b"256\n", b"0\nx", b"0\n", b"130\n"):
+                    with self.subTest(status=status):
+                        if status is not None:
+                            (prior / "status").write_bytes(status)
+                            (prior / "status").chmod(0o600)
+                        # Simulate a lost supervisor: its flock is available, but
+                        # the external session's durable record remains.
+                        subprocess.run(["flock", "--exclusive", "--nonblock", str(lock), "true"], check=True)
+                        admitted = status in (b"0\n", b"130\n")
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            self.assertEqual(optimize.run(self.logs, self.workspace, self.history),
+                                             0 if admitted else 1)
+                        event = json.loads((self.logs / "report.jsonl").read_text().splitlines()[-1])
+                        self.assertEqual(event["outcome"], "converged" if admitted else "failed")
+                        if not admitted:
+                            self.assertIn("completion is unresolved", event["error"])
+                            self.assertIn(str(record), event["error"])
+                            self.assertNotIn("invalid harness registry record", event["error"])
+                        for marker in ("measured", "changed"):
+                            self.assertEqual((self.project / marker).exists(), admitted)
+                            if admitted:
+                                (self.project / marker).unlink()
+                        self.assertEqual(record.read_bytes(), evidence, "retain prior evidence")
+
+    def test_batch_registry_protocol_for_git_and_non_git_projects(self):
+        launcher = Path(optimize.__file__).parents[2] / "scripts/build-projects.bash"
+        for git in (False, True):
+            with self.subTest(git=git):
+                project = self.workspace / f"batch-target-{git}"
+                project.mkdir()
+                if git:
+                    subprocess.run(["git", "init", "-q", str(project)], check=True)
+                (project / "objective.md").write_text("Local fake build only.\n")
+                lock = project / (".git/spec-harness" if git else ".spec-runs")
+                lock.mkdir(mode=0o700)
+                registry = lock if git else lock / "spec-harness"
+                registry.mkdir(mode=0o700, exist_ok=True)
+                home = self.workspace / f"batch-home-{git}"
+                home.mkdir()
+                (home / ".bash_aliases").write_text(
+                    "spec() {\n"
+                    f"  local records=('{registry}'/run-batch-*)\n"
+                    "  [[ ${#records[@]} == 1 && -f ${records[0]} ]] || return 1\n"
+                    "  touch launched\n"
+                    "}\n")
+                prior = home / ".performance-runs" / "run-prior"
+                prior.parent.mkdir(mode=0o700)
+                prior.mkdir(mode=0o700)
+                record = registry / prior.name
+                for mode in (b"performance\0", b"optimize\0", b"repository-save\0", b"", b"build\0", b"unknown\0"):
+                    evidence = os.fsencode(prior) + b"\0" + mode
+                    record.write_bytes(evidence)
+                    record.chmod(0o600)
+                    for status in (None, b"256\n", b"0\n", b"130\n"):
+                        with self.subTest(mode=mode, status=status):
+                            (prior / "status").unlink(missing_ok=True)
+                            if status is not None:
+                                (prior / "status").write_bytes(status)
+                                (prior / "status").chmod(0o600)
+                            subprocess.run(["flock", "--exclusive", "--nonblock", str(lock), "true"], check=True)
+                            result = subprocess.run(["bash", str(launcher), str(project)],
+                                env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=10)
+                            admitted = mode == b"build\0" or (
+                                mode != b"unknown\0" and status in (b"0\n", b"130\n"))
+                            self.assertEqual(result.returncode, 0 if admitted else 125, result.stderr.decode())
+                            self.assertEqual((project / "launched").exists(), admitted)
+                            if admitted:
+                                (project / "launched").unlink()
+                                batches = list((project / ".spec-runs").glob("run-batch-*"))
+                                self.assertTrue(batches)
+                                self.assertTrue(all((batch / "status").read_bytes() == b"0\n" for batch in batches))
+                            else:
+                                self.assertIn(b"Prior harness completion is unresolved", result.stderr)
+                            self.assertEqual(record.read_bytes(), evidence, "retain prior evidence")
+                            self.assertEqual(list(registry.glob("run-batch-*")), [])
+
     def test_external_target_validates_legacy_run_completion(self):
         for git in (False, True):
             with self.subTest(git=git):
@@ -574,6 +672,7 @@ class OptimizerTest(unittest.TestCase):
                            + """
 import optimize
 from pathlib import Path
+Path('target/runner-started').touch()
 original_read = optimize.read_limited
 def checked_read(path, limit):
     if path.suffix == '.optim':
@@ -588,15 +687,21 @@ sys.exit(optimize.main())
 """).encode()
                 child, directory = self.harness(workspace, payload=payload)
                 admitted = kind in ("success", "failure")
-                self.assertEqual(child.wait(timeout=10), 0 if admitted else 1, child.stderr.read().decode())
-                events = [json.loads(line) for line in (directory / "report.jsonl").read_text().splitlines()]
-                self.assertEqual(events[-1]["outcome"], "converged" if admitted else "failed")
-                for marker in ("config-read", "measured", "changed"):
+                code = child.wait(timeout=10)
+                error = child.stderr.read().decode()
+                self.assertEqual(code, 0 if admitted else 125, error)
+                self.assertEqual((directory / "status").read_bytes(), b"0\n" if admitted else b"125\n")
+                self.assertEqual((directory / "status").stat().st_mode & 0o777, 0o600)
+                if admitted:
+                    events = [json.loads(line) for line in (directory / "report.jsonl").read_text().splitlines()]
+                    self.assertEqual(events[-1]["outcome"], "converged")
+                else:
+                    self.assertIn("refusing to launch", error)
+                    self.assertIn(error.strip(), (directory / "optimization.out").read_text())
+                    self.assertFalse((directory / "report.jsonl").exists(), "launcher must reject before runner")
+                for marker in ("runner-started", "config-read", "measured", "changed"):
                     self.assertEqual((self.project / marker).exists(), admitted, marker)
                 self.assertFalse((self.project / "planned").exists())
-                if not admitted:
-                    self.assertEqual(len(events), 1, "admission must precede config/planning")
-                    self.assertIn(str(runs), events[0]["error"])
                 self.assertTrue(os.path.lexists(runs), "admission must retain prior evidence")
                 if kind == "unresolved":
                     self.assertFalse(status.exists())

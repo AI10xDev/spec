@@ -59,7 +59,8 @@ async function workspace(page: Page, options: { content?: string; completion?: b
     if (endpoint === "/config") json = { execution: true, completion: options.completion ?? false, chat: false, realtime: false, azureRealtime: false }
     else if (endpoint === "/files") json = Object.entries(files).map(([name, content]) => ({ name, bytes: content.length, modified: 0 }))
     else if (endpoint === "/repository") json = { connected: true, dirty: true, directory: "/fixture", model: "fixture" }
-    else if (endpoint === "/optimize") json = null
+    else if (endpoint === "/performance") json = null
+    else if (endpoint === "/performance/runs") json = []
     else if (endpoint.startsWith("/runs/")) json = options.runs?.find((item) => item.id === endpoint.split("/")[2]) ?? null
     else if (endpoint.endsWith("/run")) json = options.runs?.find((item) => item.name === endpoint.split("/")[2]) ?? null
     else if (endpoint.startsWith("/files/") && endpoint.slice(7) in files) {
@@ -260,10 +261,10 @@ for (const measured of [true, false]) {
     await expect(progress).not.toHaveClass(/indeterminate/)
     await expect(page.locator(".output-pane .badge")).toHaveText("running (connection unavailable)")
     await expect(page.getByRole("button", { name: "Save & run" })).toBeDisabled()
-    await expect(page.getByRole("button", { name: "Performance" })).toBeEnabled()
-    await page.getByRole("button", { name: "Performance" }).click()
-    await expect(page.getByRole("button", { name: "Run pipelines", exact: true })).toBeDisabled()
-    await expect(page.locator("#performance-availability")).toContainText("Pipeline launch is blocked by active or unresolved runs")
+    await expect(page.getByRole("button", { name: "Performance", exact: true })).toBeEnabled()
+    await page.getByRole("button", { name: "Performance", exact: true }).click()
+    await expect(page.getByRole("button", { name: "Run Gemma RL (built)", exact: true })).toBeEnabled()
+    await expect(page.locator("#performance-availability")).toContainText("Ready to run Gemma RL")
     await expect(page.getByRole("button", { name: "Save repo changes" })).toBeDisabled()
     await expect(page.getByRole("button", { name: "Stop run" })).toBeEnabled()
     mode = "transport"

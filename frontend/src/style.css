@@ -124,7 +124,8 @@ aside { width: 260px; flex-shrink: 0; background: var(--surface); border-right: 
 .editor-tab .close { color: var(--muted); padding-left: 4px; }
 .empty-tabs { font-size: 12px; color: var(--subtle); padding: 16px 24px; }
 .panes { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); flex: 1; min-height: 0; }
-.editor-pane, .output-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+/* Expanded panels can leave less room than the editor and output controls need. */
+.editor-pane, .output-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; }
 .editor-pane { background: var(--bg); border-right: 1px solid var(--border); }
 .output-pane { background: var(--surface-deep); }
 .pane-heading > div { min-width: 0; }

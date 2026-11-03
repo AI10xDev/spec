@@ -14,7 +14,7 @@ if [[ $(git rev-parse --is-inside-work-tree 2>/dev/null) == true ]]; then
     root=$(git rev-parse --show-toplevel)
     exclusions=()
     # Status spans the worktree, including artifacts from sibling workspaces.
-    for artifact in .spec-runs .spec-output .spec.lock; do
+    for artifact in .spec-runs .spec-output .performance-runs .performance-output .spec.lock; do
         exclusions+=(":(top,glob,exclude)**/$artifact" ":(top,glob,exclude)**/$artifact/**")
     done
     # Drain porcelain without retaining filenames or emitting an unbounded list.

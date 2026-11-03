@@ -35,7 +35,7 @@ try:
         pending = b""
         keep = max(map(len, patterns), default=1) - 1
         written = 0
-        limit = None if sys.argv[2:] == ["optimize"] else 8388608
+        limit = None if sys.argv[2:] in (["optimize"], ["performance"]) else 8388608
         while True:
             data = os.read(3, 65536)
             pending += data

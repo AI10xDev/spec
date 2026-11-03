@@ -347,6 +347,9 @@ async fn repository_probe_ignores_session_artifacts_but_counts_staged_and_untrac
         for artifact in [
             ".spec-runs/run-test/output",
             ".spec-output/job",
+            ".performance-runs/run-test/Performance.out",
+            ".performance-runs/run-rejected/status",
+            ".performance-output/job",
             ".spec.lock",
         ] {
             let path = parent.join(artifact);
@@ -1262,5 +1265,148 @@ fn repository_supervisor_does_not_retire_record_when_status_publication_fails() 
         );
         assert!(!directory.join("status").is_file());
         assert!(record.exists());
+    }
+}
+
+#[tokio::test]
+async fn repository_batch_publication_never_exposes_an_unregistered_run() {
+    for is_git in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        if is_git {
+            git(repo.path(), &["init", "--quiet"]);
+        }
+        let mut remote = remote_fixture(home.path(), &home.path().join("unused"));
+        remote.directory = repo.path().to_str().unwrap().into();
+        fs::write(repo.path().join("a.md"), "context").unwrap();
+        fs::write(
+            home.path().join(".bash_aliases"),
+            r#"
+pause_batch() {
+    for ((i=0; i<1000; i++)); do
+        [[ ! -f "$HOME/release-$1" ]] || return 0
+        sleep 0.01
+    done
+    return 98
+}
+mktemp() {
+    local path
+    path=$(command mktemp "$@") || return
+    if [[ ${BATCH_FIXTURE:-} == 1 && $1 == -d ]]; then
+        printf '%s' "$path" > "$HOME/allocated"
+        pause_batch allocated || return
+    fi
+    printf '%s\n' "$path"
+}
+mv() {
+    if [[ ${BATCH_FIXTURE:-} == 1 && -d ${@: -2:1} && ${!#} == */run-batch-* ]]; then
+        printf '%s' "${!#}" > "$HOME/publishing"
+        pause_batch publishing || return
+    fi
+    command mv "$@"
+}
+spec() {
+    [[ ${BATCH_FIXTURE:-} != 1 ]] || touch "$HOME/batch-workload"
+    printf 'fixture build\n'
+}
+"#,
+        )
+        .unwrap();
+        let batch = tokio::process::Command::new("bash")
+            .env("HOME", home.path())
+            .env("BATCH_FIXTURE", "1")
+            .args([
+                "-c",
+                include_str!("../../scripts/build-projects.bash"),
+                "--",
+            ])
+            .arg(repo.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let registry = repo.path().join(if is_git {
+            ".git/spec-harness"
+        } else {
+            ".spec-runs/spec-harness"
+        });
+        for phase in ["allocated", "publishing"] {
+            wait_for_file(&home.path().join(phase)).await;
+            assert!(!home.path().join("batch-workload").exists());
+            let mut concurrent = remote
+                .command(0, &Uuid::new_v4().to_string(), "a.md")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let input = concurrent.stdin.take().unwrap();
+            let output =
+                tokio::time::timeout(Duration::from_secs(5), concurrent.wait_with_output())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            drop(input);
+            if !output.status.success() {
+                let _ = nix::sys::signal::killpg(
+                    Pid::from_raw(batch.id().unwrap() as i32),
+                    Signal::SIGKILL,
+                );
+            }
+            assert!(output.status.success(), "git={is_git}, {phase}: {output:?}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains("fixture build"));
+            let rejected = remote
+                .repository_command(0, &Uuid::new_v4().to_string(), "a.md")
+                .stdin(Stdio::null())
+                .output()
+                .await
+                .unwrap();
+            assert_eq!(rejected.status.code(), Some(125), "{rejected:?}");
+            assert!(
+                String::from_utf8_lossy(&rejected.stderr).contains("Another harness is active")
+            );
+            let staging = PathBuf::from(fs::read_to_string(home.path().join("allocated")).unwrap());
+            assert!(
+                staging
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(".pending-")
+            );
+            assert!(staging.is_dir());
+            if phase == "publishing" {
+                let logs = PathBuf::from(fs::read_to_string(home.path().join(phase)).unwrap());
+                assert!(!logs.exists());
+                let record = registry.join(logs.file_name().unwrap());
+                assert_eq!(
+                    fs::read(&record).unwrap(),
+                    format!("{}\0build\0", logs.display()).as_bytes()
+                );
+                assert_eq!(
+                    fs::metadata(record).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+            fs::write(home.path().join(format!("release-{phase}")), "").unwrap();
+        }
+        let output = tokio::time::timeout(Duration::from_secs(5), batch.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let logs = PathBuf::from(fs::read_to_string(home.path().join("publishing")).unwrap());
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains(&format!("Build logs: {}", logs.display()))
+        );
+        assert_eq!(fs::read(logs.join("status")).unwrap(), b"0\n");
+        assert_eq!(fs::read(logs.join("a.md.out")).unwrap(), b"fixture build\n");
+        assert!(home.path().join("batch-workload").exists());
+        assert!(!registry.join(logs.file_name().unwrap()).exists());
+        assert!(!FsPath::new(&fs::read_to_string(home.path().join("allocated")).unwrap()).exists());
     }
 }

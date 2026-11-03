@@ -333,6 +333,10 @@ def project_lock(project, workspace=None):
         # the launcher checked the registry and its own workspace, not every Git
         # subdirectory's legacy storage. Do not rescan its unresolved current run.
         roots = [] if reused else [(directory, registry)]
+        if not registry and not reused:
+            # Non-Git projects keep the lock on .spec-runs, but relocated
+            # sessions publish pointers in its separate shared registry.
+            roots.append((directory / "spec-harness", True))
         if registry and (not reused or workspace is None or not project.samefile(workspace)):
             roots.append((project / ".spec-runs", False))
         for root, records in roots:
@@ -350,7 +354,7 @@ def project_lock(project, workspace=None):
                                 if (len(fields) not in (2, 3) or fields[-1] != b""
                                         or not fields[0].startswith(b"/")
                                         or (len(fields) == 3 and fields[1] not in
-                                            (b"build", b"repository-save", b"optimize"))):
+                                            (b"build", b"repository-save", b"optimize", b"performance"))):
                                     raise ValueError("invalid harness registry record")
                                 prior = os.fsdecode(fields[0])
                             with private(prior, directory=True) as run:

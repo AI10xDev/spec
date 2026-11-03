@@ -1,6 +1,893 @@
 use super::*;
 use tokio::io::AsyncWriteExt;
 
+fn transport_lock_fixture(home: &FsPath) -> Remote {
+    let runner = home.join("runner");
+    let remote = tests::remote_fixture(home, &runner);
+    fs::write(&runner, "#!/bin/bash\n: > started\nfor ((i=0; i<300; i++)); do [[ -f hold ]] || exit 0; sleep 0.05; done\nexit 98\n").unwrap();
+    fs::set_permissions(runner, fs::Permissions::from_mode(0o700)).unwrap();
+    let cli = home.join(".local/bin/opencode-source");
+    fs::create_dir_all(cli.parent().unwrap()).unwrap();
+    fs::write(&cli, "#!/usr/bin/python3\nimport json,pathlib,time\nprint(json.dumps({'type':'text','sessionID':'ses_LockFixture','part':{'text':'fixture'}}),flush=True)\npathlib.Path('started').touch()\nfor i in range(300):\n if not pathlib.Path('hold').exists(): break\n time.sleep(0.05)\n").unwrap();
+    fs::set_permissions(cli, fs::Permissions::from_mode(0o700)).unwrap();
+    remote
+}
+
+async fn start_transport_lock_fixture(
+    remote: &Remote,
+    project: &FsPath,
+) -> (tokio::process::Child, tokio::process::ChildStdin, String) {
+    let payload = if remote.performance {
+        include_str!("performance-session.py")
+    } else {
+        "context"
+    };
+    let request = if remote.performance {
+        serde_json::json!({"project": project, "spec": null}).to_string()
+    } else {
+        String::new()
+    };
+    let id = Uuid::new_v4().to_string();
+    let mut child = remote
+        .execution_command(
+            payload.len(),
+            &id,
+            "lock.md",
+            if remote.performance {
+                "performance"
+            } else {
+                "build"
+            },
+            "",
+            request.len(),
+            0,
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(format!("{payload}{request}").as_bytes())
+        .await
+        .unwrap();
+    (child, stdin, id)
+}
+
+#[tokio::test]
+async fn transport_pending_performance_upload_does_not_block_an_independent_build() {
+    for git in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let build = transport_lock_fixture(home.path());
+        if git {
+            assert!(
+                std::process::Command::new("git")
+                    .args(["init", "-q"])
+                    .current_dir(home.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        for path in [home.path(), project.path()] {
+            fs::write(path.join("hold"), "").unwrap();
+        }
+        let mut performance = build.clone();
+        performance.performance = true;
+        let id = Uuid::new_v4().to_string();
+        let payload = include_str!("performance-session.py");
+        let request = serde_json::json!({"project": project.path(), "spec": null}).to_string();
+        let mut child = performance
+            .execution_command(
+                payload.len(),
+                &id,
+                "lock.md",
+                "performance",
+                "",
+                request.len(),
+                0,
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        input.write_all(payload.as_bytes()).await.unwrap();
+        let pending = home.path().join(format!(".performance-runs/.pending-{id}"));
+        let final_directory = home.path().join(format!(".performance-runs/run-{id}"));
+        tests::wait_for_file(&pending.join("performance-request.json")).await;
+        assert!(!final_directory.exists());
+        // The unpublished run still exclusively reserves its UUID.
+        let duplicate = performance
+            .execution_command(0, &id, "lock.md", "performance", "", 2, 0)
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status.code(), Some(125));
+        assert!(pending.exists());
+        assert!(!final_directory.exists());
+        let (other, other_input, other_id) =
+            start_transport_lock_fixture(&build, home.path()).await;
+        tests::wait_for_file(&home.path().join("started")).await;
+        input.write_all(request.as_bytes()).await.unwrap();
+        tests::wait_for_file(&project.path().join("started")).await;
+        assert!(final_directory.is_dir());
+        assert!(!pending.exists());
+        performance.snapshot(&id, true, "lock.md").await.unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(input);
+        assert_eq!(output.status.code(), Some(130), "{output:?}");
+        assert_eq!(
+            build.snapshot(&other_id, false, "lock.md").await.unwrap().0,
+            "running"
+        );
+        build.snapshot(&other_id, true, "lock.md").await.unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(5), other.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(other_input);
+        assert_eq!(output.status.code(), Some(130), "{output:?}");
+    }
+}
+
+#[tokio::test]
+async fn transport_simultaneous_shared_builds_publish_after_registry_admission() {
+    for git in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let remote = transport_lock_fixture(home.path());
+        if git {
+            assert!(
+                std::process::Command::new("git")
+                    .args(["init", "-q"])
+                    .current_dir(home.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        fs::write(home.path().join("hold"), "").unwrap();
+        fs::write(home.path().join("runner"), "#!/bin/bash\n: > \"${2%/*}/workload-started\"\nfor ((i=0; i<300; i++)); do [[ -f hold ]] || exit 0; sleep 0.05; done\nexit 98\n").unwrap();
+        let bin = home.path().join("gated-bin");
+        fs::create_dir(&bin).unwrap();
+        let mkdir = bin.join("mkdir");
+        fs::write(&mkdir, "#!/bin/bash\n/usr/bin/mkdir \"$@\" || exit $?\nif [[ ${!#} == */.pending-* || ${!#} == */run-* ]]; then\n : > \"${!#}/created\"\n for ((i=0; i<1000; i++)); do [[ ! -f \"$HOME/release-admission\" ]] || exit 0; /usr/bin/sleep 0.01; done\n exit 98\nfi\n").unwrap();
+        fs::set_permissions(&mkdir, fs::Permissions::from_mode(0o700)).unwrap();
+        let fixture = fs::read_to_string(&remote.binary).unwrap().replace(
+            "exec /bin/bash",
+            "export PATH=\"$HOME/gated-bin:$PATH\"\nexec /bin/bash",
+        );
+        fs::write(&remote.binary, fixture).unwrap();
+        let (first, second) = tokio::join!(
+            start_transport_lock_fixture(&remote, home.path()),
+            start_transport_lock_fixture(&remote, home.path())
+        );
+        for id in [&first.2, &second.2] {
+            tests::wait_for_file(
+                &home
+                    .path()
+                    .join(format!(".spec-runs/.pending-{id}/created")),
+            )
+            .await;
+            assert!(!home.path().join(format!(".spec-runs/run-{id}")).exists());
+        }
+        fs::write(home.path().join("release-admission"), "").unwrap();
+        for id in [&first.2, &second.2] {
+            tests::wait_for_file(
+                &home
+                    .path()
+                    .join(format!(".spec-runs/run-{id}/workload-started")),
+            )
+            .await;
+            assert_eq!(
+                remote.snapshot(id, false, "lock.md").await.unwrap().0,
+                "running"
+            );
+        }
+        for (child, input, id) in [first, second] {
+            remote.snapshot(&id, true, "lock.md").await.unwrap();
+            let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(input);
+            assert_eq!(output.status.code(), Some(130), "{output:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn transport_legacy_scan_rechecks_completion_after_pointer_retirement() {
+    for completes in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let remote = transport_lock_fixture(home.path());
+        let prior = home.path().join(".spec-runs/run-prior");
+        let registry = home.path().join(".spec-runs/spec-harness");
+        for directory in [prior.parent().unwrap(), &prior, &registry] {
+            fs::create_dir_all(directory).unwrap();
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(
+            registry.join("run-prior"),
+            format!("{}\0build\0", prior.display()),
+        )
+        .unwrap();
+        fs::set_permissions(
+            registry.join("run-prior"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let bin = home.path().join("gated-bin");
+        fs::create_dir(&bin).unwrap();
+        let stat = bin.join("stat");
+        fs::write(&stat, format!("#!/bin/bash\nif [[ ${{!#}} == \"$HOME/.spec-runs/run-prior\" ]]; then\n n=0; [[ ! -f \"$HOME/stat-count\" ]] || read -r n < \"$HOME/stat-count\"\n printf '%s\\n' \"$((n+1))\" > \"$HOME/stat-count\"\n if (( n == 1 )); then\n {}\n /usr/bin/rm -- \"$HOME/.spec-runs/spec-harness/run-prior\"\n fi\nfi\nexec /usr/bin/stat \"$@\"\n", if completes { "printf '0\\n' > \"$HOME/.spec-runs/run-prior/status\"" } else { ":" })).unwrap();
+        fs::set_permissions(&stat, fs::Permissions::from_mode(0o700)).unwrap();
+        let fixture = fs::read_to_string(&remote.binary).unwrap().replace(
+            "exec /bin/bash",
+            "export PATH=\"$HOME/gated-bin:$PATH\"\nexec /bin/bash",
+        );
+        fs::write(&remote.binary, fixture).unwrap();
+        let (child, input, id) = start_transport_lock_fixture(&remote, home.path()).await;
+        let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(input);
+        assert_eq!(
+            output.status.code(),
+            Some(if completes { 0 } else { 125 }),
+            "{output:?}"
+        );
+        assert!(!registry.join("run-prior").exists());
+        assert_eq!(
+            remote.snapshot(&id, false, "lock.md").await.unwrap().0,
+            if completes {
+                "completed"
+            } else {
+                "failed (exit status: 125)"
+            }
+        );
+        assert_eq!(home.path().join("started").exists(), completes);
+    }
+}
+
+#[tokio::test]
+async fn transport_legacy_scan_prunes_nested_repository_roots() {
+    for separate_git_dir in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let remote = transport_lock_fixture(home.path());
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(home.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let nested = home.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        let mut git = std::process::Command::new("git");
+        git.args(["init", "-q"]).current_dir(&nested);
+        if separate_git_dir {
+            git.arg("--separate-git-dir")
+                .arg(external.path().join("metadata"));
+        }
+        assert!(git.status().unwrap().success());
+        let blocked = nested.join("unreadable");
+        fs::create_dir(&blocked).unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        let (child, input, id) = start_transport_lock_fixture(&remote, home.path()).await;
+        let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(input);
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            remote.snapshot(&id, false, "lock.md").await.unwrap().0,
+            "completed"
+        );
+        assert!(!nested.join("started").exists());
+    }
+}
+
+#[tokio::test]
+async fn performance_transport_shares_project_locks_but_not_storage_locks() {
+    for git in [false, true] {
+        for first_performance in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let repo = tempfile::tempdir().unwrap();
+            let base = transport_lock_fixture(home.path());
+            assert!(
+                std::process::Command::new("git")
+                    .args(["init", "-q"])
+                    .current_dir(home.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let (first, second) = if git {
+                assert!(
+                    std::process::Command::new("git")
+                        .args(["init", "-q"])
+                        .current_dir(repo.path())
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                let first = repo.path().join("first");
+                let second = repo.path().join("second");
+                fs::create_dir(&first).unwrap();
+                fs::create_dir(&second).unwrap();
+                (first, second)
+            } else {
+                (repo.path().to_owned(), repo.path().to_owned())
+            };
+            let link = home.path().join("project-link");
+            std::os::unix::fs::symlink(&first, &link).unwrap();
+            for project in [&first, &second, &home.path().to_owned()] {
+                fs::write(project.join("hold"), "").unwrap();
+            }
+            let mut performance = base.clone();
+            performance.performance = true;
+            let mut build = base.clone();
+            build.directory = second.to_str().unwrap().into();
+            let (owner, contender) = if first_performance {
+                (&performance, &build)
+            } else {
+                (&build, &performance)
+            };
+            let (child, stdin, id) = start_transport_lock_fixture(owner, &link).await;
+            tests::wait_for_file(&if first_performance {
+                first.join("started")
+            } else {
+                second.join("started")
+            })
+            .await;
+            if first_performance {
+                let directory = home.path().join(format!(".performance-runs/run-{id}"));
+                for (file, expected) in [
+                    ("performance-request.json", &link),
+                    ("performance-launch.json", &first),
+                ] {
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&fs::read(directory.join(file)).unwrap()).unwrap();
+                    assert_eq!(value["project"], expected.to_str().unwrap());
+                    assert_eq!(
+                        fs::metadata(directory.join(file))
+                            .unwrap()
+                            .permissions()
+                            .mode()
+                            & 0o777,
+                        0o600
+                    );
+                }
+            }
+            let (rejected, rejected_input, rejected_id) =
+                start_transport_lock_fixture(contender, &link).await;
+            let output = tokio::time::timeout(Duration::from_secs(5), rejected.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(rejected_input);
+            assert_eq!(
+                output.status.code(),
+                Some(125),
+                "git={git} first_performance={first_performance}: {output:?}"
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains("Another harness is active"));
+            assert_eq!(
+                contender
+                    .snapshot(&rejected_id, false, "lock.md")
+                    .await
+                    .unwrap()
+                    .0,
+                "failed (exit status: 125)"
+            );
+
+            // The configured workspace is a different Git project. Its build can
+            // coexist with relocated Performance storage (and vice versa).
+            let mut independent = base.clone();
+            independent.performance = !first_performance;
+            let (other, other_input, other_id) =
+                start_transport_lock_fixture(&independent, home.path()).await;
+            tests::wait_for_file(&home.path().join("started")).await;
+            owner.snapshot(&id, true, "lock.md").await.unwrap();
+            let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(stdin);
+            assert_eq!(output.status.code(), Some(130), "{output:?}");
+            assert_eq!(
+                independent
+                    .snapshot(&other_id, false, "lock.md")
+                    .await
+                    .unwrap()
+                    .0,
+                "running"
+            );
+            independent
+                .snapshot(&other_id, true, "lock.md")
+                .await
+                .unwrap();
+            let output = tokio::time::timeout(Duration::from_secs(5), other.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(other_input);
+            assert_eq!(output.status.code(), Some(130), "{output:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn performance_transport_guards_unresolved_and_legacy_runs_across_namespaces() {
+    for git in [false, true] {
+        for prior_performance in [false, true] {
+            for legacy in [false, true] {
+                let home = tempfile::tempdir().unwrap();
+                // The worktree root must not be interpreted as a find -path glob.
+                let repo = tempfile::Builder::new()
+                    .prefix("project[1]")
+                    .tempdir()
+                    .unwrap();
+                let mut remote = transport_lock_fixture(home.path());
+                if git {
+                    assert!(
+                        std::process::Command::new("git")
+                            .args(["init", "-q"])
+                            .current_dir(repo.path())
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                }
+                let project = if git {
+                    repo.path().join("second")
+                } else {
+                    repo.path().to_owned()
+                };
+                fs::create_dir_all(&project).unwrap();
+                remote.performance = !prior_performance;
+                if prior_performance {
+                    remote.directory = project.to_str().unwrap().into();
+                }
+                let prior_root = if git {
+                    repo.path().join("first")
+                } else {
+                    project.clone()
+                };
+                let prior = prior_root
+                    .join(if prior_performance {
+                        ".performance-runs"
+                    } else {
+                        ".spec-runs"
+                    })
+                    .join(format!("run-{}", Uuid::new_v4()));
+                fs::create_dir_all(&prior).unwrap();
+                for path in [prior.parent().unwrap(), prior.as_path()] {
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+                }
+                let registry = repo.path().join(if git {
+                    ".git/spec-harness"
+                } else {
+                    ".spec-runs/spec-harness"
+                });
+                if !legacy {
+                    fs::create_dir_all(&registry).unwrap();
+                    fs::set_permissions(&registry, fs::Permissions::from_mode(0o700)).unwrap();
+                    if !git {
+                        fs::set_permissions(
+                            registry.parent().unwrap(),
+                            fs::Permissions::from_mode(0o700),
+                        )
+                        .unwrap();
+                    }
+                    let record = registry.join(prior.file_name().unwrap());
+                    fs::write(
+                        &record,
+                        format!(
+                            "{}\0{}\0",
+                            prior.display(),
+                            if prior_performance {
+                                "performance"
+                            } else {
+                                "build"
+                            }
+                        ),
+                    )
+                    .unwrap();
+                    fs::set_permissions(record, fs::Permissions::from_mode(0o600)).unwrap();
+                }
+                for status in [None, Some("0\n\n"), Some("0\n")] {
+                    let terminal = status == Some("0\n");
+                    if let Some(status) = status {
+                        fs::write(prior.join("status"), status).unwrap();
+                        fs::set_permissions(
+                            prior.join("status"),
+                            fs::Permissions::from_mode(0o600),
+                        )
+                        .unwrap();
+                    }
+                    let (child, input, id) = start_transport_lock_fixture(&remote, &project).await;
+                    let output =
+                        tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    drop(input);
+                    assert_eq!(
+                        output.status.code(),
+                        Some(if terminal { 0 } else { 125 }),
+                        "git={git} prior_performance={prior_performance} legacy={legacy} terminal={terminal}: {output:?}"
+                    );
+                    assert_eq!(
+                        remote.snapshot(&id, false, "lock.md").await.unwrap().0,
+                        if terminal {
+                            "completed"
+                        } else {
+                            "failed (exit status: 125)"
+                        }
+                    );
+                    if !terminal {
+                        assert!(
+                            String::from_utf8_lossy(&output.stderr)
+                                .contains("completion is unresolved")
+                        );
+                        assert!(!project.join("started").exists());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn performance_transport_rejects_unsafe_selection_before_launch() {
+    let home = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mut remote = transport_lock_fixture(home.path());
+    remote.performance = true;
+    std::os::unix::fs::symlink(outside.path(), home.path().join("escape")).unwrap();
+    fs::write(home.path().join("file"), "not a directory").unwrap();
+    fs::create_dir(home.path().join("broken-git")).unwrap();
+    fs::write(
+        home.path().join("broken-git/.git"),
+        "gitdir: /nonexistent/fixture-git",
+    )
+    .unwrap();
+    for request in [
+        r#"{"project":".","project":"escape","spec":null}"#,
+        r#"{"project":"../escape","spec":null}"#,
+        r#"{"project":"escape","spec":null}"#,
+        r#"{"project":"missing","spec":null}"#,
+        r#"{"project":"file","spec":null}"#,
+        r#"{"project":"broken-git","spec":null}"#,
+        r#"{"project":".\n","spec":null}"#,
+        r#"{"project":false,"spec":null}"#,
+        r#"{"project":".","spec":{"name":"x","content":5}}"#,
+        r#"{"project":".","spec":null,"unexpected":1}"#,
+        r#"{"project":"$(touch injected)","spec":null}"#,
+    ] {
+        let id = Uuid::new_v4().to_string();
+        let upload = home.path().join("upload");
+        fs::write(&upload, request).unwrap();
+        let output = remote
+            .execution_command(0, &id, "lock.md", "performance", "", request.len(), 0)
+            .stdin(Stdio::from(File::open(upload).unwrap()))
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), Some(125), "{request}: {output:?}");
+        let directory = home.path().join(format!(".performance-runs/run-{id}"));
+        assert!(!directory.join("lease").exists());
+        assert!(!directory.join("performance-request.json").exists());
+        assert_eq!(
+            remote.snapshot(&id, false, "lock.md").await.unwrap().0,
+            "failed (exit status: 125)"
+        );
+    }
+    assert!(!home.path().join("injected").exists());
+    assert!(!home.path().join("started").exists());
+    assert!(!outside.path().join("started").exists());
+}
+
+#[tokio::test]
+async fn performance_transport_does_not_trust_stale_foreign_scope_evidence() {
+    for evidence in [
+        "missing",
+        "mismatched",
+        "unsafe",
+        "changed-scope",
+        "legacy-registry",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let remote = transport_lock_fixture(home.path());
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(home.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let prior = home
+            .path()
+            .join(format!(".performance-runs/run-{}", Uuid::new_v4()));
+        fs::create_dir_all(&prior).unwrap();
+        for path in [prior.parent().unwrap(), prior.as_path()] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let foreign_registry = foreign.path().join(".spec-runs/spec-harness");
+        fs::create_dir_all(&foreign_registry).unwrap();
+        fs::set_permissions(&foreign_registry, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(
+            foreign_registry.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::write(
+            prior.join("lock-registry"),
+            format!("{}\0performance\0", foreign_registry.display()),
+        )
+        .unwrap();
+        fs::set_permissions(
+            prior.join("lock-registry"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        fs::write(
+            prior.join("lock-project"),
+            format!("{}\0performance\0", foreign.path().display()),
+        )
+        .unwrap();
+        fs::set_permissions(
+            prior.join("lock-project"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        if evidence != "missing" {
+            let record = foreign_registry.join(prior.file_name().unwrap());
+            fs::write(
+                &record,
+                format!(
+                    "{}\0performance\0",
+                    if evidence == "mismatched" {
+                        "/wrong/run"
+                    } else {
+                        prior.to_str().unwrap()
+                    }
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(
+                record,
+                fs::Permissions::from_mode(if evidence == "unsafe" { 0o644 } else { 0o600 }),
+            )
+            .unwrap();
+        }
+        if evidence == "changed-scope" {
+            assert!(
+                std::process::Command::new("git")
+                    .args(["init", "-q"])
+                    .current_dir(foreign.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        if evidence == "legacy-registry" {
+            let registry = home.path().join(".git/performance-harness");
+            fs::create_dir(&registry).unwrap();
+            fs::set_permissions(&registry, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(registry.join("run-old"), "unresolved").unwrap();
+        }
+        let (child, input, id) = start_transport_lock_fixture(&remote, home.path()).await;
+        let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(input);
+        assert_eq!(output.status.code(), Some(125), "{evidence}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("completion is unresolved"));
+        assert_eq!(
+            remote.snapshot(&id, false, "lock.md").await.unwrap().0,
+            "failed (exit status: 125)"
+        );
+        assert!(!home.path().join("started").exists());
+    }
+}
+
+#[tokio::test]
+async fn performance_remote_isolates_storage_but_locks_selected_project() {
+    let root = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let cli = root.path().join(".local/bin/opencode-source");
+    fs::create_dir_all(cli.parent().unwrap()).unwrap();
+    let mut remote = tests::remote_fixture(root.path(), &cli);
+    let spec_identity = remote.identity();
+    remote.performance = true;
+    assert_ne!(spec_identity, remote.identity());
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(project.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    // An unrelated configured-workspace registry must not block this project.
+    fs::create_dir_all(root.path().join(".git/spec-harness")).unwrap();
+    fs::write(
+        root.path().join(".git/spec-harness/run-unresolved"),
+        "unresolved",
+    )
+    .unwrap();
+    let id = Uuid::new_v4().to_string();
+    let spec_directory = root.path().join(format!(".spec-runs/run-{id}"));
+    fs::create_dir_all(&spec_directory).unwrap();
+    fs::write(spec_directory.join("status"), "0\n").unwrap();
+    fs::write(spec_directory.join("test.md.out"), "wrong spec log").unwrap();
+    fs::write(
+        root.path().join(".bash_aliases"),
+        "exit 99 # Performance must not source this\n",
+    )
+    .unwrap();
+    fs::write(&cli, "#!/usr/bin/env python3\nimport json,os,sys\nassert sys.argv[1:8]==['run','--dir',os.environ['PROJECT'],'--agent','build','--format','json']\nassert '--session' not in sys.argv and '--continue' not in sys.argv\nassert 'gemma4-policy' in sys.stdin.read()\nprint(json.dumps({'type':'text','sessionID':'ses_Performance','part':{'text':os.environ['SPEC_EXECUTION_API_KEY']}}),flush=True)\n").unwrap();
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+    let payload = include_str!("performance-session.py");
+    let request = serde_json::json!({"project": project.path(), "spec": null}).to_string();
+    let profile = r#"{"provider":"openai","model":"chosen","endpoint":"https://example.test/v1","apiVersion":"","apiKey":"private-performance-key"}"#;
+    let mut child = remote
+        .execution_command(
+            payload.len(),
+            &id,
+            "test.md",
+            "performance",
+            "",
+            request.len(),
+            profile.len(),
+        )
+        .env("PROJECT", project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input
+        .write_all(format!("{payload}{request}{profile}").as_bytes())
+        .await
+        .unwrap();
+    let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    drop(input);
+    assert!(output.status.success(), "{output:?}");
+    let directory = root.path().join(format!(".performance-runs/run-{id}"));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(directory.join("performance-request.json")).unwrap()
+        )
+        .unwrap(),
+        serde_json::from_str::<serde_json::Value>(&request).unwrap()
+    );
+    assert_eq!(
+        fs::metadata(directory.join("performance-request.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert!(!root.path().join("projects").exists());
+    assert!(!directory.join("invocation").exists());
+    assert!(!directory.join("execution-profile.json").exists());
+    assert!(!directory.join("provider-setup.bash").exists());
+    assert!(project.path().join(".git/spec-harness").is_dir());
+    assert!(
+        !project
+            .path()
+            .join(format!(".git/spec-harness/run-{id}"))
+            .exists()
+    );
+    assert_eq!(
+        remote.session_id(&id, "test.md").await.unwrap(),
+        "ses_Performance"
+    );
+    let (status, log, _) = remote.snapshot(&id, false, "test.md").await.unwrap();
+    assert_eq!(status, "completed");
+    let log = String::from_utf8(log).unwrap();
+    assert!(log.contains("[REDACTED]"), "{log}");
+    assert!(!log.contains("private-performance-key"));
+    assert!(!log.contains("wrong spec log"));
+    assert!(
+        remote
+            .retained::<serde_json::Value>("test.md", None, false)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join(".git/spec-harness/run-unresolved")).unwrap(),
+        "unresolved"
+    );
+}
+
+#[tokio::test]
+async fn performance_remote_detaches_then_cancels_only_its_supervised_group() {
+    let root = tempfile::tempdir().unwrap();
+    let cli = root.path().join(".local/bin/opencode-source");
+    fs::create_dir_all(cli.parent().unwrap()).unwrap();
+    let mut remote = tests::remote_fixture(root.path(), &cli);
+    remote.performance = true;
+    fs::write(&cli, "#!/usr/bin/env python3\nimport json,os,pathlib,subprocess,time\nchild=subprocess.Popen(['sleep','60'])\npathlib.Path(os.environ['HOME'],'started').write_text(str(child.pid))\nprint(json.dumps({'type':'step_start','sessionID':'ses_Cancel'}),flush=True)\ntime.sleep(60)\n").unwrap();
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+    let id = Uuid::new_v4().to_string();
+    let payload = include_str!("performance-session.py");
+    let request = r#"{"project":".","spec":null}"#;
+    let mut child = remote
+        .execution_command(
+            payload.len(),
+            &id,
+            "test.md",
+            "performance",
+            "",
+            request.len(),
+            0,
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input
+        .write_all(format!("{payload}{request}").as_bytes())
+        .await
+        .unwrap();
+    tests::wait_for_file(&root.path().join("started")).await;
+    drop(input);
+    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    let (status, _, _) = remote.snapshot(&id, false, "test.md").await.unwrap();
+    assert_eq!(status, "running");
+    remote.snapshot(&id, true, "test.md").await.unwrap();
+    let directory = root.path().join(format!(".performance-runs/run-{id}"));
+    tests::wait_for_file(&directory.join("status")).await;
+    let (status, _, _) = remote.snapshot(&id, false, "test.md").await.unwrap();
+    assert_eq!(status, "cancelled");
+    assert!(!root.path().join(format!(".spec-runs/run-{id}")).exists());
+    let pid = fs::read_to_string(root.path().join("started")).unwrap();
+    // A killed orphan may briefly remain a zombie until PID 1 reaps it.
+    if let Ok(state) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        assert_eq!(state.split_whitespace().nth(2), Some("Z"), "{state}");
+    }
+}
+
 #[tokio::test]
 async fn selected_profiles_use_private_stdin_and_override_build_models_without_leaking() {
     for provider in ["azure", "openai", "claude", "openrouter", "huggingface"] {
@@ -201,6 +1088,7 @@ fn remote_configuration_rejects_options_and_relative_paths() {
         target: "user@host".into(),
         directory: "/home/user/project ' with spaces".into(),
         key: None,
+        performance: false,
     };
     assert!(remote.validate().is_ok());
     for target in [
@@ -233,6 +1121,7 @@ fn remote_key_validation_distinguishes_missing_and_non_file_paths() {
         target: "user@host".into(),
         directory: "/project".into(),
         key: Some(key.clone()),
+        performance: false,
     };
     let error = remote.validate().unwrap_err().to_string();
     assert!(error.contains("Cannot access SPEC_SSH_KEY local file"));
@@ -260,6 +1149,7 @@ fn ssh_is_noninteractive_with_host_verification_and_no_forwarding() {
         target: "user@host".into(),
         directory: "/remote/project".into(),
         key: Some("/local/key with spaces".into()),
+        performance: false,
     };
     let command = remote.command(42, &Uuid::new_v4().to_string(), "a.md");
     let args: Vec<_> = command
@@ -284,6 +1174,123 @@ fn ssh_is_noninteractive_with_host_verification_and_no_forwarding() {
     assert_eq!(args[args.len() - 3], "--");
     assert_eq!(args[args.len() - 2], "user@host");
     assert!(!args.last().unwrap().contains("/local/key"));
+}
+
+#[tokio::test]
+async fn missing_launch_dependencies_persist_private_rejection_in_both_namespaces() {
+    for performance in [false, true] {
+        for missing in ["setsid", "stdbuf", "flock"] {
+            let root = tempfile::tempdir().unwrap();
+            let runner = root.path().join("runner");
+            let mut remote = tests::remote_fixture(root.path(), &runner);
+            remote.performance = performance;
+            fs::write(&runner, "#!/bin/bash\n: > \"$HOME/started\"\n").unwrap();
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+            let bin = root.path().join("dependency-bin");
+            fs::create_dir(&bin).unwrap();
+            for utility in [
+                "bash", "mkdir", "stat", "mv", "rm", "git", "find", "head", "wc", "mktemp",
+                "sleep", "dd", "cat", "python3", "setsid", "stdbuf", "flock",
+            ] {
+                if utility != missing {
+                    std::os::unix::fs::symlink(format!("/usr/bin/{utility}"), bin.join(utility))
+                        .unwrap();
+                }
+            }
+            // Restrict only this fixture, including subsequent snapshot recovery.
+            let fixture = fs::read_to_string(&remote.binary).unwrap().replace(
+                "exec /bin/bash",
+                "export PATH=\"$HOME/dependency-bin\"\nexec /bin/bash",
+            );
+            fs::write(&remote.binary, fixture).unwrap();
+            let id = Uuid::new_v4().to_string();
+            let namespace = if performance {
+                ".performance-runs"
+            } else {
+                ".spec-runs"
+            };
+            let directory = root.path().join(namespace).join(format!("run-{id}"));
+            let payload = "from pathlib import Path; Path('started').touch()\n";
+            let config = if performance { "{}" } else { "" };
+            let upload = root.path().join("upload");
+            fs::write(&upload, format!("{payload}{config}")).unwrap();
+            let child = remote
+                .execution_command(
+                    payload.len(),
+                    &id,
+                    "test.md",
+                    if performance { "performance" } else { "build" },
+                    "",
+                    config.len(),
+                    0,
+                )
+                .stdin(Stdio::from(File::open(upload).unwrap()))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(125),
+                "{namespace} {missing}: {output:?}"
+            );
+            let diagnostic = format!("Missing required dependency: {missing}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains(&diagnostic));
+            assert_eq!(
+                fs::read_to_string(directory.join("status")).unwrap(),
+                "125\n"
+            );
+            let log = fs::read(directory.join("test.md.out")).unwrap();
+            let text = String::from_utf8_lossy(&log);
+            assert!(text.contains(&diagnostic), "{text}");
+            assert!(
+                text.contains("Launch rejected before supervisor start."),
+                "{text}"
+            );
+            for (path, mode) in [
+                (root.path().join(namespace), 0o700),
+                (directory.clone(), 0o700),
+                (directory.join("status"), 0o600),
+                (directory.join("test.md.out"), 0o600),
+            ] {
+                assert_eq!(
+                    fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    mode
+                );
+            }
+            for artifact in [
+                "snapshot.md",
+                "lease",
+                "invocation",
+                "performance-request.json",
+            ] {
+                assert!(!directory.join(artifact).exists(), "{artifact}");
+            }
+            assert!(!root.path().join("started").exists());
+            assert!(
+                !root
+                    .path()
+                    .join(if performance {
+                        ".spec-runs"
+                    } else {
+                        ".performance-runs"
+                    })
+                    .exists()
+            );
+            for cancel in [false, true] {
+                let (status, recovered, truncated) =
+                    remote.snapshot(&id, cancel, "test.md").await.unwrap();
+                assert_eq!(status, "failed (exit status: 125)");
+                assert_eq!(recovered, log);
+                assert!(!truncated);
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -320,11 +1327,25 @@ async fn truncated_upload_never_starts_build_and_persists_rejection() {
     assert_eq!(
         fs::read_dir(root.path().join(".spec-runs"))
             .unwrap()
+            .filter(|entry| entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("run-"))
             .count(),
         1
     );
     let directory = fs::read_dir(root.path().join(".spec-runs"))
         .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("run-")
+        })
         .next()
         .unwrap()
         .unwrap()
@@ -754,6 +1775,121 @@ spec() {
 }
 
 #[tokio::test]
+async fn performance_final_metrics_survive_build_cap_with_and_without_redaction() {
+    for performance in [false, true] {
+        for selected in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let runner = root.path().join("runner");
+            let mut remote = tests::remote_fixture(root.path(), &runner);
+            remote.performance = performance;
+            fs::write(&runner, r#"#!/usr/bin/python3
+import json, os
+def event(text):
+    print(json.dumps({'type': 'text', 'sessionID': 'ses_MetricsFixture', 'part': {'text': text}}), flush=True)
+key = os.environ.get('SPEC_EXECUTION_API_KEY', 'no selected provider')
+event('begin ' + key)
+for _ in range(140):
+    event('x' * 65536)
+event('final RL validation_accuracy=0.875 ' + key)
+"#).unwrap();
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+            let cli = root.path().join(".local/bin/opencode-source");
+            fs::create_dir_all(cli.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&runner, cli).unwrap();
+            let payload = if performance {
+                include_str!("performance-session.py")
+            } else {
+                "context"
+            };
+            let request = if performance {
+                r#"{"project":".","spec":null}"#
+            } else {
+                ""
+            };
+            let secret = "private-metrics-fixture-key";
+            let profile = if selected {
+                serde_json::json!({"provider": "openai", "model": "selected", "endpoint": "https://example.test/v1", "apiVersion": "", "apiKey": secret}).to_string()
+            } else {
+                String::new()
+            };
+            let id = Uuid::new_v4().to_string();
+            let mut child = remote
+                .execution_command(
+                    payload.len(),
+                    &id,
+                    "metrics.md",
+                    if performance { "performance" } else { "build" },
+                    "",
+                    request.len(),
+                    profile.len(),
+                )
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let mut input = child.stdin.take().unwrap();
+            input
+                .write_all(format!("{payload}{request}{profile}").as_bytes())
+                .await
+                .unwrap();
+            let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(input);
+            assert!(
+                output.status.success(),
+                "performance={performance} selected={selected}: {:?}",
+                output.status
+            );
+            let directory = root
+                .path()
+                .join(if performance {
+                    ".performance-runs"
+                } else {
+                    ".spec-runs"
+                })
+                .join(format!("run-{id}"));
+            let log = fs::read(directory.join("metrics.md.out")).unwrap();
+            assert_eq!(log, output.stdout);
+            let text = std::str::from_utf8(&log).unwrap();
+            let metric = "final RL validation_accuracy=0.875";
+            assert_eq!(
+                text.contains(metric),
+                performance,
+                "performance={performance} selected={selected}"
+            );
+            assert!(!text.contains(secret));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
+            if selected {
+                assert!(text.contains("[REDACTED]"));
+            }
+            if performance {
+                assert!(log.len() > 8 * 1024 * 1024);
+            } else {
+                assert_eq!(log.len(), 8 * 1024 * 1024);
+            }
+            let (status, tail, truncated) =
+                remote.snapshot(&id, false, "metrics.md").await.unwrap();
+            assert_eq!(status, "completed");
+            assert!(truncated);
+            assert_eq!(tail.len(), MAX_OUTPUT);
+            assert_eq!(tail, log[log.len() - MAX_OUTPUT..]);
+            let tail = std::str::from_utf8(&tail).unwrap();
+            assert_eq!(tail.contains(metric), performance);
+            assert!(!tail.contains(secret));
+            if performance && selected {
+                assert!(tail.contains("[REDACTED]"));
+            }
+            assert!(!directory.join("execution-profile.json").exists());
+            assert!(!directory.join("provider-setup.bash").exists());
+        }
+    }
+}
+
+#[tokio::test]
 async fn builds_and_optimizers_complete_without_timeout_and_keep_alive_beyond_build_cap() {
     for mode in ["build", "optimize"] {
         let root = tempfile::tempdir().unwrap();
@@ -1067,6 +2203,14 @@ async fn early_explicit_cancel_is_not_eof_or_snapshot_data() {
     assert_eq!(output.status.code(), Some(130));
     let directory = fs::read_dir(root.path().join(".spec-runs"))
         .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("run-")
+        })
         .next()
         .unwrap()
         .unwrap()
@@ -1207,7 +2351,7 @@ async fn recovery_is_nonlaunching_bounded_and_requires_known_status() {
     assert!(directory.join("cancel").is_file());
     drop(lock);
     for code in [
-        "0\n", "7\n", "124\n", "130\n", "garbage", "", "256\n", "0\n0\n",
+        "0\n", "7\n", "124\n", "130\n", "garbage", "", "256\n", "0\n0\n", "0\n\n", "0", "0\0\n",
     ] {
         fs::write(&status, code).unwrap();
         fs::set_permissions(&status, fs::Permissions::from_mode(0o600)).unwrap();

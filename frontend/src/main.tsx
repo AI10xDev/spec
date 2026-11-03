@@ -18,6 +18,7 @@ type Entry = { name: string; modified: number; bytes: number }
 type Repository = { connected: boolean; dirty: boolean; directory: string | null; model: string }
 type Output = RunOutput & { continuable: boolean }
 type RetainedRuns = { runs: { id: string; modified: number }[]; truncated: boolean }
+type PerformanceRun = Pick<Output, "id" | "name" | "status">
 const chatName = new URLSearchParams(location.search).get("chat")
 
 function App() {
@@ -59,6 +60,14 @@ function App() {
   const queuedIds = useRef(new Set<string>())
   const stoppedIds = useRef(new Set<string>())
   const [optimization, setOptimization] = useState<Output | null>(null)
+  const [performanceBusy, setPerformanceBusy] = useState(false)
+  const performanceSubmitting = useRef(false)
+  const [performanceRuns, setPerformanceRuns] = useState<PerformanceRun[] | null>(null)
+  const [performanceListError, setPerformanceListError] = useState("")
+  const [performanceError, setPerformanceError] = useState("")
+  const [performanceRecovered, setPerformanceRecovered] = useState(false)
+  const [performanceRefresh, setPerformanceRefresh] = useState(0)
+  const performanceRecovery = useRef(0)
   const [performance, setPerformance] = useState(false)
   const [activeRuns, setActiveRuns] = useState(false)
   const activeRunsButton = useRef<HTMLButtonElement>(null)
@@ -82,11 +91,13 @@ function App() {
   const historical = retainedView?.output
   const output = outputView === "optimization" ? optimization : historical ?? fileOutput
   const actionBusy = busy && !saving?.automatic
-  const canContinue = !!output && !historical && outputView === "file" && execution && !busy && !optimization?.recoverable && !queuedFeedback[output.id] && output.status === "completed" && !output.recoverable && output.continuable === true
-  const canQueueFeedback = !!output && !historical && outputView === "file" && execution && !actionBusy && !optimization?.recoverable && !queuedFeedback[output.id] && !stoppedIds.current.has(output.id) && output.continuable === true && (output.status === "running" || (output.status === "completed" && !output.recoverable))
+  const canContinue = !!output && !historical && outputView === "file" && execution && !busy && !queuedFeedback[output.id] && output.status === "completed" && !output.recoverable && output.continuable === true
+  const canQueueFeedback = !!output && !historical && outputView === "file" && execution && !actionBusy && !queuedFeedback[output.id] && !stoppedIds.current.has(output.id) && output.continuable === true && (output.status === "running" || (output.status === "completed" && !output.recoverable))
   const message = output ? feedback[output.id] ?? "" : ""
-  const blockingRuns = [...Object.values(outputs), ...(optimization ? [optimization] : [])].filter((item) => item.recoverable)
+  const blockingRuns = Object.values(outputs).filter((item) => item.recoverable)
   const pendingRuns = blockingRuns.map((item) => item.id).join(",")
+  const performanceBlockers = [...(performanceRuns ?? []).filter((run) => run.id !== optimization?.id), ...(optimization?.recoverable ? [optimization] : [])]
+  const performanceBlocked = !performanceRecovered || performanceRuns === null || !!performanceListError || !!performanceBlockers.length
   const queuedForFile = Object.values(queuedFeedback).some((item) => item.name === active)
 
   async function api<T>(path: string, body?: unknown, method = "POST", signal?: AbortSignal): Promise<T> {
@@ -143,12 +154,6 @@ function App() {
     try { remembered = localStorage.getItem("spec-active-file") } catch { /* Browser persistence is optional. */ }
     if (remembered && entries.some((file) => file.name === remembered)) {
       await open(remembered).catch(fail)
-    }
-    try {
-      const latest = await recoverOptimization()
-      if (latest?.recoverable) setOutputView("optimization")
-    } catch (error) {
-      fail(`Could not recover optimization output: ${error instanceof Error ? error.message : String(error)}. Select Optimization to retry.`)
     }
     setConnected(true)
   }
@@ -231,12 +236,11 @@ function App() {
     // Let an explicit disk read finish without a poll invalidating its result.
     let cancelled = false
     const timers: ReturnType<typeof setTimeout>[] = []
-    async function poll(output: Output, optimizer = false) {
+    async function poll(output: Output) {
       try {
         const next = await api<Output>(`/runs/${output.id}`)
         if (cancelled) return
-        if (optimizer) setOptimization((item) => item?.id === next.id && (item.recoverable || !next.recoverable) ? next : item)
-        else setOutputs((items) => {
+        setOutputs((items) => {
           const previous = items[next.name]
           if (previous?.id !== next.id) return items
           if (!previous.recoverable && next.recoverable) return items
@@ -246,27 +250,25 @@ function App() {
             : next
           return { ...items, [next.name]: output }
         })
-        if (next.recoverable) timers.push(setTimeout(() => void poll(next, optimizer), next.status === "running" ? 650 : 2500))
+        if (next.recoverable) timers.push(setTimeout(() => void poll(next), next.status === "running" ? 650 : 2500))
       } catch (error) {
         if (cancelled) return
-        if (optimizer) setOptimization((item) => item?.id === output.id ? { ...item, transportUnavailable: true } : item)
-        else setOutputs((items) => items[output.name]?.id === output.id
+        setOutputs((items) => items[output.name]?.id === output.id
           ? { ...items, [output.name]: { ...items[output.name], transportUnavailable: true } }
           : items)
         fail(error)
-        timers.push(setTimeout(() => void poll(output, optimizer), 2500))
+        timers.push(setTimeout(() => void poll(output), 2500))
       }
     }
     // A background tab must not leave repository saving blocked by stale status.
     for (const item of Object.values(outputs)) {
       if (item.recoverable && loadingOutput?.id !== item.id) void poll(item)
     }
-    if (optimization?.recoverable) void poll(optimization, true)
     return () => { cancelled = true; timers.forEach(clearTimeout) }
   }, [pendingRuns, loadingOutput, token])
 
   const dispatchQueuedFeedback = useEffectEvent(() => {
-    if (!connected || !execution || busy || submitting.current || settings || analytics || optimization?.recoverable) return
+    if (!connected || !execution || busy || submitting.current || settings || analytics) return
     for (const [id, queued] of Object.entries(queuedFeedback)) {
       if (queued.paused || !queuedIds.current.has(id) || stoppedIds.current.has(id)) continue
       const current = outputs[queued.name]
@@ -280,7 +282,7 @@ function App() {
       }
     }
   })
-  useEffect(() => { dispatchQueuedFeedback() }, [queuedFeedback, outputs, connected, execution, busy, settings, analytics, optimization?.recoverable])
+  useEffect(() => { dispatchQueuedFeedback() }, [queuedFeedback, outputs, connected, execution, busy, settings, analytics])
 
   useEffect(() => {
     if (follow && log.current) log.current.scrollTop = log.current.scrollHeight
@@ -312,7 +314,7 @@ function App() {
     }
     void poll()
     return () => { cancelled = true; clearTimeout(timer) }
-  }, [connected, execution, busy, output?.id, output?.status, token])
+  }, [connected, execution, busy, fileOutput?.id, fileOutput?.status, token])
 
   async function recoverOutput(name: string, fromLog = false) {
     const previous = outputs[name]
@@ -361,12 +363,84 @@ function App() {
     }
   }
 
-  async function recoverOptimization() {
-    const previous = optimization
-    const latest = await api<Output | null>("/optimize")
-    setOptimization((item) => item === previous ? latest : item)
-    return latest
+  async function recoverOptimization(id?: string, signal?: AbortSignal) {
+    const request = ++performanceRecovery.current
+    try {
+      const latest = await api<Output | null>(id ? `/performance/runs/${encodeURIComponent(id)}` : "/performance", undefined, "GET", signal)
+      if (signal?.aborted || request !== performanceRecovery.current) return
+      if (id && latest?.id !== id) throw new Error("Performance run identity did not match")
+      setOptimization((item) => {
+        if (!latest) return item
+        if (item?.id === latest.id) {
+          if (!item.recoverable && latest.recoverable) return item
+          if (latest.status.startsWith("unavailable")) return { ...latest, output: item.output, truncated: item.truncated }
+        }
+        return latest
+      })
+      setPerformanceRecovered(true)
+      setPerformanceError("")
+      return latest
+    } catch (error) {
+      if (!signal?.aborted && request === performanceRecovery.current) setPerformanceError(`Could not recover Performance output: ${error instanceof Error ? error.message : String(error)}. Select Recover latest Performance to retry.`)
+    }
   }
+
+  const recoverPerformance = useEffectEvent((signal: AbortSignal) => recoverOptimization(undefined, signal))
+  useEffect(() => {
+    if (!connected || chatName) return
+    const controller = new AbortController()
+    void recoverPerformance(controller.signal).then((latest) => {
+      if (!controller.signal.aborted && latest?.recoverable) setOutputView("optimization")
+    })
+    return () => controller.abort()
+  }, [connected, token])
+
+  useEffect(() => {
+    if (!connected || !execution || chatName) return
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    async function poll() {
+      try {
+        const runs = await api<PerformanceRun[]>("/performance/runs", undefined, "GET", controller.signal)
+        if (controller.signal.aborted) return
+        setPerformanceRuns(runs)
+        setPerformanceListError("")
+      } catch (error) {
+        if (controller.signal.aborted) return
+        setPerformanceListError(`Could not check Performance runs: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      timer = setTimeout(() => void poll(), 2500)
+    }
+    void poll()
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [connected, execution, token, performanceRefresh])
+
+  useEffect(() => {
+    if (!optimization?.recoverable) return
+    const id = optimization.id
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    async function poll() {
+      let delay = 2500
+      try {
+        const next = await api<Output>(`/performance/runs/${encodeURIComponent(id)}`, undefined, "GET", controller.signal)
+        if (controller.signal.aborted) return
+        if (next.id !== id) throw new Error("Performance run identity did not match")
+        setOptimization((item) => item?.id === id && item.recoverable
+          ? next.status.startsWith("unavailable") ? { ...next, output: item.output, truncated: item.truncated } : next
+          : item)
+        if (!next.recoverable) { setPerformanceRefresh((value) => value + 1); return }
+        delay = next.status === "running" ? 650 : 2500
+      } catch (error) {
+        if (controller.signal.aborted) return
+        setOptimization((item) => item?.id === id ? { ...item, transportUnavailable: true } : item)
+        setPerformanceError(`Performance polling failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      timer = setTimeout(() => void poll(), delay)
+    }
+    void poll()
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [optimization?.id, optimization?.recoverable, token])
 
   async function open(name: string) {
     const intent = ++navigation.current
@@ -410,7 +484,7 @@ function App() {
   }
 
   async function save(mode: "file" | "build" | "repository" = "file", automatic = false) {
-    if (settings || analytics || !tab || busy || submitting.current || (mode !== "file" && (optimization?.recoverable || queuedForFile))) return
+    if (settings || analytics || !tab || busy || submitting.current || (mode !== "file" && queuedForFile)) return
     submitting.current = true
     setBusy(true)
     setError("")
@@ -440,7 +514,7 @@ function App() {
   }
 
   function requestBuild() {
-    if (settings || analytics || !tab || busy || submitting.current || !execution || queuedForFile || fileOutput?.recoverable || optimization?.recoverable) return
+    if (settings || analytics || !tab || busy || submitting.current || !execution || queuedForFile || fileOutput?.recoverable) return
     if (window.confirm("Send this saved spec over SSH and run remote spec build? Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.")) void save("build")
   }
 
@@ -478,7 +552,7 @@ function App() {
 
   async function continueRun(message?: string, queuedOutput?: Output) {
     const target = queuedOutput ?? output
-    if ((!queuedOutput && !canContinue) || submitting.current || !target || busy || !execution || optimization?.recoverable) return
+    if ((!queuedOutput && !canContinue) || submitting.current || !target || busy || !execution) return
     if (queuedOutput && (!queuedIds.current.has(target.id) || stoppedIds.current.has(target.id))) return
     if (target.status !== "completed" || target.recoverable || !target.continuable || outputs[target.name]?.id !== target.id) return
     if (message !== undefined && (!message.trim() || message.includes("\0") || new TextEncoder().encode(message).length > 16 * 1024)) {
@@ -510,40 +584,50 @@ function App() {
   }
 
   async function optimize() {
-    if (settings || analytics || busy || submitting.current || projectSearching || !execution || pendingRuns) return
-    setNotice("")
+    if (settings || analytics || performanceBusy || performanceSubmitting.current || projectSearching || !execution || performanceBlocked) return
+    setPerformanceError("")
     if (!project.trim() || project.includes("\0")) {
-      setError("Enter a project folder relative to the remote workspace or an absolute remote path, without NUL bytes.")
+      setPerformanceError("Enter a project folder relative to the remote workspace or an absolute remote path, without NUL bytes.")
       return
     }
     if (useEditorSpec && !tab) {
-      setError("Select an editor tab to use as the spec, or uncheck Use current editor as spec.")
+      setPerformanceError("Select an editor tab to use as builder instructions, or uncheck Use current editor as instructions.")
       return
     }
     const spec = useEditorSpec && tab ? { name: tab.name, content: tab.content } : null
     if (spec) {
       if (!spec.content.trim() || spec.content.includes("\0") || new TextEncoder().encode(spec.content).length > 1024 * 1024) {
-        setError("The editor spec must be nonempty JSON, without NUL bytes, and at most 1 MiB.")
-        return
-      }
-      try { JSON.parse(spec.content) } catch {
-        setError("The editor spec must be valid JSON pipeline config. Any filename extension is accepted.")
+        setPerformanceError("Builder instructions must be nonempty, without NUL bytes, and at most 1 MiB.")
         return
       }
     }
-    submitting.current = true
+    performanceSubmitting.current = true
     try {
-      if (!window.confirm(`Run dataset_pipe and model_pipeline for project ${project.trim()}? ${spec ? `Use the current editor JSON pipeline config (${spec.name}). Unsaved editor changes are included; this does not save the file locally.` : "Use the project's performance.json config; no editor content is sent."} Only run trusted config: it can execute pipeline commands, write artifacts, and incur compute or provider costs. Use Stop run to stop manually.`)) return
-      setBusy(true)
-      setError("")
-      setNotice("Starting pipelines...")
-      const job = await api<{ id: string }>("/optimize", { project: project.trim(), spec })
-      setOptimization({ ...job, name: "optimization", output: "Starting...", status: "running", truncated: false, recoverable: true, continuable: false })
+      if (!window.confirm(`Run Gemma RL (built) for project ${project.trim()} through its own fresh builder session? ${spec ? `Use current editor builder instructions (${spec.name}). Unsaved editor changes are included; this does not save the file locally.` : "No editor content is sent; no editor tab is needed."} Run the existing built workflow only: no automatic rebuild, model or dataset download, or data fabrication. Authorize tools to inspect the project, execute the built workflow, and write artifacts; this can incur compute and provider costs. Spec runs are independent. Use Stop run in Performance output to stop this session only.`)) return
+      setPerformanceBusy(true)
+      const runs = await api<PerformanceRun[]>("/performance/runs")
+      setPerformanceRuns(runs)
+      if (runs.length) throw new Error("Performance is blocked by its own active or unresolved sessions. Load their output before launching another session.")
+      const job = await api<{ id: string }>("/performance", { project: project.trim(), spec })
+      performanceRecovery.current++
+      setOptimization({ ...job, name: "Performance", output: "Starting Gemma RL (built)...", status: "running", truncated: false, recoverable: true, continuable: false })
       setOutputView("optimization")
       setFollow(true)
       setPerformance(false)
-      setNotice("Performance pipelines started. Metrics and progress appear in Optimization output. Use Stop run to stop manually.")
-    } catch (error) { setNotice(""); fail(error) } finally { submitting.current = false; setBusy(false) }
+      setPerformanceRefresh((value) => value + 1)
+    } catch (error) { setPerformanceError(error instanceof Error ? error.message : String(error)) } finally { performanceSubmitting.current = false; setPerformanceBusy(false) }
+  }
+
+  async function stopPerformance() {
+    if (!optimization?.recoverable || performanceSubmitting.current) return
+    performanceSubmitting.current = true
+    setPerformanceBusy(true)
+    setPerformanceError("")
+    try {
+      await api(`/performance/runs/${encodeURIComponent(optimization.id)}/cancel`, {})
+      setPerformanceRefresh((value) => value + 1)
+    } catch (error) { setPerformanceError(error instanceof Error ? error.message : String(error)) }
+    finally { performanceSubmitting.current = false; setPerformanceBusy(false) }
   }
 
   function download() {
@@ -584,32 +668,34 @@ function App() {
   if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} realtime={realtime} azureRealtime={azureRealtime} />
 
   return <div className="app">
-    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Optimization: {optimization.status}</span>}<div className="analysis-actions">{execution && <button ref={activeRunsButton} aria-expanded={activeRuns} aria-controls="active-runs" onClick={() => setActiveRuns(!activeRuns)}>Active runs</button>}<button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button ref={performanceButton} className="primary" title="performance" aria-expanded={performance && !settings} aria-controls="performance-form" disabled={settings} onClick={() => { if (!performance) setUseEditorSpec(false); setPerformance(!performance) }}>Performance</button></div></div></header>
-    <ActiveRuns key={token} open={activeRuns && execution} api={api} knownOutputs={[...Object.values(outputs), ...(optimization ? [optimization] : [])]} onClose={() => { setActiveRuns(false); activeRunsButton.current?.focus() }} onOutput={(next) => {
+    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Performance: {optimization.status}</span>}<div className="analysis-actions">{execution && <button ref={activeRunsButton} aria-expanded={activeRuns} aria-controls="active-runs" onClick={() => setActiveRuns(!activeRuns)}>Active runs</button>}<button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button ref={performanceButton} className="primary" title="performance" aria-expanded={performance && !settings} aria-controls="performance-form" disabled={settings} onClick={() => { if (!performance) setUseEditorSpec(false); setPerformance(!performance) }}>Performance</button></div></div></header>
+    <ActiveRuns key={token} open={activeRuns && execution} api={api} knownOutputs={Object.values(outputs)} onClose={() => { setActiveRuns(false); activeRunsButton.current?.focus() }} onOutput={(next) => {
       // A delayed recoverable response cannot undo confirmed completion of the same run.
       const updated = (previous: Output) => !previous.recoverable && next.recoverable ? previous : next.status.startsWith("unavailable")
         ? { ...next, output: previous.output, truncated: previous.truncated }
         : next
       // Inspection never associates an unknown run or replaces an unrelated latest run.
       setOutputs((items) => Object.fromEntries(Object.entries(items).map(([name, previous]) => [name, previous.id === next.id ? updated(previous) : previous])))
-      setOptimization((previous) => previous?.id === next.id ? updated(previous) : previous)
     }} />
-    {performance && !settings && <form id="performance-form" className="performance-form" aria-label="Performance pipelines" onSubmit={(event) => { event.preventDefault(); void optimize() }}>
-      <h2>Run performance pipelines</h2>
-      <p id="performance-config">Run <code>dataset_pipe</code> + <code>model_pipeline</code> using the project's <code>performance.json</code> by default. No editor tab is needed.</p>
+    {performance && !settings && <form id="performance-form" className="performance-form" aria-label="Performance builder" onSubmit={(event) => { event.preventDefault(); void optimize() }}>
+      <h2>Run Gemma RL (built)</h2>
+      <p id="performance-config">Run the existing built Gemma Reinforcement Learning workflow through its own fresh builder session, independent of spec runs. No editor tab is needed. No automatic rebuild, model or dataset download, or data fabrication. Tool execution can write artifacts and incur compute or provider costs; confirmation is required.</p>
+      <p>Remote project safety checks still apply: conflicting harnesses in the same Git worktree or non-Git project cannot overlap.</p>
       <div id="performance-availability" aria-live="polite">
-        {!execution ? <p>Remote execution is disabled. Configure SPEC_SSH_TARGET and SPEC_SSH_WORKSPACE on the backend and restart it to enable pipelines. Opening Performance does not start a run.</p>
-          : busy ? <p>Another request is in progress. Pipeline launch will be available after it finishes and any run blockers are resolved.</p>
-          : pendingRuns ? <p>Pipeline launch is blocked by active or unresolved runs. Inspect their output to confirm completion, or explicitly stop them if appropriate. Opening this form does not rerun or cancel anything.</p>
-          : projectSearching ? <p>Wait for project search to finish before running pipelines.</p>
-          : <p>Ready to request a pipeline run. The backend will verify remote run status before starting.</p>}
-        {!!blockingRuns.length && <ul aria-label="Blocking runs" style={{ overflowWrap: "anywhere" }}>{blockingRuns.map((run) => <li key={run.id}><strong>{run.name}</strong> / <code>{run.id}</code> / {run.status}</li>)}</ul>}
+        {!execution ? <p>Remote execution is disabled. Configure SPEC_SSH_TARGET and SPEC_SSH_WORKSPACE on the backend and restart it to enable the builder. Opening Performance does not start a run.</p>
+          : performanceBusy ? <p>A Performance request is in progress. Spec saving and running remain independent.</p>
+          : performanceBlockers.length ? <p>Performance launch is blocked by its own active or unresolved sessions. Load their output to check completion or explicitly stop a Performance session. Spec runs do not block this action.</p>
+          : performanceBlocked ? <p>Checking Performance recovery and active sessions. Unavailable Performance status must be resolved before launching.</p>
+          : projectSearching ? <p>Wait for project search to finish before running Gemma RL.</p>
+          : <p>Ready to run Gemma RL (built). Spec saving, active runs, and unknown spec status do not block Performance.</p>}
+        {!!performanceBlockers.length && <ul aria-label="Performance blockers" style={{ overflowWrap: "anywhere" }}>{performanceBlockers.map((run) => <li key={run.id}><strong>{run.name}</strong> / <code>{run.id}</code> / {run.status} <button type="button" disabled={performanceBusy} onClick={() => { setOutputView("optimization"); void recoverOptimization(run.id) }}>Load Performance output for {run.id}</button></li>)}</ul>}
+        {performanceListError && <p role="alert" className="error">{performanceListError}</p>}
       </div>
-      <ProjectPicker value={project} onChange={setProject} disabled={busy || !execution} onSearchingChange={setProjectSearching} search={(query, signal) => api<ProjectSearch>("/projects/search", { query }, "POST", signal)} />
-      <label className="performance-option"><input type="checkbox" checked={useEditorSpec} disabled={busy} onChange={(event) => setUseEditorSpec(event.target.checked)} aria-describedby="performance-spec" /> Use current editor as spec</label>
-      <p id="performance-spec">Optional JSON pipeline config, any extension. Unsaved content is included without saving locally (maximum 1 MiB).{useEditorSpec && <> Current editor: <strong>{tab?.name ?? "No tab selected"}</strong>.</>}</p>
-      {error && <div role="alert" className="error">{error}</div>}
-      <div className="performance-actions"><button type="submit" className="primary" aria-describedby="performance-availability" disabled={busy || projectSearching || !execution || !!pendingRuns}>Run pipelines</button>{execution && <button type="button" onClick={() => setActiveRuns(true)}>Inspect active runs</button>}<button type="button" disabled={busy} onClick={() => { setPerformance(false); performanceButton.current?.focus() }}>Cancel</button></div>
+      <ProjectPicker value={project} onChange={setProject} disabled={performanceBusy || !execution} onSearchingChange={setProjectSearching} search={(query, signal) => api<ProjectSearch>("/projects/search", { query }, "POST", signal)} />
+      <label className="performance-option"><input type="checkbox" checked={useEditorSpec} disabled={performanceBusy} onChange={(event) => setUseEditorSpec(event.target.checked)} aria-describedby="performance-spec" /> Use current editor as instructions</label>
+      <p id="performance-spec">Optional builder instructions, any extension; JSON is not required. Unsaved content is included without saving locally (maximum 1 MiB).{useEditorSpec && <> Current editor: <strong>{tab?.name ?? "No tab selected"}</strong>.</>}</p>
+      {performanceError && <div role="alert" className="error">{performanceError}</div>}
+      <div className="performance-actions"><button type="submit" className="primary" aria-describedby="performance-availability" disabled={performanceBusy || projectSearching || !execution || performanceBlocked}>Run Gemma RL (built)</button>{execution && <button type="button" disabled={performanceBusy} onClick={() => setPerformanceRefresh((value) => value + 1)}>Refresh Performance runs</button>}<button type="button" disabled={performanceBusy} onClick={() => { setPerformance(false); performanceButton.current?.focus() }}>Cancel</button></div>
     </form>}
     {analytics && <Analytics api={api} active={active} onClose={() => setAnalytics(false)} />}
     {settings && <Settings api={api} onClose={() => setSettings(false)} onChanged={refreshConfig} />}
@@ -648,7 +734,8 @@ function App() {
           </div>)}
           {!tabs.length && <span className="empty-tabs">Open a saved file or create something new</span>}
         </nav>
-        {error && !performance && <div role="alert" className="error">{error}<button aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
+        {error && <div role="alert" className="error">{error}<button aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
+        {performanceError && !performance && <div role="alert" className="error">{performanceError}<button aria-label="Dismiss Performance error" onClick={() => setPerformanceError("")}>×</button></div>}
         <div className="panes">
           <section className="editor-pane" aria-label="Spec editing pane">
             <div className="pane-heading"><div><span className="eyebrow">01 / SPEC</span><h2>{tab?.name ?? "Your next idea"}</h2></div><span className="badge">{tab ? dirty(tab) ? "Unsaved" : "Saved" : "Editor"}</span></div>
@@ -657,7 +744,7 @@ function App() {
               setTabs((items) => items.map((item) => item.name === editor.name ? { ...item, content } : item))
             }} />)}
             {!tab && <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
-            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || queuedForFile || fileOutput?.recoverable || optimization?.recoverable} title="Save & run (Ctrl/Cmd+Enter)" aria-keyshortcuts="Control+Enter Meta+Enter" onClick={requestBuild}>Save & run ↗</button></div></footer>
+            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || queuedForFile || fileOutput?.recoverable} title="Save & run (Ctrl/Cmd+Enter)" aria-keyshortcuts="Control+Enter Meta+Enter" onClick={requestBuild}>Save & run ↗</button></div></footer>
             {execution && <div className="repository-controls">
               <span>{repositoryError || (repository?.connected ? `${repository.directory} / ${repository.dirty ? "Uncommitted changes" : "No uncommitted changes"}` : repository ? "No repository connected in the remote directory." : "Checking remote repository...")}</span>
               {repository?.connected && repository.dirty && <button disabled={!tab?.content.trim() || busy || queuedForFile || !!pendingRuns} title={`Use ${repository.model} with the existing repository workflow`} onClick={() => {
@@ -669,10 +756,11 @@ function App() {
             <div className="pane-heading"><div><span className="eyebrow">02 / OUTPUT</span><h2>Output & logs</h2></div><span className="badge">{output?.transportUnavailable ? `${output.status} (connection unavailable)` : output?.status ?? "Idle"}</span></div>
             <div className="output-selector" role="group" aria-label="Output view"><button aria-pressed={outputView === "file"} onClick={() => setOutputView("file")}>Current file{tab ? `: ${tab.name}` : " output"}</button><button aria-pressed={outputView === "optimization"} disabled={!optimization && !execution} onClick={() => {
               setOutputView("optimization")
-              if (!optimization) { setError(""); void recoverOptimization().catch(fail) }
-            }}>Optimization</button></div>
+              if (!optimization) void recoverOptimization()
+            }}>Performance output</button></div>
+            {outputView === "optimization" && <div className="output-controls"><button disabled={performanceBusy} onClick={() => { void recoverOptimization(); setPerformanceRefresh((value) => value + 1) }}>Recover latest Performance</button></div>}
             {tab && outputView === "file" && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>{historical ? "Chat uses the associated run, not this retained log" : "Spec + current nohup output in a separate window"}</span></div>}
-            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <><button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button><button disabled={!!loadingOutput || !!retainedView?.loading || busy || !execution} onClick={() => void browseRetained(tab.name)}>Browse retained runs</button></>}{!historical && output?.recoverable && execution && <button onClick={() => void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={!canContinue} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
+            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <><button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button><button disabled={!!loadingOutput || !!retainedView?.loading || busy || !execution} onClick={() => void browseRetained(tab.name)}>Browse retained runs</button></>}{!historical && output?.recoverable && execution && <button disabled={outputView === "optimization" && performanceBusy} onClick={() => outputView === "optimization" ? void stopPerformance() : void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={!canContinue} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
             {!!Object.keys(queuedFeedback).length && <section className="build-feedback chat-composer" aria-label="Queued follow-ups">
               <strong>Queued follow-ups</strong>
               <span>Keep this page open. One follow-up per run; sent after confirmed completion, not as live input. Cancel to replace.</span>
@@ -697,7 +785,7 @@ function App() {
             {!historical && outputView === "file" && output?.continuable && <BuildProgress key={output.id} output={output} />}
             {output && <RecoveryNotice output={output} />}
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
-            <pre ref={log} className="output" aria-label="Run output">{output ? <LogOutput value={output.output} /> : (outputView === "optimization" ? "No optimization output loaded. Select Optimization to retry recovery. To run dataset_pipe + model_pipeline, click Performance and enter a project folder relative to the remote workspace or an absolute remote path. The project's performance.json is used by default; no editor tab is needed. Optionally use the current editor's JSON pipeline config, with any filename extension. Unsaved content is included without saving locally. Metrics and pipeline output appear here." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
+            <pre ref={log} className="output" aria-label="Run output">{output ? <LogOutput value={output.output} /> : (outputView === "optimization" ? "No Performance output loaded. Select Recover latest Performance to retry recovery. To run Gemma RL (built) through its own fresh builder session, click Performance and enter a project folder relative to the remote workspace or an absolute remote path. No editor tab is needed. Optional editor content is builder instructions, not necessarily JSON, and is sent without saving locally. No automatic rebuild, model or dataset download, or data fabrication. Performance runs and cancellation are independent of spec runs." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
             {!historical && output && outputView === "file" && output.continuable === true && <form className="chat-composer build-feedback" onSubmit={(event) => { event.preventDefault(); submitFeedback() }}>
               <label htmlFor="build-feedback">Feedback to build session</label>
               <textarea id="build-feedback" aria-describedby="feedback-help feedback-limit feedback-shortcuts" placeholder="Answer the agent or explain what to change..." value={message} disabled={actionBusy} onChange={(event) => setFeedback((items) => ({ ...items, [output.id]: event.target.value }))} onKeyDown={(event) => {

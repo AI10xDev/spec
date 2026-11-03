@@ -11,6 +11,12 @@ let directory: string
 let workspace: string
 let url: string
 
+test.beforeEach(async ({ context }) => {
+  // Keep the real spec-run fixture independent of the Performance builder backend.
+  await context.route("**/api/performance", (route) => route.fulfill({ json: null }))
+  await context.route("**/api/performance/runs", (route) => route.fulfill({ json: [] }))
+})
+
 test.beforeAll(async () => {
   directory = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "spec-execution-e2e-"))
   workspace = path.join(directory, "workspace")

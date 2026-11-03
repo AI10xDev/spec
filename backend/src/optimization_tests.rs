@@ -684,6 +684,69 @@ async fn performance_missing_configuration_reports_failure_without_prior_build_d
 }
 
 #[tokio::test]
+async fn project_optimization_keeps_original_poll_cancel_and_restart_contract() {
+    let root = tempfile::tempdir().unwrap();
+    let state = fixture(root.path());
+    let project = root.path().join("legacy-project");
+    fs::create_dir_all(project.join("curated")).unwrap();
+    fs::create_dir(project.join("spec-training")).unwrap();
+    fs::write(project.join("spec-training/environment.py"), r#"
+def evaluate_directory(**kwargs):
+    import os, pathlib, time
+    assert 'SPEC_EXECUTION_PROFILE' not in os.environ
+    assert 'SPEC_EXECUTION_API_KEY' not in os.environ
+    pathlib.Path(os.environ['HOME'], 'dataset-started').touch()
+    time.sleep(60)
+"#).unwrap();
+    let binary = project.join("fixture-model");
+    fs::write(&binary, "#!/bin/sh\nexit 99\n").unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(project.join("performance.json"), body!({
+        "pipeline_root": ".",
+        "dataset": {"source_dir": "curated", "editable_files": ["solution.py"],
+            "test_commands": [["python3", "test_solution.py"]],
+            "image": format!("fixture@sha256:{}", "a".repeat(64))},
+        "model": {"binary": "fixture-model", "args": ["--fixture"], "timeout_seconds": 10}
+    }).to_string()).unwrap();
+    assert_eq!(request(state.clone(), "PUT", "/api/settings", body!({
+        "provider": "openai", "model": "unused", "endpoint": "https://api.openai.com/v1",
+        "apiVersion": "", "apiKey": "must-not-upload"
+    })).await.status(), StatusCode::OK);
+    let input = body!({"project": "legacy-project", "spec": null});
+    let id = start_optimization(&state, input.clone()).await;
+    wait_for_file(&root.path().join("dataset-started")).await;
+    let directory = root.path().join(format!(".spec-runs/run-{id}"));
+    assert!(!directory.join("execution-profile.json").exists());
+    assert_eq!(state.jobs.lock().unwrap().len(), 1);
+    assert!(state.jobs.lock().unwrap()[0].optimization);
+    assert!(state.performance_state.jobs.lock().unwrap().is_empty());
+    assert!(!root.path().join(".performance-output").exists());
+    assert!(!root.path().join(".performance-runs").exists());
+    let live = json(request(state.clone(), "GET", &format!("/api/runs/{id}"), Value::Null).await).await;
+    assert_eq!(live["id"], id);
+    assert_eq!(live["name"], "optimization");
+    assert_eq!(live["continuable"], false);
+    assert_eq!(request(state.clone(), "POST", "/api/optimize", input.clone()).await.status(), StatusCode::CONFLICT);
+    detach_and_wait(&state).await;
+    let mut fresh = app(root.path());
+    fresh.remote = state.remote.clone();
+    let latest = json(request(fresh.clone(), "GET", "/api/optimize", Value::Null).await).await;
+    assert_eq!(latest["id"], id);
+    assert_eq!(latest["status"], "running");
+    assert_eq!(latest["recoverable"], true);
+    let runs = json(request(fresh.clone(), "GET", "/api/runs", Value::Null).await).await;
+    assert_eq!(runs.as_array().unwrap().len(), 1);
+    assert_eq!(runs[0]["id"], id);
+    assert_eq!(runs[0]["kind"], "optimization");
+    assert_eq!(request(fresh.clone(), "POST", "/api/optimize", input).await.status(), StatusCode::CONFLICT);
+    assert_eq!(request(fresh.clone(), "POST", &format!("/api/runs/{id}/cancel"), body!({})).await.status(), StatusCode::OK);
+    let cancelled = terminal(&fresh, &id, "cancelled").await;
+    assert_eq!(fs::read_to_string(directory.join("status")).unwrap(), "130\n");
+    assert_eq!(json(request(app(root.path()), "GET", "/api/optimize", Value::Null).await).await, cancelled);
+    assert_eq!(json(request(fresh, "GET", "/api/performance", Value::Null).await).await, Value::Null);
+}
+
+#[tokio::test]
 async fn optimization_remote_disabled_does_not_create_a_job() {
     let root = tempfile::tempdir().unwrap();
     let state = app(root.path());

@@ -35,6 +35,7 @@ pub struct Remote {
     pub target: String,
     pub directory: String,
     pub key: Option<PathBuf>,
+    pub performance: bool,
 }
 
 impl Remote {
@@ -54,6 +55,7 @@ impl Remote {
             target: target.ok_or("Set SPEC_SSH_TARGET to user@host or a trusted SSH host alias")?,
             directory: directory.ok_or("Set SPEC_SSH_WORKSPACE to an absolute remote directory")?,
             key,
+            performance: false,
         };
         remote.validate()?;
         Ok(Some(remote))
@@ -107,13 +109,24 @@ impl Remote {
     }
 
     pub fn identity(&self) -> String {
-        format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&(&self.binary, &self.target, &self.directory, &self.key,))
-                    .unwrap()
-            )
-        )
+        let mut digest = Sha256::new();
+        // Preserve persisted spec identities while separating Performance recovery.
+        if self.performance {
+            digest.update(b"performance\0");
+        }
+        digest.update(
+            serde_json::to_vec(&(&self.binary, &self.target, &self.directory, &self.key)).unwrap(),
+        );
+        format!("{:x}", digest.finalize())
+    }
+
+    fn scoped_script(&self, script: &str) -> String {
+        if self.performance {
+            // Storage is independent; physical repository locks are not.
+            script.replace(".spec-runs", ".performance-runs")
+        } else {
+            script.to_owned()
+        }
     }
 
     fn ssh(&self, script: String) -> Command {
@@ -225,10 +238,20 @@ impl Remote {
     ) -> Command {
         self.ssh(format!(
             "bash -c {} -- {} {} {} {} {} {} {} {} {} {} {} {}",
-            quote(include_str!("remote-build.bash")),
+            quote(&format!(
+                "[[ $7 {} performance ]] || exit 125\n{}",
+                if self.performance { "==" } else { "!=" },
+                include_str!("remote-build.bash"),
+            )),
             quote(&self.directory),
             bytes,
-            quote(include_str!("remote-alias.bash")),
+            quote(&if self.performance {
+                // Execute the pinned lock selection without changing the retained upload.
+                include_str!("remote-alias.bash")
+                    .replace("performance-request.json", "performance-launch.json")
+            } else {
+                include_str!("remote-alias.bash").to_owned()
+            }),
             quote(include_str!("remote-supervisor.bash")),
             quote(id),
             quote(name),
@@ -245,7 +268,7 @@ impl Remote {
         let mut child = self
             .ssh(format!(
                 "timeout --kill-after=1s 10s bash --noprofile --norc -c {} -- {} {} {}",
-                quote(include_str!("remote-session.bash")),
+                quote(&self.scoped_script(include_str!("remote-session.bash"))),
                 quote(&self.directory),
                 quote(id),
                 quote(name),
@@ -388,6 +411,9 @@ impl Remote {
         id: Option<&str>,
         full_report: bool,
     ) -> Result<T, String> {
+        if self.performance {
+            return Err("Performance does not discover retained spec runs".into());
+        }
         let limit = if id.is_some() {
             (if full_report {
                 super::analytics::MAX_REPORT
@@ -463,7 +489,7 @@ impl Remote {
         let mut child = self
             .ssh(format!(
                 "bash -c {} -- {} {} {} {}",
-                quote(include_str!("remote-recover.bash")),
+                quote(&self.scoped_script(include_str!("remote-recover.bash"))),
                 quote(&self.directory),
                 quote(id),
                 if cancel { "cancel" } else { "snapshot" },
@@ -519,8 +545,8 @@ impl Remote {
                 "124" => "timed out".into(),
                 "130" => "cancelled".into(),
                 code => match code.parse::<u8>() {
-                    Ok(code) => format!("failed (exit status: {code})"),
-                    Err(_) => return Err("invalid remote status".into()),
+                    Ok(value) if value.to_string() == code => format!("failed (exit status: {value})"),
+                    _ => return Err("invalid remote status".into()),
                 },
             };
             let truncated = parts[2] == "1";

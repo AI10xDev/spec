@@ -13,6 +13,9 @@ mod continuation_tests;
 #[path = "optimization_tests.rs"]
 mod optimization_tests;
 
+#[path = "performance_tests.rs"]
+mod performance_tests;
+
 #[path = "retained_tests.rs"]
 mod retained_tests;
 
@@ -45,6 +48,8 @@ pub(super) fn app(root: &FsPath) -> App {
         recovered: Arc::new(Mutex::new(false)),
         recovery_runs: Arc::default(),
         recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
+        performance_state: RunState::default(),
+        performance: false,
         project_search_slots: Arc::new(tokio::sync::Semaphore::new(1)),
     }
 }
@@ -73,6 +78,7 @@ pub(super) fn remote_fixture(root: &FsPath, runner: &FsPath) -> Remote {
         target: "fixture@host".into(),
         directory: root.to_str().unwrap().into(),
         key: None,
+        performance: false,
     }
 }
 
@@ -120,6 +126,11 @@ async fn all_api_routes_require_authentication() {
         ("GET", "/api/runs"),
         ("GET", "/api/optimize"),
         ("POST", "/api/optimize"),
+        ("GET", "/api/performance"),
+        ("POST", "/api/performance"),
+        ("GET", "/api/performance/runs"),
+        ("GET", "/api/performance/runs/id"),
+        ("POST", "/api/performance/runs/id/cancel"),
         ("POST", "/api/projects/search"),
         ("GET", "/api/repository"),
         ("POST", "/api/repository/save"),

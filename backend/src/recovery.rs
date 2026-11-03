@@ -1,7 +1,6 @@
 use super::*;
 use std::{collections::HashMap, os::unix::fs::MetadataExt};
 
-const DIRECTORY: &str = ".spec-output";
 const MAX_RECORD: usize = MAX_OUTPUT * 4 + 64 * 1024;
 
 #[derive(Default)]
@@ -27,7 +26,7 @@ fn valid_id(id: &str) -> Result<()> {
 // Anchor all subsequent access to the opened directory, not a re-resolved path.
 // The workspace is already protected by the server's exclusive lock.
 fn directory(app: &App, create: bool) -> Result<File> {
-    let path = app.root.join(DIRECTORY);
+    let path = app.root.join(if app.performance { ".performance-output" } else { ".spec-output" });
     if create {
         match fs::DirBuilder::new().mode(0o700).create(&path) {
             Ok(()) => {
@@ -106,8 +105,10 @@ pub(super) fn persist(app: &App, job: &Job) -> Result<()> {
     atomic(&directory, &format!("{}.json", job.id), &data)
 }
 
-fn latest_name(name: &str, optimization: bool) -> String {
-    if optimization {
+fn latest_name(app: &App, name: &str, optimization: bool) -> String {
+    if app.performance {
+        "latest-performance".into()
+    } else if optimization {
         "latest-optimization".into()
     } else {
         // Preserve the pointer names of existing regular-file runs.
@@ -118,7 +119,7 @@ fn latest_name(name: &str, optimization: bool) -> String {
 pub(super) fn set_latest(app: &App, job: &Job) -> Result<()> {
     atomic(
         &directory(app, true)?,
-        &latest_name(&job.name, job.optimization),
+        &latest_name(app, &job.name, job.optimization),
         job.id.as_bytes(),
     )
 }
@@ -136,7 +137,7 @@ fn latest_run(app: &App, name: &str, optimization: bool) -> Result<Option<String
     let result = (|| {
         bytes(
             &directory(app, false)?,
-            &latest_name(name, optimization),
+            &latest_name(app, name, optimization),
             36,
         )
     })();

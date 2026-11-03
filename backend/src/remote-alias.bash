@@ -2,7 +2,12 @@
 # Separate lines ensure aliases defined by the source are expanded at invocation.
 : > "$2" # Signal that setsid established the build process group.
 spec_build_mode=${3:-build}
-[[ $spec_build_mode == build || $spec_build_mode == repository-save || $spec_build_mode == optimize ]] || exit 125
+[[ $spec_build_mode == build || $spec_build_mode == repository-save || $spec_build_mode == optimize || $spec_build_mode == performance ]] || exit 125
+if [[ $spec_build_mode == performance ]]; then
+    # No spec aliases, lifecycle hooks, or continuation lookup for this session.
+    export PATH="$HOME/.local/bin:$HOME/.bun/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
+    exec python3 -I -u "$1" "${1%/*}" "$PWD" "${1%/*}/performance-request.json"
+fi
 if [[ $spec_build_mode == optimize ]]; then
     [[ ${SPEC_OPTIM_CONFIG:-} == /* ]] || {
         printf '%s\n' '[remote] Optimization requires an absolute uploaded config path.' >&2
@@ -124,7 +129,8 @@ Agent.md / AGENTS.md instructions and the repository save/commit workflow.
 Validate the edited changes appropriately. The repository-save button explicitly
 authorizes saving the edited changes with focused commit(s). Inspect git status,
 git diff (including staged changes), and git log before committing. Do not include
-secrets, session artifacts (.spec-runs/, .spec-output/, .spec.lock), or unrelated
+secrets, session artifacts (.spec-runs/, .spec-output/, .performance-runs/,
+.performance-output/, .spec.lock), or unrelated
 edits. Do not push, amend, reset, change git config, or bypass hooks. Preserve
 unrelated edits. Report blockers and outcomes honestly, including validation or
 commit failures; do not claim changes were saved unless commits succeeded.

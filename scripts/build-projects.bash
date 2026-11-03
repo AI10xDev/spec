@@ -44,18 +44,20 @@ mkdir -p -- .spec-runs
 # This script is sent alone over SSH, so it must implement the same registry
 # protocol as the backend adapter without sourcing files on the remote host.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
-registry=
+lock="$directory/.spec-runs"
+registry="$lock/spec-harness"
 if [[ $(git rev-parse --is-inside-work-tree 2>/dev/null) == true ]]; then
   git_directory=$(git rev-parse --absolute-git-dir)
   git_directory=$(cd -- "$git_directory" && pwd -P)
   registry="$git_directory/spec-harness"
-  mkdir -p -- "$registry"
-  [[ -d $registry && ! -L $registry && -O $registry && $(stat -c %a -- "$registry") == 700 ]] || {
-    printf 'Unsafe worktree harness registry; refusing to launch.\n' >&2
-    exit 125
-  }
+  lock=$registry
 fi
-exec 9< "${registry:-.spec-runs}"
+mkdir -p -- "$registry"
+[[ -d $registry && ! -L $registry && -O $registry && $(stat -c %a -- "$registry") == 700 ]] || {
+  printf 'Unsafe worktree harness registry; refusing to launch.\n' >&2
+  exit 125
+}
+exec 9< "$lock"
 flock --shared --nonblock 9 || {
   printf 'Another harness is active for this repository; refusing to launch.\n' >&2
   exit 125
@@ -76,7 +78,7 @@ if [[ -n $registry ]]; then
       $(stat -c %h -- "$record") == 1 && $(stat -c %s -- "$record") -le 16384 ]] && {
       IFS= read -r -d '' prior && [[ $prior == /* ]] && {
         if IFS= read -r -d '' prior_mode; then
-          [[ $prior_mode == build || $prior_mode == repository-save ]] &&
+          [[ $prior_mode == build || $prior_mode == repository-save || $prior_mode == optimize || $prior_mode == performance ]] &&
             ! IFS= read -r -d '' trailing && [[ -z $trailing ]]
         else
           [[ -z $prior_mode ]] && prior_mode=legacy
@@ -91,7 +93,11 @@ if [[ -n $registry ]]; then
     exit 125
   done
 fi
-logs="$(mktemp -d "$directory/.spec-runs/run-batch-XXXXXXXX")"
+# Keep unregistered runs invisible to legacy scans while holding the project
+# lock. Publish the final-path pointer before the directory or any workload.
+staging="$(mktemp -d "$directory/.spec-runs/.pending-batch-XXXXXXXX")"
+logs="$directory/.spec-runs/run-batch-${staging##*-}"
+[[ ! -e $logs && ! -L $logs ]] || exit 125
 registry_record=
 if [[ -n $registry ]]; then
   record_tmp=$(mktemp "$registry/.pending-XXXXXXXX")
@@ -102,6 +108,8 @@ if [[ -n $registry ]]; then
 fi
 # Interruption must leave the record unresolved: descendants may still be alive.
 trap 'exit 125' HUP INT TERM
+mv -T --no-clobber -- "$staging" "$logs"
+[[ ! -e $staging ]] || exit 125
 printf 'Build logs: %s\n' "$logs"
 failed=0
 for file in "${specs[@]}"; do

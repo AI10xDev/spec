@@ -66,10 +66,33 @@ struct App {
     recovery_runs: Arc<recovery::RunGates>,
     // Serializes admission and latest-pointer changes, never polling or cancellation.
     recovery_gate: Arc<tokio::sync::Mutex<()>>,
+    performance_state: RunState,
+    performance: bool,
     project_search_slots: Arc<tokio::sync::Semaphore>,
 }
 
+#[derive(Clone, Default)]
+struct RunState {
+    jobs: Arc<Mutex<Vec<Job>>>,
+    recovered: Arc<Mutex<bool>>,
+    recovery_runs: Arc<recovery::RunGates>,
+    recovery_gate: Arc<tokio::sync::Mutex<()>>,
+}
+
 impl App {
+    fn performance_app(&self) -> Self {
+        let mut app = self.clone();
+        app.jobs = self.performance_state.jobs.clone();
+        app.recovered = self.performance_state.recovered.clone();
+        app.recovery_runs = self.performance_state.recovery_runs.clone();
+        app.recovery_gate = self.performance_state.recovery_gate.clone();
+        app.performance = true;
+        if let Some(remote) = &mut app.remote {
+            remote.performance = true;
+        }
+        app
+    }
+
     fn ai_completion(&self) -> Option<Completion> {
         self.settings
             .completion()
@@ -177,6 +200,7 @@ enum RunInput {
     RepositorySave(Run),
     Continue(String, String),
     Optimize(Optimize),
+    ProjectOptimization(Performance),
     Performance(Performance),
 }
 
@@ -429,18 +453,31 @@ async fn optimize(
             ));
         }
     }
-    start_run(
-        app,
-        match input {
-            OptimizeRequest::Performance(input) => RunInput::Performance(input),
-            OptimizeRequest::Optimize(input) => RunInput::Optimize(input),
-        },
-    )
-    .await
+    let input = match input {
+        OptimizeRequest::Performance(input) if app.performance => RunInput::Performance(input),
+        OptimizeRequest::Performance(input) => RunInput::ProjectOptimization(input),
+        OptimizeRequest::Optimize(input) => RunInput::Optimize(input),
+    };
+    start_run(app, input).await
 }
 
 async fn latest_optimization(State(app): State<App>) -> Result<Json<Option<Output>>> {
     let Some(id) = recovery::latest_optimization(&app)? else {
+        return Ok(Json(None));
+    };
+    let Json(output) = output(State(app), Path(id)).await?;
+    Ok(Json(Some(output)))
+}
+
+async fn performance(
+    State(app): State<App>,
+    Json(input): Json<Performance>,
+) -> Result<Json<serde_json::Value>> {
+    optimize(State(app), Json(OptimizeRequest::Performance(input))).await
+}
+
+async fn latest_performance(State(app): State<App>) -> Result<Json<Option<Output>>> {
+    let Some(id) = recovery::latest(&app, "performance")? else {
         return Ok(Json(None));
     };
     let Json(output) = output(State(app), Path(id)).await?;
@@ -493,8 +530,14 @@ async fn repository_save(
 async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>> {
     // Capture once per admission; never persist credentials with the job or snapshot.
     let performance = matches!(&input, RunInput::Performance(_));
-    // The fixed pipelines do not use model-provider credentials.
-    let profile = if performance {
+    let project_optimization = matches!(&input, RunInput::ProjectOptimization(_));
+    let app = if performance {
+        app.performance_app()
+    } else {
+        app
+    };
+    // The original fixed project pipelines do not use model-provider credentials.
+    let profile = if project_optimization {
         None
     } else {
         app.settings.profile()
@@ -509,7 +552,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         return Err(invalid("Execution provider settings exceed 64 KiB"));
     }
     let repository_save = matches!(&input, RunInput::RepositorySave(_));
-    let optimization = performance || matches!(&input, RunInput::Optimize(_));
+    let optimization = project_optimization || matches!(&input, RunInput::Optimize(_));
     let remote = app.remote.as_ref().ok_or_else(|| Error(
         if repository_save { StatusCode::FORBIDDEN } else { StatusCode::BAD_REQUEST },
         "Remote execution is disabled. Set SPEC_SSH_TARGET and SPEC_SSH_WORKSPACE on the local Rust server, then restart it.".into(),
@@ -533,7 +576,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
     };
     let mut optimization_spec = String::new();
     let (name, content, session_id) = match input {
-        RunInput::Performance(input) => {
+        RunInput::ProjectOptimization(input) => {
             optimization_spec = serde_json::to_string(&input).unwrap();
             let support = serde_json::to_string(include_str!("optimize.py")).unwrap();
             let snapshot = format!(
@@ -541,6 +584,14 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
                 include_str!("performance.py")
             );
             ("optimization".into(), snapshot, None)
+        }
+        RunInput::Performance(input) => {
+            optimization_spec = serde_json::to_string(&input).unwrap();
+            (
+                "performance".into(),
+                include_str!("performance-session.py").into(),
+                None,
+            )
         }
         RunInput::Optimize(input) => {
             optimization_spec = input.content;
@@ -609,7 +660,11 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         let jobs = app.jobs.lock().unwrap();
         let mut blockers = jobs.iter().filter(|job| {
             (job.recover || job.attached)
-                && (repository_save || optimization || job.repository_save || job.optimization)
+                && (performance
+                    || repository_save
+                    || optimization
+                    || job.repository_save
+                    || job.optimization)
         });
         if let Some(job) = blockers.next() {
             return Err(Error(
@@ -699,7 +754,9 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         jobs.push(job);
     }
     // All operations use the same fixed adapter and durable output/status protocol.
-    let mode = if session_id.is_some() {
+    let mode = if performance {
+        "performance"
+    } else if session_id.is_some() {
         "continue"
     } else if repository_save {
         "repository-save"
@@ -708,7 +765,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
     } else {
         "build"
     };
-    let mut command = if !profile_bytes.is_empty() {
+    let mut command = if performance || !profile_bytes.is_empty() {
         remote.execution_command(
             content.len(),
             &id,
@@ -766,6 +823,8 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             } else if repository_save {
                 b"[started] remote repository save over SSH with the saved snapshot as context and the existing repository workflow. Output and logs only.\n"
             } else if performance {
+                b"[started] Running built Gemma Reinforcement Learning in an independent Performance builder session for the explicit remote project. Stop run cancels this session only.\n"
+            } else if project_optimization {
                 b"[started] Running dataset_pipe and model_pipeline for the explicit remote project. Stage metrics and artifact paths follow. Stop run cancels.\n"
             } else if optimization {
                 b"[started] Uploading the editor spec to remote ~/projects and optimizing the latest detached build using its absolute path. No iteration or time limit; Stop run cancels. Progress and gain reports follow.\n"
@@ -850,7 +909,10 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
         }
         recovery::checkpoint(&app, &id);
         // An SSH exit alone is not authoritative remote completion evidence.
-        if let Err(error) = recovery::refresh_locked(&app, &id, false).await {
+        // Retry explicit Stop through recovery: attachment teardown may have
+        // killed the control reader before it forwarded the cancellation byte.
+        let cancel = *stopped.borrow() == RunControl::Cancel;
+        if let Err(error) = recovery::refresh_locked(&app, &id, cancel).await {
             eprintln!("Run {id} recovery: {}", error.1);
         }
     });
@@ -871,7 +933,9 @@ async fn active_runs(State(app): State<App>) -> Result<Json<Vec<ActiveRun>>> {
             id: job.id.clone(),
             name: job.name.clone(),
             status: job.status.clone(),
-            kind: if job.optimization {
+            kind: if app.performance {
+                "performance"
+            } else if job.optimization {
                 "optimization"
             } else if job.repository_save {
                 "repository-save"
@@ -901,7 +965,7 @@ async fn output(State(app): State<App>, Path(id): Path<String>) -> Result<Json<O
             .into_owned(),
         truncated: job.truncated,
         recoverable: job.recover,
-        continuable: !job.repository_save && !job.optimization,
+        continuable: !app.performance && !job.repository_save && !job.optimization,
     }))
 }
 
@@ -1059,6 +1123,15 @@ async fn retained_log(
 }
 
 fn router(app: App) -> Router {
+    let performance = Router::new()
+        .route(
+            "/api/performance",
+            get(latest_performance).post(performance),
+        )
+        .route("/api/performance/runs", get(active_runs))
+        .route("/api/performance/runs/{id}", get(output))
+        .route("/api/performance/runs/{id}/cancel", post(cancel))
+        .with_state(app.performance_app());
     Router::new()
         .route(
             "/api/config",
@@ -1118,9 +1191,36 @@ fn router(app: App) -> Router {
         .route("/api/runs/{id}", get(output))
         .route("/api/runs/{id}/cancel", post(cancel))
         .route("/api/runs/{id}/continue", post(continue_recommended))
+        .merge(performance)
         .layer(DefaultBodyLimit::max(MAX_FILE * 6 + 1024))
         .route_layer(middleware::from_fn_with_state(app.clone(), authenticate))
         .with_state(app)
+}
+
+async fn detach_and_wait(app: &App) {
+    let groups = [&app.jobs, &app.performance_state.jobs];
+    for jobs in groups {
+        for job in jobs.lock().unwrap().iter() {
+            // Server shutdown is not a user request to cancel remote work.
+            let _ = job.stop.send_if_modified(|control| {
+                if *control == RunControl::Cancel {
+                    false
+                } else {
+                    *control = RunControl::Detach;
+                    true
+                }
+            });
+        }
+    }
+    for _ in 0..100 {
+        if groups
+            .iter()
+            .all(|jobs| !jobs.lock().unwrap().iter().any(|job| job.attached))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[tokio::main]
@@ -1181,6 +1281,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         recovered: Arc::new(Mutex::new(false)),
         recovery_runs: Arc::default(),
         recovery_gate: Arc::new(tokio::sync::Mutex::new(())),
+        performance_state: RunState::default(),
+        performance: false,
         project_search_slots: Arc::new(tokio::sync::Semaphore::new(1)),
     };
     let port: u16 = std::env::var("SPEC_PORT")
@@ -1234,23 +1336,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let mut term =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
             tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
-            for job in app.jobs.lock().unwrap().iter() {
-                // Server shutdown is not a user request to cancel remote work.
-                let _ = job.stop.send_if_modified(|control| {
-                    if *control == RunControl::Cancel {
-                        false
-                    } else {
-                        *control = RunControl::Detach;
-                        true
-                    }
-                });
-            }
-            for _ in 0..100 {
-                if !app.jobs.lock().unwrap().iter().any(|job| job.attached) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
+            detach_and_wait(&app).await;
         })
         .await?;
     Ok(())

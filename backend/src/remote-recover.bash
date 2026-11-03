@@ -29,7 +29,7 @@ status=unknown
 if [[ -e status || -L status ]]; then
     private_file status && [[ $(stat -c %s status) -le 4 ]] || exit 125
     status=$(head -c 4 status)
-    [[ $status =~ ^(0|[1-9][0-9]{0,2})$ ]] && (( 10#$status <= 255 )) || exit 125
+    [[ $status =~ ^(0|[1-9][0-9]{0,2})$ && $(stat -c %s status) -eq $((${#status}+1)) ]] && (( 10#$status <= 255 )) || exit 125
 elif [[ -e lease || -L lease ]]; then
     private_file lease || exit 125
     exec 9<lease

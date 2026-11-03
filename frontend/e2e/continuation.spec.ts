@@ -66,6 +66,8 @@ async function workspace(page: Page, output: (Output & { continuable?: boolean }
     if (pathname === "/api/config") return route.fulfill({ json: { execution, completion: false, chat: false, realtime: false, azureRealtime: false } })
     if (pathname === "/api/files") return route.fulfill({ json: ["first.md", "second.md"].map((name) => ({ name, modified: 0, bytes: 10 })) })
     if (pathname === "/api/repository") return route.fulfill({ json: { connected: true, dirty: true, directory: "/fixture", model: "fixture-model" } })
+    if (pathname === "/api/performance") return route.fulfill({ json: null })
+    if (pathname === "/api/performance/runs") return route.fulfill({ json: [] })
     for (const name of ["first.md", "second.md"]) {
       if (pathname === `/api/files/${name}`) return route.fulfill({ json: { name, content: `Saved ${name}`, revision: "revision-1" } })
       if (pathname === `/api/files/${name}/run` || pathname === `/api/files/${name}/run/log`) return route.fulfill({ json: name === "first.md" ? output : second })
