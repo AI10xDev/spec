@@ -119,6 +119,56 @@ for (const width of [1440, 390, 320]) {
   })
 }
 
+for (const width of [1440, 320]) {
+  test(`Performance preserves the three-run missing-directory conflict without retrying or cancelling at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 })
+    await page.clock.install()
+    await page.clock.pauseAt(new Date(Date.now() + 1000))
+    const { requests, errors } = await workspace(page)
+    const id = "c1b51fb1-23af-4cde-a227-b13db85a448d"
+    await page.getByRole("button", { name: "Optimization", exact: true }).click()
+    await expect(page.getByLabel("Run output", { exact: true })).toHaveText(optimizer.output)
+    const status = `unavailable (remote recovery exit status: 125: remote run directory missing: .spec-runs/run-${id} (run ${id}); it may never have started or may have been removed; verify the configured remote workspace)`
+    const missing = { ...detail, id, name: "ref_web", status, kind: "build" }
+    const conflict = `This repository has 3 active or unresolved conflicting run(s). Blocking run: "ref_web" (run ${id}, status: ${status}). Open Active runs and load its output to check remote status before retrying. Unavailable status does not prove completion.`
+    await page.route("**/api/optimize", (route) => route.fulfill({ status: 409, json: { error: conflict } }))
+    await page.route("**/api/runs", (route) => route.fulfill({ json: [missing, ...blockers.slice(1)] }))
+    await page.route(`**/api/runs/${id}`, (route) => route.fulfill({ json: missing }))
+    const dialogs: string[] = []
+    page.on("dialog", async (dialog) => { dialogs.push(dialog.message()); await dialog.accept() })
+    const header = page.getByTitle("performance", { exact: true })
+    await header.click()
+    const form = page.getByRole("form", { name: "Performance pipelines", exact: true })
+    const project = form.getByRole("textbox", { name: "Project folder", exact: true })
+    await project.fill("team/project")
+    await form.getByRole("button", { name: "Run pipelines", exact: true }).click()
+    await expect(form.getByRole("alert")).toHaveText(conflict)
+    await expect(project).toHaveValue("team/project")
+    await expect(header).toBeEnabled()
+    await expect(header).toHaveAttribute("aria-expanded", "true")
+    await expect(page.getByLabel("Run output", { exact: true })).toHaveText(optimizer.output)
+    await form.getByRole("button", { name: "Inspect active runs", exact: true }).click()
+    await expect(inspector(page).getByRole("listitem")).toHaveCount(3)
+    await load(page, id)
+    await expect(inspector(page).getByLabel("Selected active run")).toContainText("still blocks the repository")
+    await expect(inspector(page)).toContainText("Remote output is unavailable")
+    await expect(page.getByLabel("Active run output", { exact: true })).toHaveText(missing.output)
+    await inspector(page).getByRole("button", { name: "Check status", exact: true }).click()
+    await expect.poll(() => requests.filter((request) => request.path === `/api/runs/${id}`).length).toBe(2)
+    await expect(inspector(page).getByText("Checking remote status...", { exact: true })).toHaveCount(0)
+    await expect(inspector(page).getByRole("listitem")).toHaveCount(3)
+    await expect(inspector(page)).not.toContainText("terminal and no longer blocks")
+    await expect(inspector(page).getByRole("button", { name: "Stop run", exact: true })).toBeEnabled()
+    await inspector(page).getByRole("button", { name: "Close active runs", exact: true }).click()
+    await expect(project).toHaveValue("team/project")
+    await expect(form.getByRole("alert")).toHaveText(conflict)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    expect(requests.filter((request) => request.method !== "GET")).toEqual([{ path: "/api/optimize", method: "POST" }])
+    expect(dialogs).toHaveLength(1)
+    expect(errors).toEqual([])
+  })
+}
+
 test("listing errors, explicit refresh, and an empty list never trigger remote reads", async ({ page }) => {
   const { requests } = await workspace(page)
   await page.route("**/api/runs", (route) => route.fulfill({ status: 503, json: { error: "Listing unavailable" } }))
