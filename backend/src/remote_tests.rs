@@ -1338,7 +1338,7 @@ async fn truncated_upload_never_starts_build_and_persists_rejection() {
     );
     let directory = fs::read_dir(root.path().join(".spec-runs"))
         .unwrap()
-        .filter(|entry| {
+        .find(|entry| {
             entry
                 .as_ref()
                 .unwrap()
@@ -1346,7 +1346,6 @@ async fn truncated_upload_never_starts_build_and_persists_rejection() {
                 .to_string_lossy()
                 .starts_with("run-")
         })
-        .next()
         .unwrap()
         .unwrap()
         .path();
@@ -2203,7 +2202,7 @@ async fn early_explicit_cancel_is_not_eof_or_snapshot_data() {
     assert_eq!(output.status.code(), Some(130));
     let directory = fs::read_dir(root.path().join(".spec-runs"))
         .unwrap()
-        .filter(|entry| {
+        .find(|entry| {
             entry
                 .as_ref()
                 .unwrap()
@@ -2211,7 +2210,6 @@ async fn early_explicit_cancel_is_not_eof_or_snapshot_data() {
                 .to_string_lossy()
                 .starts_with("run-")
         })
-        .next()
         .unwrap()
         .unwrap()
         .path();

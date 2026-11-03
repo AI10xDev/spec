@@ -9,3 +9,7 @@
 !.env.example
 *.log
 .DS_Store
+/.spec-runs/
+/.spec-settings-*/
+*.out
+__pycache__/

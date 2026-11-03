@@ -1145,7 +1145,19 @@ spec() {
             .unwrap();
         drop(stdin);
         assert!(output.status.success(), "{output:?}");
-        // Once the owner has finished, the previously excluded operation works.
+        // Attachment completion can precede supervisor teardown and lock release.
+        let released = tokio::process::Command::new("flock")
+            .args(["--exclusive", "--wait", "5"])
+            .arg(repo.path().join(".git/spec-harness"))
+            .arg("true")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            released.status.success(),
+            "first_save={first_save}: {released:?}"
+        );
+        // Once the owner has released its lock, the excluded operation works.
         let mut next_command = if first_save {
             batch(&second)
         } else {
@@ -1163,7 +1175,21 @@ spec() {
             .unwrap()
             .unwrap();
         drop(input);
-        assert!(output.status.success(), "{output:?}");
+        assert!(
+            output.status.success(),
+            "first_save={first_save}: {output:?}"
+        );
+        let released = tokio::process::Command::new("flock")
+            .args(["--exclusive", "--wait", "5"])
+            .arg(repo.path().join(".git/spec-harness"))
+            .arg("true")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            released.status.success(),
+            "first_save={first_save}: {released:?}"
+        );
         assert_eq!(
             fs::read_dir(repo.path().join(".git/spec-harness"))
                 .unwrap()

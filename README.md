@@ -4,11 +4,20 @@ A local-first **Rust backend + Vite / React / TypeScript frontend** for writing 
 
 This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates over SSH to the remote `spec build` alias/function. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
 
-## Latest release: v0.1.11
+## Latest release: v0.1.12
 
-[Spec v0.1.11](https://github.com/AI10xDev/spec/releases/tag/v0.1.11) fixes Performance rejecting Azure Responses endpoints with gateway routing prefixes. URLs ending in `/openai/v1` or `/openai/v1/responses` now preserve those prefixes, while resource-root endpoints and endpoint security checks remain supported. The uploaded `.optim` absolute-path handoff from v0.1.9 and execution-host dotenv credential loading from v0.1.10 are unchanged; config location and execution project remain separate. Optimization still uses independently measured convergence; a plateau is not proof of an upper bound or global optimum.
+[Spec v0.1.12](https://github.com/AI10xDev/spec/releases/tag/v0.1.12) brings together the changes since v0.1.11: five-provider AI settings, editor autosave and build feedback, history-aware planning, Analytics and build progress, retained-log recovery, and independent Performance sessions with project search. It also adds installation and real-world workflow guides. See the [release notes](docs/releases/v0.1.12.md) for scope, validation, and limitations.
 
-Rebuild and restart the local server, then reload the browser to use the updated optimizer. Prose mode needs the additional execution-host setup under [Optimization](#optimization). Releases are versioned by Git tags; package manifests retain `0.1.0`, following the existing source-release convention.
+Rebuild and restart the local server, then reconnect using its new token URL. Already-running remote supervisors are not upgraded. This is a Git-tagged source release, with no prebuilt binaries; package manifests remain at `0.1.0`, as in prior releases.
+
+## Documentation
+
+- [Installation](docs/INSTALLATION.md): prerequisites, local-first setup, remote execution, upgrades, and troubleshooting.
+- [Development workflows](docs/WORKFLOWS.md): writing useful specs, reviewing results, follow-ups, teamwork, and measured optimization.
+- [Workspace guide](docs/FEATURES.md): editing, autosave, shortcuts, conflicts, and output recovery.
+- [Configuration reference](#configuration) and [AI settings](#ai-settings): server variables and optional providers.
+- [Performance](PERFORMANCE.md), [Optimization](OPTIMIZE.md), and [Analytics](docs/ANALYTICS.md): specialized workflows and evidence limits.
+- [Security](docs/SECURITY.md): local access, credentials, and execution boundaries.
 
 ## Workspace showcase
 
@@ -24,14 +33,14 @@ Rebuild and restart the local server, then reload the browser to use the updated
 - **Reliable saves:** atomic replacement, private file permissions, and revision checks that reject stale saves instead of silently overwriting them.
 - **Local file workflow:** create, edit, save, reopen, and download UTF-8 files; Ctrl/Cmd+S saves the active editor.
 - **Completed spec lines:** press `/` to toggle the current line's `# ` completion marker; Alt+/ inserts a literal slash. The build agent is instructed to retain completed lines as context and implement only pending requirements.
-- **Trailing completions:** optional Azure-powered ghost text for the current sentence part; Tab or **Accept part** inserts it, Escape dismisses it.
+- **Trailing completions:** optional selected-provider ghost text for the current sentence part; Tab or **Accept part** inserts it, Escape dismisses it.
 - **Optional Save & run:** explicit confirmation, immutable saved-spec input, live output polling, follow toggle, cancellation, concurrency limits, and supervisor keep-alives every 60 seconds with no overall execution timeout.
 - **Rainbow build progress:** the selected build's latest complete CLI task list drives a live completion bar; missing counts show indeterminate activity, never a made-up percentage. See [progress reporting](#build-progress-reporting).
 - **Continue completed builds:** **Use recommended & continue** resumes the same captured engine session with a fixed recommended-choice prompt, without saving or uploading editor changes.
 - **History-aware planning:** initial builds, continuations, and prose optimization agents are instructed to read relevant previous `.out` spec outputs before planning. They reconcile completed features/refactors and validation evidence with the current code, avoid repeating confirmed work, and flag missing or uncertain evidence. This is an agent-driven review using file tools, not a completion flag inferred from a successful run; snapshots and completion markers remain unchanged.
 - **Analytics:** select a saved spec's `.out` report for read-only metric charts and optional validated `.eval` checks, with missing-report and incomplete-evidence warnings. See the [format and limitations](docs/ANALYTICS.md); local snapshots have no verified terminal status.
 - **Performance:** runs the existing built Gemma RL workflow through a fresh builder session for a remote project folder. Optional unsaved editor instructions accept any filename extension. Admission, recoverable output, and cancellation are independent of spec runs. See [performance](#performance) below.
-- **Save repo changes:** shown only when the configured remote directory belongs to a Git worktree with uncommitted changes. Uses `azure/gpt-6-sol` with the existing repository workflow and the saved spec as context.
+- **Save repo changes:** shown only when the configured remote directory belongs to a Git worktree with uncommitted changes. Uses the saved AI profile (or `azure/gpt-6-sol` fallback), the existing repository workflow, and the saved spec as context.
 - **Recoverable output:** reopening a saved spec restores its latest build output after browser or server restart, without rerunning the build.
 - **Separate session chat:** ask about the current nohup output, written spec, or general topics in a dedicated browser window, without adding chat to the editor/output panes.
 - **Voice and context tools:** independent OpenAI and Azure Realtime voice panels, current/last-answer context inspection, and a revision-checked Agent.md editor.
@@ -47,12 +56,15 @@ Read the [current code review and feature report (2026-10-28)](docs/CODE_REVIEW_
 Requirements: Linux, Rust/Cargo (tested with 1.98), and Bun (tested with 1.3.14) or Node.js 22.12+ with npm. Bun is recommended for reproducible frontend installs using `bun.lock`; the launcher's npm fallback does not use that lockfile. These tools are used for frontend dependency management/building only. The backend uses Unix file locking and process groups; Windows is not supported by this version.
 
 ```sh
-gh repo clone ai10xdev/spec
+git clone --branch v0.1.12 https://github.com/AI10xDev/spec.git
 cd spec
-./run.sh
+unset SPEC_COMMAND
+./run.sh --local
 ```
 
-`run.sh` loads the remote host from `~/ip` (user `opencode`), uses the local key `$HOME/Downloads/Spec_man.pem`, and creates remote `~/project` if missing. It exports the SSH settings to enable **Save & run**, then installs frontend dependencies, typechecks/builds the UI, and starts the release Rust server. Override the defaults with `SPEC_SSH_TARGET`, `SPEC_SSH_KEY`, and `SPEC_SSH_WORKSPACE`. Use `./run.sh --local` for the editor without SSH. It can be invoked from any working directory; relative workspace/UI paths are resolved from `backend/`. Stop it with Ctrl+C.
+`./run.sh --local` installs frontend dependencies, typechecks/builds the UI, and starts the release Rust server without SSH. No model credentials are required for editing. It does not disable any AI providers you have already configured. Stop it with Ctrl+C.
+
+Without `--local`, `run.sh` loads the remote host from `~/ip` (user `opencode`), uses the local key `$HOME/Downloads/Spec_man.pem`, and creates remote `~/project` if missing. Those are machine-specific defaults: configure `SPEC_SSH_TARGET`, `SPEC_SSH_KEY`, and `SPEC_SSH_WORKSPACE` for your own host before enabling **Save & run**. See [remote setup](docs/INSTALLATION.md#enable-remote-builds). The launcher can be invoked from any working directory; relative workspace/UI paths are resolved from `backend/`.
 
 For future builds without starting the server, run `./build.sh`. It installs frontend dependencies, typechecks/builds the UI into `frontend/dist`, and builds the release backend in `backend/target/release/spec` (or your configured Cargo target directory). No SSH key is needed to build the app. `run.sh` uses this same build script before launching.
 
@@ -60,14 +72,14 @@ New workspace directories are private. If an existing workspace is writable by g
 
 Open the **full URL printed by the server**, including `#token=…`. Production frontend assets are served by Rust from `frontend/dist`; there is no separate frontend server to start. The default address is `http://127.0.0.1:4780` and the default file workspace is `workspace/` at the repository root. Keep the printed token private.
 
-Create `idea.md` in the left sidebar, enter text, and click **Save**. It now appears in **Saved files**, including after restarting the server. Create or open a second file to get another editor tab.
+Create `idea.md` in the left sidebar, enter text, and click **Save**. Edited active sheets also autosave after 500 ms while the workspace window is focused; untouched new files do not. A failed write pauses autosave until an explicit Save retry, and revision conflicts require reconciliation. Check that the unsaved indicator clears before leaving. The file now appears in **Saved files**, including after restarting the server. Create or open a second file to get another editor tab.
 
 ### Use existing specs
 
 From the repository root, select an existing **trusted, flat directory**:
 
 ```sh
-SPEC_WORKSPACE="$HOME/specs" ./run.sh
+SPEC_WORKSPACE="$HOME/specs" ./run.sh --local
 ```
 
 The original shell function mirrors specs into `$HOME/specs`, so this can display those previously written files directly. **This edits the selected files in place.** Back them up first if needed. This version does not automatically read `~/.local/state/spec/saved-files` or traverse unrelated paths from that history. Nested folders, hidden files, symlinks, and non-UTF-8 files are not editable.
@@ -391,7 +403,7 @@ export DEPLOYMENT_NAME="YOUR-DEPLOYMENT"
 
 If the installed `spec build` command already works, it may be using OpenCode's Azure configuration in `~/.config/opencode/opencode.jsonc`. Map `providers.azure.settings.resourceName` to `https://RESOURCE.openai.azure.com/openai/v1`, its `apiKey` to `AZURE_OPENAI_API_KEY`, and the selected Azure model's `modelID` (or model name when no override exists) to `DEPLOYMENT_NAME`. A value such as `{env:AZURE_OPENAI_API_KEY}` is a reference: use the actual credential from the OpenCode server environment, not that placeholder. The Rust server needs its own exports or private `.env`; credentials available to OpenCode are not automatically inherited by it.
 
-Use your configured deployment name (default `gpt-5.5`). A legacy resource-root endpoint instead requires `AZURE_OPENAI_API_VERSION`. Endpoints must use HTTPS. No credentials are exposed to the browser or bundled in the repo; do not commit keys. Missing endpoint and key disables completions, while partial/invalid configuration fails startup.
+Use your configured deployment name (default `gpt-5.5`). A legacy resource-root endpoint instead requires `AZURE_OPENAI_API_VERSION`. Endpoints must use HTTPS. The text API does not return provider credentials to the browser; supply your own keys and do not commit them. Missing endpoint and key disables completions, while partial/invalid configuration fails startup.
 
 When configured, **Trailing completions** starts enabled and can be switched off in the editor. After 500 ms idle at a line's end, the browser sends up to 4,000 recent UTF-16 units (at most 16 KiB UTF-8) before the caret to the selected provider through the authenticated Rust API. This includes **unsaved text** and may incur provider costs. A muted suffix suggests one sentence part, capped at 160 characters and the first clause/sentence punctuation. **Tab** or **Accept part** inserts it; **Escape** dismisses until typing resumes. Selections, IME composition, and text after the caret on the same line suppress suggestions. Long ghost text is clipped at the pane edge; the Accept part button's tooltip shows the suffix. Suggestions are not saved or downloaded until accepted.
 
@@ -475,7 +487,7 @@ uses `SPEC_AI_ENV_FILE` or the nearest `.env`. Process `AZURE_OPENAI_REALTIME_*`
 exports take precedence, including empty values; unset unwanted exports to use
 file values. Restart the server and reload the browser after changing configuration.
 
-There are no credentials bundled in this repository and no automatic service installation. The existing `spec` shell alias is not modified. Run the new binary explicitly from `backend/target/release/spec` if the old shell function shadows its name.
+Supply your own credentials; there is no automatic service installation. Historical tracked run artifacts remain in Git clones/history, while release source archives exclude `.out` and `.spec-runs` artifacts; this is not a historical secret audit. The existing `spec` shell alias is not modified. Run the new binary explicitly from `backend/target/release/spec` if the old shell function shadows its name.
 
 ## Validation
 
@@ -500,13 +512,13 @@ bun run test:e2e
 Also run the standalone optimizer and Azure launcher suites from the repository root:
 
 ```sh
-python3 -B -m unittest discover -s backend/src -p optimize_test.py -v
+python3 -B -m unittest discover -s backend/src -p '*_test.py' -v
 node --test scripts/azure-voice.test.cjs
 ```
 
 Build the debug backend and frontend assets before browser tests: the fixtures use `backend/target/debug/spec` and `frontend/dist` without rebuilding them. Run in an environment without production provider/SSH exports so inherited settings cannot enable live integrations.
 
-Browser tests start isolated real Rust servers and temporary workspaces. They cover authentication, saved files, tabs, conflicts/downloads, in-flight saves, desktop/mobile layouts, optimization controls/recovery, same-session continuation, repository saving, chat/context editing, and both voice panels. Remote-build streaming/completion/cancellation/failure uses a local SSH stand-in and the actual fixed remote scripts; providers are mocked. They never use your specs or invoke a model. Screenshots are written under `frontend/test-results/`, not over the documentation image. See the [release notes](https://github.com/AI10xDev/spec/releases/tag/v0.1.7) for current results and the [historical validation results](docs/REVIEW.md#validation) for the original review.
+Browser tests start isolated real Rust servers and temporary workspaces. They cover authentication, saved files, tabs, conflicts/downloads, in-flight saves, desktop/mobile layouts, optimization controls/recovery, same-session continuation, repository saving, chat/context editing, and both voice panels. Remote-build streaming/completion/cancellation/failure uses a local SSH stand-in and the actual fixed remote scripts; providers are mocked. They never use your specs or invoke a model. Screenshots are written under `frontend/test-results/`, not over the documentation image. See the [v0.1.12 validation record](docs/releases/v0.1.12.md#validation) and the [historical validation results](docs/REVIEW.md#validation) for the original review.
 
 For a timed output smoke test, run `bun run test` from `frontend/`. It prints integers 1 through 100, starting immediately and waiting 1000 milliseconds between lines, then exits successfully (about 99 seconds total). Use `bun run test:unit` for the automated unit suite.
 

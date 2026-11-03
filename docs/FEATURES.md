@@ -6,7 +6,7 @@ This guide covers the core workspace. See the [README](../README.md#features) fo
 
 Start the Rust server and open its printed URL. The fragment supplies a per-process access token; the UI removes the fragment from the address bar and stores the token in the current tab's session storage. You can also paste the token into the connection form. Restarting Rust rotates the token: use its new URL.
 
-The editor's files are on the server machine, not uploaded to an application cloud. If you enable OpenCode, that external tool may send prompts and tool context to its configured provider. Optional Azure trailing completions send recent editor text, including unsaved text, to the configured Azure provider.
+The editor's files are on the server machine, not uploaded to an application cloud. If you enable OpenCode, that external tool may send prompts and tool context to its configured provider. Optional trailing completions send recent editor text, including unsaved text, to the selected provider.
 
 ## 2. Saved files tab — previously written files
 
@@ -43,7 +43,7 @@ The spec editor is a plain UTF-8 textarea with spellcheck disabled. It supports 
 
 Press `/` to toggle the current line's leading `# ` completion marker, preserving indentation, caret, and native undo. Alt+/ types a literal slash; slash input inside fenced code and IME composition remains native. Supplemental build instructions tell the agent to retain marked lines as context and implement only pending lines. Completion applies to that line only, not the following section. Headings (`##`), inline hashes, and hashes inside code blocks are not completion markers.
 
-With [Azure completion configured](../README.md#trailing-sentence-part-completions), **Trailing completions** offers muted ghost text after 500 ms idle at a line's end. It completes the current word or sentence part, stopping at the first clause/sentence boundary, up to 160 characters. Press **Tab** or click **Accept part** to insert it; press **Escape** to dismiss until the next edit. Acceptance also waits for the next edit before suggesting another part, even without final punctuation. The toggle disables provider requests across editor tabs; editing works without any provider configuration.
+With a [completion provider configured](../README.md#trailing-sentence-part-completions), **Trailing completions** offers muted ghost text after 500 ms idle at a line's end. It completes the current word or sentence part, stopping at the first clause/sentence boundary, up to 160 characters. Press **Tab** or click **Accept part** to insert it; press **Escape** to dismiss until the next edit. Acceptance also waits for the next edit before suggesting another part, even without final punctuation. The toggle disables provider requests across editor tabs; editing works without any provider configuration.
 
 Suggestions never modify saved/downloaded text until accepted. Selection, composition, blur, and tab switches clear them; stale requests cannot replace a newer suggestion. Existing text after the caret on the same line suppresses completion. The ghost stays on one visual line, clipped to the pane; its full suffix is in the Accept part tooltip. Native undo includes accepted text in supported browsers; browsers without `insertText` support use a direct insertion fallback. Provider errors appear beside the toggle, without blocking saves or launching a build.
 
@@ -77,7 +77,7 @@ With `SPEC_SSH_TARGET` and `SPEC_SSH_WORKSPACE` set on the **local** Rust server
 4. The right pane follows output. Disable **Follow output** to keep your scroll position.
 5. **Stop run** sends an explicit control byte to request remote process-group cancellation and snapshot cleanup. EOF or SSH disconnect only detaches the log viewer.
 
-A failure to launch the local SSH client is reported immediately. SSH connection/authentication failures and remote startup errors appear in the run output as failures. Process exit status is shown as completed or failed; completion means **CLI exit success**, not independent verification that generated software is correct. Snapshot creation must succeed before launch; the snapshot is removed after process cleanup. Some remote launchers strip trailing newlines when reading the prompt.
+A failure to launch the local SSH client is reported immediately. SSH connection/authentication and remote startup errors appear in the run output. An SSH attachment exit 255 leaves remote completion unconfirmed; it is not proof the remote command failed. A verified remote exit status is shown as completed or failed; completion means **CLI exit success**, not independent verification that generated software is correct. Snapshot creation must succeed before launch; the snapshot is removed after process cleanup. Some remote launchers strip trailing newlines when reading the prompt.
 
 ### Run limits and lifecycle
 
@@ -109,7 +109,7 @@ The Rust backend embeds the supervisor and sends it over SSH. To deploy this beh
 | Persistent V2 session inbox | Not ported; explicit [continuation of completed builds](../README.md#continue-a-completed-build) resumes the captured engine session |
 | Azure inline completion/filename ranking | Optional sentence-part trailing completions; filename ranking not ported |
 | `/eval`, `/telle`, legacy eval, plan picker | Not ported |
-| Terminal keybindings/syntax highlighting | Browser editing, save shortcut, and slash completion-marker toggle; no syntax highlighting |
+| Terminal keybindings/syntax highlighting | Browser editing, save/run shortcuts, slash completion-marker toggle, and display-only source highlighting |
 
 ## 8. Safety and privacy
 

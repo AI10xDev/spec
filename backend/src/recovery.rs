@@ -26,7 +26,11 @@ fn valid_id(id: &str) -> Result<()> {
 // Anchor all subsequent access to the opened directory, not a re-resolved path.
 // The workspace is already protected by the server's exclusive lock.
 fn directory(app: &App, create: bool) -> Result<File> {
-    let path = app.root.join(if app.performance { ".performance-output" } else { ".spec-output" });
+    let path = app.root.join(if app.performance {
+        ".performance-output"
+    } else {
+        ".spec-output"
+    });
     if create {
         match fs::DirBuilder::new().mode(0o700).create(&path) {
             Ok(()) => {

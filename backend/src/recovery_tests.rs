@@ -431,8 +431,7 @@ async fn closed_attached_persistence_failure_blocks_remote_io_and_retries() {
     for _ in 0..2 {
         let error = recovery::refresh(&state, &id, true)
             .await
-            .err()
-            .expect("unsafe persistence must fail closed");
+            .expect_err("unsafe persistence must fail closed");
         assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(!root.path().join("cancelled").exists());
         let jobs = state.jobs.lock().unwrap();

@@ -1,0 +1,3 @@
+# Historical session artifacts must not ship in source release archives.
+/.spec-runs export-ignore
+*.out export-ignore
