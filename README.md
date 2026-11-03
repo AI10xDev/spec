@@ -12,6 +12,7 @@ Rebuild and restart the local server, then reconnect using its new token URL. Al
 
 ## Documentation
 
+- [Start here: everyday use](usecase.md): plain-language installation, your first task, practical examples, and reviewing the results.
 - [Installation](docs/INSTALLATION.md): prerequisites, local-first setup, remote execution, upgrades, and troubleshooting.
 - [Development workflows](docs/WORKFLOWS.md): writing useful specs, reviewing results, follow-ups, teamwork, and measured optimization.
 - [Workspace guide](docs/FEATURES.md): editing, autosave, shortcuts, conflicts, and output recovery.
