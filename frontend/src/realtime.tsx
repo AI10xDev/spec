@@ -126,7 +126,10 @@ export function Realtime({ api, available, provider, onStart, context }: Props) 
 
     timer = setTimeout(() => fail("Voice connection timed out. Check microphone permission and your network, then try again."), 45_000)
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        // Preferences, not device requirements; keep OpenAI's existing capture behavior.
+        audio: azure ? { echoCancellation: { ideal: true }, noiseSuppression: { ideal: true } } : true,
+      })
       if (!current()) {
         stream.getTracks().forEach((track) => track.stop())
         return

@@ -135,7 +135,9 @@ pub async fn call(State(app): State<App>, Json(mut input): Json<Input>) -> Resul
     })?;
     // One deadline and one permit cover both requests, including response reads.
     tokio::time::timeout(provider.timeout, async {
-        let session = realtime::session(&mut input, &provider.deployment);
+        let mut session = realtime::session(&mut input, &provider.deployment);
+        // Filter noise before VAD rather than raising its threshold and losing quiet speech.
+        session["audio"]["input"]["noise_reduction"] = json!({"type": "near_field"});
         let response = provider
             .client
             .post(format!(

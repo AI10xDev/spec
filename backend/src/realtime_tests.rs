@@ -215,8 +215,8 @@ async fn unified_call_supplies_read_only_snapshot_without_touching_workspace() {
     assert_eq!(payload["output_modalities"], json!(["audio"]));
     assert_eq!(payload["audio"]["output"]["voice"], "marin");
     assert_eq!(
-        payload["audio"]["input"]["turn_detection"],
-        json!({"type": "server_vad", "create_response": true, "interrupt_response": true})
+        payload["audio"]["input"],
+        json!({"turn_detection": {"type": "server_vad", "create_response": true, "interrupt_response": true}})
     );
     assert_eq!(payload["tools"], json!([]));
     assert_eq!(payload["tool_choice"], "none");

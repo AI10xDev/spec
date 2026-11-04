@@ -23,6 +23,7 @@ type Peer = {
 type Harness = {
   permission: "granted" | "denied" | "pending"
   permissions: number; pending: (() => void)[]; peers: Peer[]
+  constraints: MediaStreamConstraints[]
   tracks: { kind: "mic" | "remote"; request: number; track: MediaStreamTrack; stops: number }[]
   autoReady: boolean; blockAudio: boolean; plays: number; pauses: number
 }
@@ -31,7 +32,7 @@ declare global { interface Window { __realtimeTest: Harness } }
 // Native MediaStreams keep srcObject assertions meaningful without accessing a real microphone.
 function installVoiceMocks() {
   const state: Harness = window.__realtimeTest = {
-    permission: "granted", permissions: 0, pending: [], peers: [], tracks: [],
+    permission: "granted", permissions: 0, pending: [], peers: [], tracks: [], constraints: [],
     autoReady: true, blockAudio: false, plays: 0, pauses: 0,
   }
   function stream(kind: "mic" | "remote", request: number) {
@@ -45,7 +46,8 @@ function installVoiceMocks() {
     return media
   }
   Object.defineProperty(navigator.mediaDevices, "getUserMedia", { value: async (constraints: MediaStreamConstraints) => {
-    if (constraints.audio !== true || constraints.video) throw new Error("Expected microphone audio only")
+    if (!constraints.audio || constraints.video) throw new Error("Expected microphone audio only")
+    state.constraints.push(constraints)
     const request = ++state.permissions
     if (state.permission === "denied") throw new DOMException("Mock permission denied", "NotAllowedError")
     if (state.permission === "pending") return new Promise<MediaStream>((resolve) => {
@@ -258,6 +260,7 @@ test("authenticated handshake uses fresh context, waits for readiness, plays aud
   await chat.getByRole("textbox", { name: "Your question" }).fill("Retain this text draft")
   await chat.getByRole("button", { name: "Start voice conversation" }).click()
   await expect.poll(() => chat.evaluate(() => window.__realtimeTest.peers[0]?.remoteDescription)).toEqual({ type: "answer", sdp: "mock-answer" })
+  expect(await chat.evaluate(() => window.__realtimeTest.constraints)).toEqual([{ audio: true }])
   expect(requests).toEqual([{
     sdp: "mock-offer", name, spec: "Unsaved voice context",
     output: { id: "voice-run", status: "succeeded", output: "Fresh output 1", truncated: true },
@@ -490,6 +493,9 @@ test("Azure mic works independently, sends fresh context to its authenticated ro
   await chat.evaluate(() => { window.__realtimeTest.autoReady = false; window.__realtimeTest.blockAudio = true })
   await panel.getByRole("button", { name: "Start Azure voice conversation" }).click()
   await expect.poll(() => chat.evaluate(() => window.__realtimeTest.peers[0]?.remoteDescription?.sdp)).toBe("mock-answer")
+  expect(await chat.evaluate(() => window.__realtimeTest.constraints)).toEqual([{
+    audio: { echoCancellation: { ideal: true }, noiseSuppression: { ideal: true } },
+  }])
   expect(azureRequests).toEqual([{ sdp: "mock-offer", name, spec: "Unsaved Azure context", output: { id: "voice-run", status: "succeeded", output: "Fresh output 1", truncated: true } }])
   expect(requests).toEqual([])
   await chat.evaluate(() => window.__realtimeTest.peers[0].connect())
@@ -505,6 +511,10 @@ test("Azure mic works independently, sends fresh context to its authenticated ro
   await chat.evaluate(() => window.__realtimeTest.peers[0].channel!.emit({ type: "response.output_audio_transcript.done", item_id: "azure-answer", transcript: "Azure spoken response" }))
   await expect(panel.getByRole("log")).toContainText("Azure spoken response")
   await expect(chat.getByRole("log", { name: "Conversation", exact: true })).not.toContainText("Azure spoken response")
+  await chat.evaluate(() => window.__realtimeTest.peers[0].channel!.emit({ type: "response.done", response: { status: "cancelled" } }))
+  await expect(panel.getByRole("button", { name: "Stop Azure voice conversation", exact: true })).toBeVisible()
+  await expect(panel.getByRole("alert")).toBeHidden()
+  expect(await chat.evaluate(() => window.__realtimeTest.peers[0].tracks[0].enabled)).toBe(true)
   await chat.setViewportSize({ width: 320, height: 740 })
   expect(await chat.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await chat.getByRole("button", { name: "Close Azure voice conversation and stop microphone", exact: true }).click()

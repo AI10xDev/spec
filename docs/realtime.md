@@ -247,7 +247,8 @@ The backend performs both requests against the configured resource origin:
 
 1. `POST /openai/v1/realtime/client_secrets` with `api-key: <Azure key>` and
    `Content-Type: application/json`. The body is `{"session": {...}}`, using
-   exactly the session settings above with `model` set to the Azure deployment.
+   the session settings above with `model` set to the Azure deployment and
+   `audio.input.noise_reduction` set to `{"type":"near_field"}`.
    The response must contain a top-level nonempty string `value` (the ephemeral
    token); other response metadata is ignored. No OpenAI/application bearer
    credential is sent on this request.
@@ -265,6 +266,31 @@ sensitive and provider bodies/headers/errors are never forwarded.
 
 Verified against [Microsoft's GA WebRTC guide](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/realtime-audio-webrtc?view=foundry-classic)
 on 2026-10-09, including its backend-proxied raw-SDP negotiation example.
+
+### Azure Background Noise
+
+Azure sessions enable input noise reduction before audio reaches server VAD and
+the model. The `near_field` profile targets a close-talking microphone, such as a
+headset. Laptop or conference-room microphones at a distance may need the
+provider's `far_field` profile instead; validate with the actual microphone.
+The Azure browser capture also requests `echoCancellation` and `noiseSuppression`
+as optional (`ideal`) preferences. Unsupported preferences do not prevent capture;
+the actual processing depends on the browser/device. Automatic gain control is
+left at the browser default, not disabled or boosted by the application.
+
+The VAD activation threshold, prefix padding, and end-of-turn timing remain at
+provider defaults. Raising the threshold indiscriminately can miss quiet speech.
+Automatic responses and intentional spoken interruptions remain enabled, and the
+microphone stays live during playback. OpenAI capture/session settings are unchanged.
+This is noise filtering, not speaker identification: nearby conversations may
+still trigger VAD. No voiceprint enrollment or intended-speaker verification is
+implemented, and unchanged recognition accuracy cannot be guaranteed without
+live acoustic testing.
+
+The settings follow [Microsoft's Realtime reference](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/realtime-audio-reference)
+and the linked [GA client-secret API](https://developers.openai.com/api/reference/resources/realtime/subresources/client_secrets/methods/create),
+checked on 2026-11-04. Rebuild/restart the app, reload the page, and start a new
+voice conversation to apply the changes; existing calls retain their settings.
 
 ## Context And Limits
 
@@ -357,7 +383,9 @@ still required to verify audio and actual model availability end to end.
 separation, independent environment configuration in isolated subprocesses,
 trusted-origin validation, route authentication/capabilities, input/body limits,
 concurrency/cancellation, both-stage sanitized failures and response bounds,
-redirect refusal, transport failure, and the combined handshake deadline.
+redirect refusal, transport failure, and the combined handshake deadline. Session
+assertions cover Azure noise reduction, unchanged VAD/barge-in settings, and
+isolation from OpenAI's input settings.
 
 From `frontend/`, run `bun run build`, `bun run test:unit`, and
 `bun run test:e2e` (build the debug Rust server first with `cargo build --locked`).
@@ -365,4 +393,19 @@ From `frontend/`, run `bun run build`, `bun run test:unit`, and
 to cover independent provider availability, authenticated Azure routing, fresh
 context, readiness, audio playback/recovery, transcripts, provider switching,
 cancellation races, error cleanup, page hide, and narrow-screen layout alongside
-the existing OpenAI tests. These mocks do not establish a live provider connection.
+the existing OpenAI tests. They also check optional Azure capture constraints and
+that a cancelled response leaves the Azure microphone/session live. These mocks
+do not establish a live provider connection or measure acoustic performance.
+
+Before claiming reduced false interruptions without lost speech, compare baseline
+and updated sessions with the same device, microphone distance, and playback volume:
+
+1. Play an assistant answer while typing, running a fan, and making brief desk
+   noises. Count unintended interruptions over equal-duration trials.
+2. Speak normally and quietly, including short commands such as "stop" and "yes",
+   both alone and over that noise. Check recognition and initial-word clipping.
+3. Deliberately interrupt assistant playback. Check that it still stops promptly
+   and understands the complete request. Repeat with headphones and speakers.
+4. Include background conversation separately; noise suppression is not a promise
+   to ignore other speakers. Record false interruptions, missed requests, and
+   interruption latency rather than relying on a single successful call.

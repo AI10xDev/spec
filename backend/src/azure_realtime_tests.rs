@@ -272,10 +272,12 @@ async fn ga_protocol_keeps_credentials_separate_and_snapshot_read_only() {
             .is_none()
     );
     let mut decoded: Input = serde_json::from_value(input()).unwrap();
-    assert_eq!(
-        payload["session"],
-        realtime::session(&mut decoded, "voice-deployment")
-    );
+    let mut expected = realtime::session(&mut decoded, "voice-deployment");
+    expected["audio"]["input"] = json!({
+        "noise_reduction": {"type": "near_field"},
+        "turn_detection": {"type": "server_vad", "create_response": true, "interrupt_response": true},
+    });
+    assert_eq!(payload["session"], expected);
     assert!(!String::from_utf8_lossy(&body).contains("azure-secret"));
     let (uri, headers, body) = mock.requests.recv().await.unwrap();
     assert_eq!(uri, "/openai/v1/realtime/calls"); // No api-version or webrtcfilter.
