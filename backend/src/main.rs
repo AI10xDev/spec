@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 mod ai_settings;
 mod analytics;
-mod azure_realtime;
+mod azure_voice;
 mod chat;
 mod completion;
 mod project_search;
@@ -40,7 +40,7 @@ mod realtime;
 mod recovery;
 mod remote;
 mod settings;
-use azure_realtime::AzureRealtime;
+use azure_voice::AzureVoice;
 use completion::Completion;
 use realtime::Realtime;
 use remote::Remote;
@@ -60,7 +60,7 @@ struct App {
     completion: Option<Completion>,
     settings: Arc<settings::Store>,
     realtime: Option<Realtime>,
-    azure_realtime: Option<AzureRealtime>,
+    azure_voice: Option<AzureVoice>,
     files: Arc<Mutex<()>>,
     jobs: Arc<Mutex<Vec<Job>>>,
     recovered: Arc<Mutex<bool>>,
@@ -1213,7 +1213,7 @@ fn router(app: App) -> Router {
                     "completion": completion,
                     "chat": completion,
                     "realtime": app.realtime.is_some(),
-                    "azureRealtime": app.azure_realtime.is_some(),
+                    "azureVoice": app.azure_voice.is_some(),
                 }))
             }),
         )
@@ -1231,8 +1231,8 @@ fn router(app: App) -> Router {
             post(realtime::call).layer(DefaultBodyLimit::max(realtime::MAX_BODY)),
         )
         .route(
-            "/api/realtime/azure",
-            post(azure_realtime::call).layer(DefaultBodyLimit::max(realtime::MAX_BODY)),
+            "/api/voice/azure",
+            post(azure_voice::call).layer(DefaultBodyLimit::max(azure_voice::MAX_BODY)),
         )
         .route(
             "/api/chat",
@@ -1340,8 +1340,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Err(error) => return Err(error.into()),
     };
     let realtime = Realtime::from_env()?;
-    let azure_realtime = AzureRealtime::from_env().unwrap_or_else(|error| {
-        eprintln!("Azure Realtime voice disabled: {error}. Text chat configuration is unchanged.");
+    let azure_voice = AzureVoice::from_env().unwrap_or_else(|error| {
+        eprintln!("Azure voice disabled: {error}. Text chat configuration is unchanged.");
         None
     });
     let app = App {
@@ -1351,7 +1351,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         completion,
         settings,
         realtime,
-        azure_realtime,
+        azure_voice,
         files: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(Vec::new())),
         recovered: Arc::new(Mutex::new(false)),
@@ -1378,11 +1378,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             "AI chat and ghost text: disabled. Configure a provider in Settings, or set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env or the server environment and restart; see .env.example."
         );
     }
-    if app.azure_realtime.is_some() {
-        println!("Azure Realtime voice: enabled");
+    if app.azure_voice.is_some() {
+        println!("Azure voice: enabled (Whisper STT and audio responses)");
     } else {
         println!(
-            "Azure Realtime voice: disabled. Set AZURE_OPENAI_REALTIME_ENDPOINT, AZURE_OPENAI_REALTIME_API_KEY, and AZURE_OPENAI_REALTIME_DEPLOYMENT in the local server environment, .env, or SPEC_AZURE_REALTIME_ENV_FILE. Then restart the server and reload."
+            "Azure voice: disabled. Set AZURE_OPENAI_VOICE_ENDPOINT, AZURE_OPENAI_VOICE_API_KEY, AZURE_OPENAI_WHISPER_DEPLOYMENT, and AZURE_OPENAI_AUDIO_DEPLOYMENT in the local server environment, .env, or SPEC_AZURE_VOICE_ENV_FILE. Then restart the server and reload."
         );
     }
     if app.remote.is_some() {

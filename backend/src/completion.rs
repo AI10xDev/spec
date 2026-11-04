@@ -1075,7 +1075,7 @@ mod tests {
         assert_eq!(config.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(
             response_json(config).await,
-            json!({"execution": false, "completion": false, "chat": false, "realtime": false, "azureRealtime": false})
+            json!({"execution": false, "completion": false, "chat": false, "realtime": false, "azureVoice": false})
         );
         let response = request(
             state.clone(),

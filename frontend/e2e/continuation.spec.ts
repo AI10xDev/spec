@@ -64,7 +64,7 @@ async function workspace(page: Page, output: (Output & { continuable?: boolean }
     const request = route.request()
     const pathname = new URL(request.url()).pathname
     if (request.method() !== "GET") return route.fulfill({ status: 500, json: { error: "Unexpected write" } })
-    if (pathname === "/api/config") return route.fulfill({ json: { execution, completion: false, chat: false, realtime: false, azureRealtime: false } })
+    if (pathname === "/api/config") return route.fulfill({ json: { execution, completion: false, chat: false, realtime: false, azureVoice: false } })
     if (pathname === "/api/files") return route.fulfill({ json: ["first.md", "second.md"].map((name) => ({ name, modified: 0, bytes: 10 })) })
     if (pathname === "/api/repository") return route.fulfill({ json: { connected: true, dirty: true, directory: "/fixture", model: "fixture-model" } })
     if (pathname === "/api/performance") return route.fulfill({ json: null })

@@ -73,7 +73,7 @@ async function workspace(page: Page, options: { latest?: typeof completed | null
     }
     if (pathname === "/api/performance/runs") return route.fulfill({ json: [] })
     if (request.method() !== "GET") return route.fulfill({ status: 500, json: { error: "Unexpected write" } })
-    if (pathname === "/api/config") return route.fulfill({ json: { execution: options.execution ?? true, completion: false, chat: false, realtime: false, azureRealtime: false } })
+    if (pathname === "/api/config") return route.fulfill({ json: { execution: options.execution ?? true, completion: false, chat: false, realtime: false, azureVoice: false } })
     if (pathname === "/api/files") return route.fulfill({ json: ["optimization", "objectives.optim", "second.md"].map((name) => ({ name, modified: 0, bytes: 10 })) })
     if (pathname === "/api/repository") return route.fulfill({ json: { connected: true, dirty: true, directory: "/fixture", model: "fixture-model" } })
     for (const name of ["optimization", "objectives.optim", "second.md"]) {

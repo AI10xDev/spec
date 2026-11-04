@@ -56,7 +56,7 @@ async function workspace(page: Page, options: { content?: string; completion?: b
       return route.fulfill({ status: 503, json: { error: "Unexpected mutation" } })
     }
     let json: unknown
-    if (endpoint === "/config") json = { execution: true, completion: options.completion ?? false, chat: false, realtime: false, azureRealtime: false }
+    if (endpoint === "/config") json = { execution: true, completion: options.completion ?? false, chat: false, realtime: false, azureVoice: false }
     else if (endpoint === "/files") json = Object.entries(files).map(([name, content]) => ({ name, bytes: content.length, modified: 0 }))
     else if (endpoint === "/repository") json = { connected: true, dirty: true, directory: "/fixture", model: "fixture" }
     else if (endpoint === "/performance") json = null

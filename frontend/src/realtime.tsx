@@ -3,7 +3,6 @@ import { useEffect, useId, useRef, useState } from "react"
 type Props = {
   api: <T>(path: string, body?: unknown, method?: string) => Promise<T>
   available: boolean
-  provider: "openai" | "azure"
   onStart: (stop: () => void) => void
   context: () => Promise<{
     name: string
@@ -13,10 +12,9 @@ type Props = {
 }
 type Transcript = { id: string; role: "user" | "assistant"; text: string }
 
-export function Realtime({ api, available, provider, onStart, context }: Props) {
-  const azure = provider === "azure"
-  const service = azure ? "Azure OpenAI" : "OpenAI"
-  const conversation = azure ? "Azure voice conversation" : "voice conversation"
+export function Realtime({ api, available, onStart, context }: Props) {
+  const service = "OpenAI"
+  const conversation = "voice conversation"
   const id = useId()
   const [open, setOpen] = useState(false)
   const [phase, setPhase] = useState<"idle" | "connecting" | "connected">("idle")
@@ -127,8 +125,7 @@ export function Realtime({ api, available, provider, onStart, context }: Props) 
     timer = setTimeout(() => fail("Voice connection timed out. Check microphone permission and your network, then try again."), 45_000)
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        // Preferences, not device requirements; keep OpenAI's existing capture behavior.
-        audio: azure ? { echoCancellation: { ideal: true }, noiseSuppression: { ideal: true } } : true,
+        audio: true,
       })
       if (!current()) {
         stream.getTracks().forEach((track) => track.stop())
@@ -206,7 +203,7 @@ export function Realtime({ api, available, provider, onStart, context }: Props) 
       const sdp = peer.localDescription?.sdp
       if (!sdp) throw new Error("The browser did not create an SDP offer.")
       stage = "Voice session request failed"
-      const answer = await api<{ sdp: string }>(azure ? "/realtime/azure" : "/realtime", {
+      const answer = await api<{ sdp: string }>("/realtime", {
         sdp, name: snapshot.name, spec: snapshot.spec, output: snapshot.output,
       }, "POST")
       if (!current()) return
@@ -231,26 +228,25 @@ export function Realtime({ api, available, provider, onStart, context }: Props) 
 
   return <>
     <div className="chat-tools">
-      <button type="button" className="mic-button" aria-expanded={open} aria-controls={id} aria-label={open ? `Close ${conversation} and stop microphone` : azure ? "Open Azure OpenAI Realtime voice conversation (mic button)" : "Open voice conversation"} onClick={() => {
+      <button type="button" className="mic-button" aria-expanded={open} aria-controls={id} aria-label={open ? `Close ${conversation} and stop microphone` : "Open voice conversation"} onClick={() => {
         if (open) stop()
         setOpen(!open)
       }}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true" focusable="false"><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" /></svg>
-        {open ? `Close ${azure ? "Azure " : ""}voice` : `${service} ${azure ? "mic" : "voice conversation"}`}
+        {open ? "Close voice" : "OpenAI voice conversation"}
       </button>
     </div>
     <section id={id} className="realtime-panel" aria-labelledby={`${id}-heading`} hidden={!open}>
       <h2 id={`${id}-heading`}>{service} Realtime voice conversation</h2>
       <p className="hint" id={`${id}-privacy`}>Starting sends a snapshot of this file's name, current spec and available output to {service}. Your microphone transmits audio to {service} while connected, including while assistant audio plays. Stop or close this panel to turn it off. Context is refreshed only when starting a new voice session; text chat stays separate. Starting either provider stops the other voice session.</p>
       {!available && <p className="hint">{service} Realtime voice is not configured on the server. Text chat is independent.</p>}
-      {!available && azure && <p className="hint">Set <code>AZURE_OPENAI_REALTIME_ENDPOINT</code>, <code>AZURE_OPENAI_REALTIME_API_KEY</code>, and <code>AZURE_OPENAI_REALTIME_DEPLOYMENT</code> in the local Rust server's environment, or export <code>SPEC_AZURE_REALTIME_ENV_FILE</code> pointing to an existing private voice-only dotenv file (absolute path recommended). Leave text-chat settings unchanged. Restart the server and reload this page. Browser and remote build environments are not automatically transferred to the local server. Never put secrets in the browser.</p>}
       {unsupported && <p className="hint">{unsupported}</p>}
       <p role="status" aria-live="polite">{status}</p>
       {error && <p className="error" role="alert">{error}</p>}
       <div className="chat-tools">
         {phase === "idle"
           ? <button type="button" className="mic-button" disabled={!available || !!unsupported} aria-describedby={`${id}-privacy`} onClick={() => void start()}>Start {conversation}</button>
-          : <button type="button" className="mic-button" onClick={stop}>{phase === "connecting" ? `Cancel ${azure ? "Azure " : ""}connection` : `Stop ${conversation}`}</button>}
+          : <button type="button" className="mic-button" onClick={stop}>{phase === "connecting" ? "Cancel connection" : `Stop ${conversation}`}</button>}
         {audioBlocked && <button type="button" onClick={() => void session.current?.play()}>Resume audio</button>}
       </div>
       {audioBlocked && <p className="hint" role="status">Assistant audio could not play automatically. Select Resume audio to hear it. Your microphone remains live while connected.</p>}
