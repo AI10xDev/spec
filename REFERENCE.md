@@ -4,9 +4,9 @@ A local-first **Rust backend + Vite / React / TypeScript frontend** for writing 
 
 This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates over SSH to the remote `spec build` alias/function. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
 
-## Latest release: v0.1.12
+## Latest release: v0.1.13
 
-[Spec v0.1.12](https://github.com/AI10xDev/spec/releases/tag/v0.1.12) brings together the changes since v0.1.11: five-provider AI settings, editor autosave and build feedback, history-aware planning, Analytics and build progress, retained-log recovery, and independent Performance sessions with project search. It also adds installation and real-world workflow guides. See the [release notes](docs/releases/v0.1.12.md) for scope, validation, and limitations.
+[Spec v0.1.13](https://github.com/AI10xDev/spec/releases/tag/v0.1.13) adds persistent saved-editor build queues, the opt-in Computeruse shared-file bridge, and conversational guided setup. Azure voice uses Realtime WebRTC with near-field noise reduction; the intermediate Whisper/audio-mini application path has been rolled back. See the [release notes](docs/releases/v0.1.13.md) for scope, validation, and upgrade instructions.
 
 Rebuild and restart the local server, then reconnect using its new token URL. Already-running remote supervisors are not upgraded. This is a Git-tagged source release, with no prebuilt binaries; package manifests remain at `0.1.0`, as in prior releases.
 
@@ -58,7 +58,7 @@ Read the [current code review and feature report (2026-10-28)](docs/CODE_REVIEW_
 Requirements: Linux, Rust/Cargo (tested with 1.98), and Bun (tested with 1.3.14) or Node.js 22.12+ with npm. Bun is recommended for reproducible frontend installs using `bun.lock`; the launcher's npm fallback does not use that lockfile. These tools are used for frontend dependency management/building only. The backend uses Unix file locking and process groups; Windows is not supported by this version.
 
 ```sh
-git clone --branch v0.1.12 https://github.com/AI10xDev/spec.git
+git clone --branch v0.1.13 https://github.com/AI10xDev/spec.git
 cd spec
 unset SPEC_COMMAND
 ./run.sh --local
@@ -520,7 +520,7 @@ node --test scripts/azure-voice.test.cjs
 
 Build the debug backend and frontend assets before browser tests: the fixtures use `backend/target/debug/spec` and `frontend/dist` without rebuilding them. Run in an environment without production provider/SSH exports so inherited settings cannot enable live integrations.
 
-Browser tests start isolated real Rust servers and temporary workspaces. They cover authentication, saved files, tabs, conflicts/downloads, in-flight saves, desktop/mobile layouts, optimization controls/recovery, same-session continuation, repository saving, chat/context editing, and both voice panels. Remote-build streaming/completion/cancellation/failure uses a local SSH stand-in and the actual fixed remote scripts; providers are mocked. They never use your specs or invoke a model. Screenshots are written under `frontend/test-results/`, not over the documentation image. See the [v0.1.12 validation record](docs/releases/v0.1.12.md#validation) and the [historical validation results](docs/REVIEW.md#validation) for the original review.
+Browser tests start isolated real Rust servers and temporary workspaces. They cover authentication, saved files, tabs, conflicts/downloads, in-flight saves, desktop/mobile layouts, optimization controls/recovery, same-session continuation, repository saving, chat/context editing, and both voice panels. Remote-build streaming/completion/cancellation/failure uses a local SSH stand-in and the actual fixed remote scripts; providers are mocked. They never use your specs or invoke a model. Screenshots are written under `frontend/test-results/`, not over the documentation image. See the [v0.1.13 validation record](docs/releases/v0.1.13.md#validation) and the [historical validation results](docs/REVIEW.md#validation) for the original review.
 
 For a timed output smoke test, run `bun run test` from `frontend/`. It prints integers 1 through 100, starting immediately and waiting 1000 milliseconds between lines, then exits successfully (about 99 seconds total). Use `bun run test:unit` for the automated unit suite.
 

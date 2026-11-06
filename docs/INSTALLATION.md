@@ -29,10 +29,10 @@ No model account, API key, GPU, or SSH host is required for basic editing.
 Source builds download dependencies; `--local` means no remote builds, not an
 offline mode or a network sandbox.
 
-## Guided Setup (Development Branch)
+## Guided Setup
 
-The development branch includes a conversational CLI wizard. This entry point is
-not part of the existing v0.1.12 tag. From a current source checkout:
+Starting with v0.1.13, releases include a conversational CLI wizard. From the
+release checkout:
 
 ```sh
 ./setup.sh
@@ -142,7 +142,7 @@ bash -n setup.sh
 From a directory where you keep source checkouts:
 
 ```sh
-git clone --branch v0.1.12 https://github.com/AI10xDev/spec.git
+git clone --branch v0.1.13 https://github.com/AI10xDev/spec.git
 cd spec
 unset SPEC_COMMAND
 ./run.sh --local
@@ -150,11 +150,11 @@ unset SPEC_COMMAND
 
 This selects the release tag in detached-HEAD mode. Use `git switch -c my-work`
 before making your own source commits. For the latest development branch instead,
-clone without `--branch v0.1.12`. If GitHub requests authentication, authenticate
+clone without `--branch v0.1.13`. If GitHub requests authentication, authenticate
 with an account that has repository access; never embed tokens in clone URLs.
 
 Alternatively, download **Source code (tar.gz)** or **Source code (zip)** from the
-[release page](https://github.com/AI10xDev/spec/releases/tag/v0.1.12), extract it,
+[release page](https://github.com/AI10xDev/spec/releases/tag/v0.1.13), extract it,
 and run `./run.sh --local` from the extracted directory. These archives exclude
 historical `.out` and `.spec-runs` artifacts. Git clones still contain tracked
 historical artifacts and history; archive exclusions are not a secret audit or
@@ -262,7 +262,7 @@ Do not force a checkout or discard work just to upgrade. Then select the release
 
 ```sh
 git fetch origin --tags
-git switch --detach v0.1.12
+git switch --detach v0.1.13
 ./build.sh
 ```
 
@@ -271,6 +271,14 @@ and SSH settings (`./run.sh --local` for editing only). Reconnect using the newl
 printed token URL. No automatic service restart occurs. Back up specs and private
 `.spec-output/` records; retain access to the settings file and original remote
 host/workspace for recovery. Do not publish those backups.
+
+For wizard-based installations upgraded in place, reuse
+`bash "$HOME/.spec-setup/start.sh"` (or your custom setup launcher). It restores
+the selected workspace, SSH settings, `SPEC_SETTINGS_FILE`, and private Azure
+voice-file selector; calling `./run.sh --local` directly does not restore those
+exports. A saved launcher contains an absolute checkout path. If you extracted
+the release into a new directory, create a new setup or deliberately update the
+launcher to use that checkout while preserving your private settings.
 
 Already-uploaded remote runs normally survive server/browser shutdown and keep
 their original supervisor behavior. Inspect them before starting new work. An

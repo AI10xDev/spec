@@ -20,12 +20,12 @@ README. Spec helps organize that work; you still review and test the changes.
 
 ## Install And Open Spec
 
-### Guided Setup (Development Branch)
+### Guided Setup
 
-For the new conversational setup flow, clone the development branch and run:
+For the conversational setup flow, clone the release and run:
 
 ```sh
-git clone https://github.com/AI10xDev/spec.git
+git clone --branch v0.1.13 https://github.com/AI10xDev/spec.git
 cd spec
 ./setup.sh
 ```
@@ -43,8 +43,8 @@ OS packages are never installed automatically. Saved setup lives privately in
 
 Use `./setup.sh --dry-run` to preview, `./setup.sh --check` for dependency checks,
 or `./setup.sh --no-animation` for static output. See the
-[wizard guide](docs/INSTALLATION.md#guided-setup-development-branch) for secrets,
-existing configuration, and rerunning setup. The tagged v0.1.12 instructions below
+[wizard guide](docs/INSTALLATION.md#guided-setup) for secrets,
+existing configuration, and rerunning setup. The manual instructions below
 remain available and do not require Python for local editing.
 
 ### 1. Prepare Your Computer
@@ -69,7 +69,7 @@ bun --version
 ```
 
 If you chose Node.js instead of Bun, check `node --version` and `npm --version`.
-There is no prebuilt app installer in v0.1.12, so the first launch builds the app
+There is no prebuilt app installer in v0.1.13, so the first launch builds the app
 on your computer. You do not need a GPU.
 
 ### 2. Download And Start
@@ -77,7 +77,7 @@ on your computer. You do not need a GPU.
 In a terminal, from a folder where you keep projects, run:
 
 ```sh
-git clone --branch v0.1.12 https://github.com/AI10xDev/spec.git
+git clone --branch v0.1.13 https://github.com/AI10xDev/spec.git
 cd spec
 unset SPEC_COMMAND
 ./run.sh --local
@@ -226,7 +226,7 @@ Report the changed files, test commands and results, and anything not checked.
 | What you want | What to use |
 | --- | --- |
 | Keep your writing without starting work | **Save**. |
-| Run the requirements currently in the editor | **Save & run**, after the previous run is resolved. |
+| Run the requirements currently in the editor | **Save & run**; during an eligible active build, confirm queueing the saved snapshot instead. |
 | Ask a successful build to do one more thing | Type the instruction in feedback and use **Send & continue**, when available. |
 | Ask about the task or output without changing code | **Session chat**, if an AI provider is configured. This is separate from the coding agent. |
 
@@ -234,6 +234,12 @@ Report the changed files, test commands and results, and anything not checked.
 the spec, use a new **Save & run** instead. Do not start another run against the
 same project just because output is quiet; first check whether the current one
 is still working.
+
+During an eligible active build, **Save & run** can queue a fixed saved-editor
+snapshot for execution after confirmed successful completion. This queue survives
+browser/server restarts; later editor changes do not alter it. Unlike browser-only
+queued feedback, it does not need the chat page to stay open. See
+[saved editor follow-ups](docs/FEATURES.md#queue-saved-editor-follow-ups).
 
 ### Track What You Have Checked
 
@@ -325,7 +331,7 @@ evidence that it worked.
 | A complaint about `~/ip` or an SSH key when you only want the editor | Start with `./run.sh --local`. |
 | The browser says unauthorized after restarting | Open the new full token URL printed by the server. |
 | The port is already in use | Stop the previous local app, or launch with `SPEC_PORT=4781 ./run.sh --local` and follow its printed URL. |
-| Save & run is disabled | It is expected in local mode. If remote execution is configured, check whether an earlier run is active or unresolved. |
+| Save & run is disabled | It is expected in local mode. With remote execution, check unresolved runs, existing queues, and pending saves. Eligible active builds allow queueing a saved snapshot rather than starting a duplicate run. |
 | A save conflict appears | **Download** your draft first. Close its editor tab and confirm discarding that editor copy, then refresh **Saved files**, reopen the file, and merge your changes. Selecting the already-open tab will not reload it. |
 | The browser closed or the connection dropped during a build | Reopen the app and saved spec, then use **Load nohup output** or **Active runs** to inspect the existing run before retrying. |
 | You need to stop a build | Use **Stop run** and check that cancellation is confirmed. Closing the browser or stopping the local app normally does not stop an uploaded remote build. |
