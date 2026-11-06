@@ -34,6 +34,7 @@ mod analytics;
 mod azure_voice;
 mod chat;
 mod completion;
+mod computeruse;
 mod project_search;
 mod queued_builds;
 mod realtime;
@@ -57,6 +58,7 @@ struct App {
     root: PathBuf,
     token: String,
     remote: Option<Remote>,
+    computeruse: Arc<computeruse::Bridge>,
     completion: Option<Completion>,
     settings: Arc<settings::Store>,
     realtime: Option<Realtime>,
@@ -1204,12 +1206,22 @@ fn router(app: App) -> Router {
         .route("/api/performance/runs/{id}/cancel", post(cancel))
         .with_state(app.performance_app());
     Router::new()
+        .route("/api/computeruse", get(computeruse::status))
+        .route("/api/computeruse/file", get(computeruse::file))
+        .route("/api/computeruse/push", post(computeruse::push))
+        .route("/api/computeruse/pull", post(computeruse::pull))
+        .route("/api/computeruse/run", post(computeruse::run))
+        .route(
+            "/api/computeruse/runs/{id}/cancel",
+            post(computeruse::cancel),
+        )
         .route(
             "/api/config",
             get(|State(app): State<App>| async move {
                 let completion = app.ai_completion().is_some();
                 Json(serde_json::json!({
                     "execution": app.remote.is_some(),
+                    "computeruse": app.computeruse.config.is_some(),
                     "completion": completion,
                     "chat": completion,
                     "realtime": app.realtime.is_some(),
@@ -1274,29 +1286,31 @@ fn router(app: App) -> Router {
 }
 
 async fn detach_and_wait(app: &App) {
-    let groups = [&app.jobs, &app.performance_state.jobs];
-    for jobs in groups {
-        for job in jobs.lock().unwrap().iter() {
-            // Server shutdown is not a user request to cancel remote work.
-            let _ = job.stop.send_if_modified(|control| {
-                if *control == RunControl::Cancel {
-                    false
-                } else {
-                    *control = RunControl::Detach;
-                    true
-                }
-            });
+    tokio::join!(computeruse::shutdown(app), async {
+        let groups = [&app.jobs, &app.performance_state.jobs];
+        for jobs in groups {
+            for job in jobs.lock().unwrap().iter() {
+                // Server shutdown is not a user request to cancel remote work.
+                let _ = job.stop.send_if_modified(|control| {
+                    if *control == RunControl::Cancel {
+                        false
+                    } else {
+                        *control = RunControl::Detach;
+                        true
+                    }
+                });
+            }
         }
-    }
-    for _ in 0..100 {
-        if groups
-            .iter()
-            .all(|jobs| !jobs.lock().unwrap().iter().any(|job| job.attached))
-        {
-            break;
+        for _ in 0..100 {
+            if groups
+                .iter()
+                .all(|jobs| !jobs.lock().unwrap().iter().any(|job| job.attached))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    });
 }
 
 #[tokio::main]
@@ -1325,6 +1339,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let _lock = nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusiveNonblock)
         .map_err(|(_, error)| format!("Workspace is already served: {error}"))?;
     let remote = Remote::from_env()?;
+    let computeruse = Arc::new(computeruse::Bridge::new(computeruse::Config::from_env(
+        remote.as_ref(),
+    )?));
     let completion = Completion::from_env();
     let ui = std::env::var("SPEC_UI_DIR").unwrap_or_else(|_| "../frontend/dist".into());
     let settings = Arc::new(settings::Store::from_env(
@@ -1348,6 +1365,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         root,
         token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
         remote,
+        computeruse,
         completion,
         settings,
         realtime,

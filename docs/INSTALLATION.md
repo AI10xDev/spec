@@ -29,6 +29,114 @@ No model account, API key, GPU, or SSH host is required for basic editing.
 Source builds download dependencies; `--local` means no remote builds, not an
 offline mode or a network sandbox.
 
+## Guided Setup (Development Branch)
+
+The development branch includes a conversational CLI wizard. This entry point is
+not part of the existing v0.1.12 tag. From a current source checkout:
+
+```sh
+./setup.sh
+```
+
+Python 3.9+ is the only additional wizard dependency; no Python packages or AI
+service are needed. The existing `./run.sh --local` path remains unchanged.
+The wizard checks Linux, Bash, Git, native `cc`, GNU coreutils, Rust/Cargo 1.98+,
+and Bun 1.3.14+ or Node.js 22.12+ with npm. These Rust/Bun versions are the tested
+baseline, not a claim that all older releases fail. It discovers existing
+`~/.cargo/bin` and `~/.bun/bin` installations when absent from `PATH`, but never
+installs or upgrades system software for you. Missing tools include remediation
+guidance; you can save setup and install them before launching.
+
+The interview uses free-text prompts, not numbered choices or arrow-key menus:
+
+- Describe your workflow and constraints in a multiline input area. A blank line
+  finishes it. Notes stay local and are never executed or sent to a model.
+- Confirm concrete settings: local spec directory and loopback port. Enter uses
+  `~/specs/` (outside the checkout) and `4780`. Select your previous workspace
+  explicitly if you already have specs elsewhere. Prose is not silently converted into
+  commands; custom requirements are retained in `requirements.txt` for review.
+  If `~/specs/` has unsafe permissions or is not a directory, the wizard suggests
+  `~/specs-private/` (with a suffix if necessary) without changing existing files.
+- For optional builds, enter an SSH alias or `user@host`, local key path (default:
+  SSH agent/config), and absolute remote project directory. There is no inferred
+  host, developer-specific key, or assumed remote project path.
+- Optionally describe your AI provider, for example `I use OpenAI` or
+  `Azure OpenAI`, then enter its model/deployment, endpoint, version, and hidden
+  key. OpenAI, Azure, Claude, OpenRouter, and local Hugging Face are supported.
+  Provider/model defaults match the app's Settings, not guaranteed account access.
+- Azure voice is asked independently: resource origin, Whisper deployment, audio
+  deployment, and hidden key. A local model runtime, remote coding engine, and
+  OpenAI Realtime account are not installed/configured here.
+- Review the proposed settings and dependency checklist. Saving defaults to no.
+  Downloading/building/starting requires a second, separate confirmation.
+
+The intro reuses Computeruse's colored title reveal and moving progress bar.
+`NO_COLOR` disables colors. Non-TTY output and `TERM=dumb` use static output;
+`--no-animation` explicitly disables animation. No terminal selection UI is needed.
+
+```sh
+./setup.sh --check         # Read-only local dependency check; exit 1 if incomplete
+./setup.sh --dry-run       # Full interview/review, no save, launch, SSH or downloads
+./setup.sh --no-animation  # Normal interview with static output
+bash "$HOME/.spec-setup/start.sh"  # Reuse saved setup without repeating the interview
+```
+
+The generated launcher calls the existing `run.sh`, using `--local` unless you
+configured SSH. On launch it downloads frontend/Rust dependencies, builds, and
+starts the loopback server. With SSH it also checks the connection and can create
+the configured remote directory. It never installs a system service or starts a
+coding run. Follow the full printed `#token=...` URL and stop with Ctrl+C.
+
+### Private Files And Reruns
+
+The default `~/.spec-setup/` directory is outside the checkout and created with
+mode `0700`. Keeping secrets out of the checkout also supports group-writable
+source trees without weakening the backend's private-storage requirements.
+The launcher is `0700`; notes, optional `profile.json`, and optional `voice.env`
+are `0600`. API keys are **plaintext protected by filesystem permissions, not
+encrypted**. They never appear in the launcher or review output. Hidden key
+input fails rather than falling back to echoing; use a private terminal. Do not
+put secrets in the general free-text answers or publish generated setup files.
+
+Choosing `later` leaves existing AI/voice files untouched and inherits the launch
+environment plus workspace-default profile/dotenv settings. It does not disable
+AI. **A new setup does not import profiles from a previous wizard's launcher.**
+Reuse that launcher to keep its chosen files; their path exports do not persist
+in your parent shell after stopping it. Choosing a new profile selects its
+private file via `SPEC_SETTINGS_FILE`, without overwriting the old profile. A new
+voice file is selected via `SPEC_AZURE_VOICE_ENV_FILE`; the generated launcher
+clears inherited Azure voice fields so that the new file takes effect. Other AI
+environment settings still follow the existing precedence rules. The launcher
+also clears obsolete `SPEC_COMMAND` and custom SSH/UI binary/path overrides.
+
+No provider connectivity, model availability, or remote engine is verified during
+setup. Configured cloud features can send unsaved text/audio and incur costs when
+used. Remote tools can change files; read the remote prerequisites below.
+
+Existing setup directories are never overwritten. To make a different setup,
+choose a **new private directory outside the spec workspace, frontend source/assets,
+and backend build output**:
+
+```sh
+./setup.sh --output-dir "$HOME/.spec-setup-work"
+```
+
+The parent directory must already exist with trusted ownership/permissions and
+without symlink ancestors. Custom destinations are not automatically Git-ignored.
+Spec workspaces also cannot live in frontend assets or backend build output:
+builds can publish or clear these locations.
+Cancel before saving to leave configuration untouched. An interrupted write may
+leave a partial directory for inspection; the launcher is written last. To remove
+a setup, remove only its generated directory after backing up any configuration
+you need. This does not delete spec files or uninstall dependencies.
+
+Wizard regression checks (offline; no real credentials or SSH):
+
+```sh
+python3 -B -m unittest discover -s scripts -p 'test_setup*.py'
+bash -n setup.sh
+```
+
 ## Install A Release
 
 From a directory where you keep source checkouts:

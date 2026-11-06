@@ -172,7 +172,7 @@ async fn auth_disabled_and_enabled_configuration() {
     assert_eq!(config.headers()[header::CACHE_CONTROL], "no-store");
     assert_eq!(
         response_json(config).await,
-        json!({"execution": false, "completion": false, "chat": false, "realtime": true, "azureVoice": false})
+        json!({"execution": false, "computeruse": false, "completion": false, "chat": false, "realtime": true, "azureVoice": false})
     );
     mock.state.realtime = None;
     let config =

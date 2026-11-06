@@ -371,7 +371,7 @@ async fn authentication_capabilities_and_disabled_routes_are_independent() {
         assert_eq!(config.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(
             response_json(config).await,
-            json!({"execution": false, "completion": false, "chat": false, "realtime": openai, "azureVoice": azure})
+            json!({"execution": false, "computeruse": false, "completion": false, "chat": false, "realtime": openai, "azureVoice": azure})
         );
         if !azure {
             let response = request(mock.state.clone(), "POST", ROUTE, input()).await;

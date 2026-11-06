@@ -33,6 +33,7 @@ pub(super) fn app(root: &FsPath) -> App {
         root: root.to_owned(),
         token: "test-token".into(),
         remote: None,
+        computeruse: Arc::default(),
         completion: None,
         settings: Arc::new(
             settings::Store::open(
@@ -121,6 +122,12 @@ async fn all_api_routes_require_authentication() {
         ("GET", "/api/files/a.md/retained-runs/id/log"),
         ("PUT", "/api/files/a.md"),
         ("GET", "/api/config"),
+        ("GET", "/api/computeruse"),
+        ("GET", "/api/computeruse/file"),
+        ("POST", "/api/computeruse/push"),
+        ("POST", "/api/computeruse/pull"),
+        ("POST", "/api/computeruse/run"),
+        ("POST", "/api/computeruse/runs/id/cancel"),
         ("POST", "/api/completions"),
         ("POST", "/api/analytics"),
         ("POST", "/api/realtime"),

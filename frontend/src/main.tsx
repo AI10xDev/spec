@@ -20,6 +20,9 @@ type Output = RunOutput & { continuable: boolean }
 type RetainedRuns = { runs: { id: string; modified: number }[]; truncated: boolean }
 type PerformanceRun = Pick<Output, "id" | "name" | "status">
 type QueuedBuild = { parent_id: string; name: string; revision: string; status: "waiting" | "started" | "paused"; id?: string; reason?: string }
+type ComputeruseRun = { id: string; name: string; status: string; output: string; truncated: boolean }
+type ComputeruseStatus = { configured: boolean; local_path: string | null; remote_path: string | null; run: ComputeruseRun | null }
+type SharedFile = { content: string; revision: string | null }
 const chatName = new URLSearchParams(location.search).get("chat")
 
 function App() {
@@ -33,6 +36,12 @@ function App() {
   })
   const [connected, setConnected] = useState(false)
   const [execution, setExecution] = useState(false)
+  const [computeruseAvailable, setComputeruseAvailable] = useState(false)
+  const [computeruse, setComputeruse] = useState<ComputeruseStatus | null>(null)
+  const [computeruseError, setComputeruseError] = useState("")
+  const computeruseVersion = useRef(0)
+  const [sharedName, setSharedName] = useState("")
+  const [sharedRevision, setSharedRevision] = useState<string | null>(null)
   const [completion, setCompletion] = useState(false)
   const [chat, setChat] = useState(false)
   const [realtime, setRealtime] = useState(false)
@@ -90,6 +99,8 @@ function App() {
   const log = useRef<HTMLPreElement>(null)
   const chatWindows = useRef(new Map<Window, string>())
   const tab = tabs.find((item) => item.name === active)
+  const sharing = !!tab && sharedName === tab.name
+  const computeruseBlocked = !computeruse?.configured || !!computeruseError || computeruse.run?.status === "running"
   const fileOutput = outputs[active]
   const retainedView = outputView === "file" && retained?.name === active ? retained : null
   const historical = retainedView?.output
@@ -141,9 +152,10 @@ function App() {
 
   async function refreshConfig() {
     const request = ++configRequest.current
-    const config = await api<{ execution: boolean; completion: boolean; chat: boolean; realtime: boolean; azureVoice: boolean }>("/config")
+    const config = await api<{ execution: boolean; computeruse?: boolean; completion: boolean; chat: boolean; realtime: boolean; azureVoice: boolean }>("/config")
     if (request !== configRequest.current) return
     setExecution(config.execution)
+    setComputeruseAvailable(config.computeruse === true)
     setCompletion(config.completion)
     setChat(config.chat)
     setRealtime(config.realtime)
@@ -167,6 +179,29 @@ function App() {
   }
 
   useEffect(() => { if (token) void connect().catch(fail) }, [])
+
+  useEffect(() => {
+    if (!connected || !computeruseAvailable || chatName) return
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    async function poll() {
+      const version = computeruseVersion.current
+      try {
+        const status = await api<ComputeruseStatus>("/computeruse", undefined, "GET", controller.signal)
+        if (controller.signal.aborted) return
+        if (version === computeruseVersion.current) {
+          setComputeruse(status)
+          setComputeruseError("")
+        }
+      } catch (error) {
+        if (controller.signal.aborted) return
+        if (version === computeruseVersion.current) setComputeruseError(`Local callback status unavailable: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      timer = setTimeout(() => void poll(), 1500)
+    }
+    void poll()
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [connected, computeruseAvailable, token])
 
   const refreshCapabilities = useEffectEvent(() => {
     void refreshConfig().catch(() => { /* Retain capabilities on transient focus refresh failures. */ })
@@ -518,14 +553,17 @@ function App() {
     if (dirty(item) && !window.confirm(`Discard unsaved changes to ${item.name}?`)) return
     edited.current.delete(item.name)
     autosaveBlocked.current.delete(item.name)
+    if (sharedName === item.name) setSharedName("")
     navigation.current++
     const remaining = tabs.filter((tab) => tab.name !== item.name)
     setTabs(remaining)
     if (active === item.name) setActive(remaining.at(-1)?.name ?? "")
   }
 
-  async function save(mode: "file" | "build" | "queue" | "repository" = "file", automatic = false) {
-    if (settings || analytics || !tab || busy || submitting.current || (mode !== "file" && queuedForFile)) return
+  async function save(mode: "file" | "build" | "queue" | "repository" | "share" | "computeruse" = "file", automatic = false, remoteRevision = sharedRevision) {
+    const shared = mode === "share" || mode === "computeruse" || (mode === "file" && sharing && !automatic)
+    if (settings || analytics || !tab || busy || submitting.current || (!shared && mode !== "file" && queuedForFile)) return
+    if (shared && (!computeruseAvailable || !computeruse?.configured || (mode === "computeruse" && computeruseBlocked))) return
     const parent = mode === "queue" ? fileOutput : null
     if (mode === "queue" && (!parent || !canQueueBuild)) return
     submitting.current = true
@@ -541,6 +579,17 @@ function App() {
       setTabs((items) => savedTab(items, document))
       setNotice(`Saved ${document.name}`)
       await refresh().catch(fail)
+      if (shared) {
+        const result = await api<SharedFile & { run?: ComputeruseRun }>(mode === "computeruse" ? "/computeruse/run" : "/computeruse/push", { name: document.name, revision: document.revision, remote_revision: remoteRevision })
+        setSharedName(document.name)
+        setSharedRevision(result.revision)
+        if (result.run) {
+          computeruseVersion.current++
+          setComputeruse((status) => status ? { ...status, run: result.run! } : status)
+        }
+        setNotice(mode === "computeruse" ? `Shared ${document.name} and started the local computeruse callback. No remote spec build was submitted.` : `Shared ${document.name} with local and remote files. No callback executed.`)
+        return
+      }
       if (mode === "file") return
       if (parent) {
         const item = await api<QueuedBuild>(`/runs/${parent.id}/queued-build`, { name: document.name, revision: document.revision })
@@ -563,10 +612,60 @@ function App() {
   }
 
   function requestBuild() {
+    if (sharing) {
+      if (settings || analytics || !tab || busy || submitting.current || computeruseBlocked) return
+      if (window.confirm("Save this editor snapshot to the shared local and remote text files, then launch the configured computeruse callback on the server computer? It may send instructions and screenshots to a model, incur costs, and control the desktop if the operator enabled --execute. This does not run a remote spec build.")) void save("computeruse")
+      return
+    }
     if (settings || analytics || !tab || busy || submitting.current || !execution || queuedForFile || (fileOutput?.recoverable && !canQueueBuild)) return
     const queue = !!fileOutput?.recoverable
     const action = queue ? "Save and queue this editor snapshot for a fresh spec build after the current build finishes successfully? The queue survives page closure and server restart. Later saves do not replace this snapshot. Failure or Stop pauses the queue." : "Send this saved spec over SSH and run remote spec build?"
     if (window.confirm(`${action} Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.`)) void save(queue ? "queue" : "build")
+  }
+
+  async function toggleComputeruse() {
+    if (busy || submitting.current || !tab) return
+    if (sharing) { setSharedName(""); setNotice("Computeruse mode off. Existing callbacks are unchanged; use Stop computeruse to cancel."); return }
+    if (!computeruse?.configured || !computeruseAvailable) return
+    submitting.current = true
+    setBusy(true)
+    setSaving({ name: tab.name, automatic: false })
+    setError("")
+    let remote: SharedFile | undefined
+    try {
+      remote = await api<SharedFile>("/computeruse/file")
+      if (!window.confirm(`Enable computeruse for ${tab.name} and save the editor to both shared files? ${remote.revision === null ? "The remote text file will be created." : "This replaces the current remote text. Cancel and use Reload remote if you want to import it instead."} No callback runs until Save & run. Autosave remains local to the editor.`)) remote = undefined
+    } catch (error) { fail(error) }
+    finally { submitting.current = false; setBusy(false); setSaving(null) }
+    if (remote) await save("share", false, remote.revision)
+  }
+
+  async function pullComputeruse() {
+    if (!tab || dirty(tab) || busy || submitting.current || !computeruse?.configured) return
+    if (!window.confirm(`Replace saved ${tab.name} and the local shared file with the remote text? This does not run computeruse.`)) return
+    submitting.current = true
+    setBusy(true)
+    setSaving({ name: tab.name, automatic: false })
+    setError("")
+    try {
+      const document = await api<Document>("/computeruse/pull", { name: tab.name, revision: tab.revision })
+      // A remote read must not discard text typed while the request was in flight.
+      setTabs((items) => savedTab(items, document).map((item) => item.name === tab.name && item.content === tab.content ? { ...item, content: document.content } : item))
+      setSharedRevision(document.revision)
+      autosaveBlocked.current.delete(tab.name)
+      setNotice(`Loaded remote text into ${document.name} and the local shared file. No callback executed.`)
+      await refresh().catch(fail)
+    } catch (error) { fail(error) }
+    finally { submitting.current = false; setBusy(false); setSaving(null) }
+  }
+
+  async function stopComputeruse() {
+    const run = computeruse?.run
+    if (!run || run.status !== "running") return
+    try {
+      await api(`/computeruse/runs/${encodeURIComponent(run.id)}/cancel`, {})
+      setNotice("Computeruse stop requested. Waiting for local process termination.")
+    } catch (error) { fail(error) }
   }
 
   async function removeQueuedBuild(item: QueuedBuild) {
@@ -807,8 +906,17 @@ function App() {
               setTabs((items) => items.map((item) => item.name === editor.name ? { ...item, content } : item))
             }} />)}
             {!tab && <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
-            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || !execution || queuedForFile || (!!fileOutput?.recoverable && !canQueueBuild)} title={fileOutput?.recoverable ? "Save & run: queue snapshot until successful finalization (Ctrl/Cmd+Enter)" : "Save & run (Ctrl/Cmd+Enter)"} aria-keyshortcuts="Control+Enter Meta+Enter" onClick={requestBuild}>Save & run ↗</button></div></footer>
-            {fileOutput?.recoverable && <p className="hint">Save &amp; run queues the saved editor snapshot until this build finishes successfully. Save and autosave never schedule execution.</p>}
+            <footer className="toolbar"><span>{tab ? `${tab.content.split("\n").length} lines · ${new TextEncoder().encode(tab.content).length} bytes` : "UTF-8"}</span><div><button disabled={!tab} onClick={download}>Download</button><button aria-pressed={sharing} disabled={!tab || busy || (!sharing && (!computeruseAvailable || !computeruse?.configured))} title={computeruseAvailable ? "Toggle shared-file mode; enabling saves without running" : "Configure SPEC_COMPUTERUSE_LOCAL_FILE, SPEC_COMPUTERUSE_REMOTE_FILE and SPEC_COMPUTERUSE_COMMAND on the local server"} onClick={() => void toggleComputeruse()}>Computeruse: {sharing ? "on" : "off"}</button><button disabled={!tab || busy} onClick={() => void save()}>Save</button><button className="primary" disabled={!tab || busy || (sharing ? computeruseBlocked : !execution || queuedForFile || (!!fileOutput?.recoverable && !canQueueBuild))} title={sharing ? "Save & run: local computeruse callback (Ctrl/Cmd+Enter)" : fileOutput?.recoverable ? "Save & run: queue snapshot until successful finalization (Ctrl/Cmd+Enter)" : "Save & run (Ctrl/Cmd+Enter)"} aria-keyshortcuts="Control+Enter Meta+Enter" onClick={requestBuild}>Save & run ↗</button></div></footer>
+            {computeruseAvailable && <section className="computeruse-panel" aria-label="Computeruse shared files">
+              <strong>{sharing ? `Computeruse mode: ${sharedName}` : "Computeruse shared files"}</strong>
+              <p>Save &amp; run targets {sharing ? "the local computeruse callback" : "remote spec build"}. Enabling saves to the shared files without executing. Autosave only updates the editor file. Mode resets on page reload.</p>
+              <p>Local (server): <code>{computeruse?.local_path ?? "Checking..."}</code><br />Remote: <code>{computeruse?.remote_path ?? "Checking..."}</code></p>
+              {sharedName && !sharing && <p>Shared mode belongs to {sharedName}, not this tab.</p>}
+              <button disabled={!tab || dirty(tab) || busy || !computeruse?.configured} title="Save local edits first, or download them before resolving a conflict" onClick={() => void pullComputeruse()}>Reload remote</button>
+              {computeruseError && <p role="alert">{computeruseError}</p>}
+              {computeruse?.run && <><p aria-live="polite">Local callback / {computeruse.run.name} / {computeruse.run.status}</p>{computeruse.run.status === "running" && <button onClick={() => void stopComputeruse()}>Stop computeruse</button>}{computeruse.run.truncated && <p>Older callback output was truncated.</p>}<pre aria-label="Computeruse output"><LogOutput value={computeruse.run.output} /></pre></>}
+            </section>}
+            {!sharing && fileOutput?.recoverable && <p className="hint">Save &amp; run queues the saved editor snapshot until this build finishes successfully. Save and autosave never schedule execution.</p>}
             {(!!queuedBuilds?.length || !!queueError) && <section className="build-feedback chat-composer" aria-label="Saved build queue">
               <strong>Saved build queue</strong>
               <span>Snapshots are stored on the server and survive closing this page. One per parent run. Later saves do not change them.</span>

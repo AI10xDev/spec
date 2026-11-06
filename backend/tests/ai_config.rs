@@ -48,6 +48,7 @@ async fn assert_config(mut command: Command, enabled: bool, voice_enabled: bool)
         config,
         json!({
             "execution": false,
+            "computeruse": false,
             "completion": enabled,
             "chat": enabled,
             "realtime": false,

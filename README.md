@@ -14,10 +14,38 @@ README. Spec helps organize that work; you still review and test the changes.
 | --- | --- |
 | Try the editor and save task descriptions | [Install and open Spec](#install-and-open-spec). No AI account or remote server needed. |
 | Have an AI work on my project | Try the editor first, then [enable coding runs](#optional-enable-coding-runs). This requires a separately prepared development server. |
+| Share instructions with local computeruse | Configure the opt-in [shared-file bridge](docs/COMPUTERUSE.md), then use the editor's Computeruse toggle. |
 | Write clearer tasks | Use the [everyday examples](#everyday-examples). |
 | Understand every setting | Read [Installation](docs/INSTALLATION.md) and the [configuration reference](REFERENCE.md#configuration). |
 
 ## Install And Open Spec
+
+### Guided Setup (Development Branch)
+
+For the new conversational setup flow, clone the development branch and run:
+
+```sh
+git clone https://github.com/AI10xDev/spec.git
+cd spec
+./setup.sh
+```
+
+The wizard needs Python 3.9+ and Linux. Describe your requirements in a free-text
+area, then answer short prompts rather than navigating option menus. Enter keeps
+the defaults: local editing, `~/specs/`, port `4780`, and no new AI credentials.
+It checks build dependencies and can collect optional SSH, AI, and Azure voice
+settings. No model account is needed to run the wizard.
+
+You review everything before saving. Starting the build is a separate question;
+OS packages are never installed automatically. Saved setup lives privately in
+`~/.spec-setup/`, outside the checkout. For later launches, use
+`bash "$HOME/.spec-setup/start.sh"`.
+
+Use `./setup.sh --dry-run` to preview, `./setup.sh --check` for dependency checks,
+or `./setup.sh --no-animation` for static output. See the
+[wizard guide](docs/INSTALLATION.md#guided-setup-development-branch) for secrets,
+existing configuration, and rerunning setup. The tagged v0.1.12 instructions below
+remain available and do not require Python for local editing.
 
 ### 1. Prepare Your Computer
 

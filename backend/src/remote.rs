@@ -203,6 +203,13 @@ impl Remote {
         ))
     }
 
+    pub fn computeruse_command(&self) -> Command {
+        self.ssh(format!(
+            "python3 -I -B -c {}",
+            quote(include_str!("computeruse-file.py")),
+        ))
+    }
+
     pub fn continuation_command(
         &self,
         bytes: usize,

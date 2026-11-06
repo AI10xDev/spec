@@ -14,3 +14,6 @@ The read-only archive retains original notices:
 OpenCode is an optional external runtime dependency. The new application does not
 implement or bundle its provider/tool orchestration. Archived source is not linked
 into the application. Source base revisions and file hashes are in archive/manifest.json.
+
+The setup wizard terminal animation is adapted from AI10xDev/computeruse's
+computeruse-setup/setup.py (MIT). See scripts/COMPUTERUSE-LICENSE for its notice.
