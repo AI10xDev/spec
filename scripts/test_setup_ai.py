@@ -46,7 +46,7 @@ class InterviewTests(unittest.TestCase):
 
     def test_defaults_keep_both_settings_without_secrets(self):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "existing-text-secret",
-                                    "AZURE_OPENAI_VOICE_API_KEY": "existing-voice-secret"}):
+                                    "AZURE_OPENAI_REALTIME_API_KEY": "existing-voice-secret"}):
             self.assertEqual(self.interview(["", ""]), (None, None))
         self.assertNotIn("existing-text-secret", self.output.getvalue())
         self.assertNotIn("existing-voice-secret", self.output.getvalue())
@@ -112,33 +112,32 @@ class InterviewTests(unittest.TestCase):
 
     def test_voice_independent_complete_and_exact_backend_names(self):
         profile, voice = self.interview(
-            ["later", "https://my-resource.openai.azure.com/", "whisper-deploy", "audio-deploy"],
+            ["later", "https://my-resource.openai.azure.com/", "realtime-deploy"],
             ["voice-test-key"],
         )
         self.assertIsNone(profile)
         self.assertEqual(voice, {
-            "AZURE_OPENAI_VOICE_ENDPOINT": "https://my-resource.openai.azure.com/",
-            "AZURE_OPENAI_WHISPER_DEPLOYMENT": "whisper-deploy",
-            "AZURE_OPENAI_AUDIO_DEPLOYMENT": "audio-deploy",
-            "AZURE_OPENAI_VOICE_API_KEY": "voice-test-key",
+            "AZURE_OPENAI_REALTIME_ENDPOINT": "https://my-resource.openai.azure.com/",
+            "AZURE_OPENAI_REALTIME_DEPLOYMENT": "realtime-deploy",
+            "AZURE_OPENAI_REALTIME_API_KEY": "voice-test-key",
         })
 
     def test_voice_reprompts_instead_of_returning_partial_settings(self):
         _, voice = self.interview(
             ["later", "https://wrong.test", "https://voice.openai.azure.com",
-             "", "bad/name", "whisper", "..", "audio"], ["", "voice-key"],
+             "", "bad/name", "..", "realtime"], ["", "voice-key"],
         )
         self.assertEqual(len(self.errors), 4)
-        self.assertEqual(len(voice), 4)
-        self.assertEqual(voice["AZURE_OPENAI_VOICE_API_KEY"], "voice-key")
+        self.assertEqual(len(voice), 3)
+        self.assertEqual(voice["AZURE_OPENAI_REALTIME_API_KEY"], "voice-key")
 
     def test_text_and_voice_are_collected_together(self):
         profile, voice = self.interview(
-            ["OpenAI", "", "", "", "https://voice.openai.azure.com", "whisper", "audio"],
+            ["OpenAI", "", "", "", "https://voice.openai.azure.com", "realtime"],
             ["text-key", "voice-key"],
         )
         self.assertEqual(profile["apiKey"], "text-key")
-        self.assertEqual(voice["AZURE_OPENAI_VOICE_API_KEY"], "voice-key")
+        self.assertEqual(voice["AZURE_OPENAI_REALTIME_API_KEY"], "voice-key")
 
     def test_azure_version_required_only_at_resource_root(self):
         for path in ("", "/", "/openai/v1/", "/openai/v1/responses"):
@@ -168,7 +167,7 @@ class InterviewTests(unittest.TestCase):
             self.fail("echo fallback reached")
 
         for answers in (["OpenAI", "", "", ""],
-                        ["later", "https://voice.openai.azure.com", "whisper", "audio"]):
+                        ["later", "https://voice.openai.azure.com", "realtime"]):
             with self.subTest(answers=answers):
                 with self.assertRaisesRegex(RuntimeError, "without echo"):
                     self.interview(answers, unsafe_read)

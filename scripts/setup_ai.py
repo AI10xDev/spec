@@ -129,7 +129,7 @@ def _endpoint(value, provider):
 def _voice_endpoint(value):
     if _later(value):
         return None
-    # azure_voice.rs requires the literal canonical origin, not just a URL
+    # azure_realtime.rs requires the literal canonical origin, not just a URL
     # which normalizes to it (even an explicit :443 is rejected).
     match = re.fullmatch(r"https://([a-z0-9-]{1,63})\.openai\.azure\.com/?", value)
     if not match or match[1].startswith("-") or match[1].endswith("-"):
@@ -222,19 +222,14 @@ def collect_ai(ask):
         default="later", validate=_voice_endpoint,
     )
     if endpoint is not None:
-        whisper = ask(
-            "What is your Whisper deployment name?",
-            validate=lambda value: _model(value, "azure", voice=True),
-        )
-        audio = ask(
-            "What is your audio deployment name?",
+        deployment = ask(
+            "What is your Azure Realtime deployment name?",
             validate=lambda value: _model(value, "azure", voice=True),
         )
         key = _secret("Azure voice API key (hidden; required): ")
         voice = {
-            "AZURE_OPENAI_VOICE_ENDPOINT": endpoint,
-            "AZURE_OPENAI_WHISPER_DEPLOYMENT": whisper,
-            "AZURE_OPENAI_AUDIO_DEPLOYMENT": audio,
-            "AZURE_OPENAI_VOICE_API_KEY": key,
+            "AZURE_OPENAI_REALTIME_ENDPOINT": endpoint,
+            "AZURE_OPENAI_REALTIME_DEPLOYMENT": deployment,
+            "AZURE_OPENAI_REALTIME_API_KEY": key,
         }
     return profile, voice

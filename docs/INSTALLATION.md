@@ -64,8 +64,8 @@ The interview uses free-text prompts, not numbered choices or arrow-key menus:
   `Azure OpenAI`, then enter its model/deployment, endpoint, version, and hidden
   key. OpenAI, Azure, Claude, OpenRouter, and local Hugging Face are supported.
   Provider/model defaults match the app's Settings, not guaranteed account access.
-- Azure voice is asked independently: resource origin, Whisper deployment, audio
-  deployment, and hidden key. A local model runtime, remote coding engine, and
+- Azure voice is asked independently: resource origin, Realtime deployment,
+  and hidden key. A local model runtime, remote coding engine, and
   OpenAI Realtime account are not installed/configured here.
 - Review the proposed settings and dependency checklist. Saving defaults to no.
   Downloading/building/starting requires a second, separate confirmation.
@@ -104,7 +104,7 @@ AI. **A new setup does not import profiles from a previous wizard's launcher.**
 Reuse that launcher to keep its chosen files; their path exports do not persist
 in your parent shell after stopping it. Choosing a new profile selects its
 private file via `SPEC_SETTINGS_FILE`, without overwriting the old profile. A new
-voice file is selected via `SPEC_AZURE_VOICE_ENV_FILE`; the generated launcher
+voice file is selected via `SPEC_AZURE_REALTIME_ENV_FILE`; the generated launcher
 clears inherited Azure voice fields so that the new file takes effect. Other AI
 environment settings still follow the existing precedence rules. The launcher
 also clears obsolete `SPEC_COMMAND` and custom SSH/UI binary/path overrides.

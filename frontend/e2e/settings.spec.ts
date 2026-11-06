@@ -55,7 +55,7 @@ async function workspace(page: Page) {
     } else if (path === "/api/config") {
       state.configReads++
       status = state.configError ? 503 : 200
-      body = { execution: true, completion: state.chat, chat: state.chat, realtime: false, azureVoice: false }
+      body = { execution: true, completion: state.chat, chat: state.chat, realtime: false, azureRealtime: false }
     } else if (path === "/api/files") body = [{ name: "draft.md", modified: 0, bytes: 8 }, { name: "other.md", modified: 0, bytes: 5 }]
     else if (path === "/api/files/draft.md" || path === "/api/files/other.md") {
       if (method === "PUT") state.fileWrites++

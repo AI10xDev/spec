@@ -39,10 +39,9 @@ class TemporarySetupTests(unittest.TestCase):
             "apiKey": "test-only-profile-secret", "apiVersion": "",
         }
         self.voice = {
-            "AZURE_OPENAI_VOICE_ENDPOINT": "https://example.openai.azure.com",
-            "AZURE_OPENAI_VOICE_API_KEY": "test-only-voice-secret",
-            "AZURE_OPENAI_WHISPER_DEPLOYMENT": "whisper",
-            "AZURE_OPENAI_AUDIO_DEPLOYMENT": "audio",
+            "AZURE_OPENAI_REALTIME_ENDPOINT": "https://example.openai.azure.com",
+            "AZURE_OPENAI_REALTIME_API_KEY": "test-only-voice-secret",
+            "AZURE_OPENAI_REALTIME_DEPLOYMENT": "realtime",
         }
 
 
@@ -98,7 +97,7 @@ class MainTests(TemporarySetupTests):
         self.assertIn("key hidden", text)
         self.assertIn(self.profile["model"], text)
         self.assertNotIn(self.profile["apiKey"], text)
-        self.assertNotIn(self.voice["AZURE_OPENAI_VOICE_API_KEY"], text)
+        self.assertNotIn(self.voice["AZURE_OPENAI_REALTIME_API_KEY"], text)
 
     def test_explicit_save_does_not_authorize_start(self):
         self.assertEqual(self.interview([""] * 4 + ["yes", ""]), 0)
@@ -405,20 +404,19 @@ class PersistenceTests(TemporarySetupTests):
         self.assertEqual(json.loads((directory / "profile.json").read_text()), self.profile)
         self.assertEqual((directory / "requirements.txt").read_text(), "line one\nline two\n")
         self.assertNotIn("SPEC_SETTINGS_FILE", self.env, "save must not mutate caller configuration")
-        self.assertNotIn("SPEC_AZURE_VOICE_ENV_FILE", self.env)
-        for secret in (self.profile["apiKey"], self.voice["AZURE_OPENAI_VOICE_API_KEY"]):
+        self.assertNotIn("SPEC_AZURE_REALTIME_ENV_FILE", self.env)
+        for secret in (self.profile["apiKey"], self.voice["AZURE_OPENAI_REALTIME_API_KEY"]):
             self.assertNotIn(secret, launcher.read_text())
 
     def test_voice_dotenv_serializes_dollars_quotes_and_backslashes(self):
         # Check the dotenv wire format directly; a shell source is not a dotenv parser.
-        self.voice["AZURE_OPENAI_VOICE_API_KEY"] = 'test$HOME${TOKEN}$(id)"quote\\path'
+        self.voice["AZURE_OPENAI_REALTIME_API_KEY"] = 'test$HOME${TOKEN}$(id)"quote\\path'
         directory = self.root / "voice"
         setup.save_setup(directory, self.env, "", None, self.voice)
         self.assertEqual((directory / "voice.env").read_text(),
-                         'AZURE_OPENAI_VOICE_ENDPOINT="https://example.openai.azure.com"\n'
-                         'AZURE_OPENAI_VOICE_API_KEY="test\\$HOME\\${TOKEN}\\$(id)\\"quote\\\\path"\n'
-                         'AZURE_OPENAI_WHISPER_DEPLOYMENT="whisper"\n'
-                         'AZURE_OPENAI_AUDIO_DEPLOYMENT="audio"\n')
+                         'AZURE_OPENAI_REALTIME_ENDPOINT="https://example.openai.azure.com"\n'
+                         'AZURE_OPENAI_REALTIME_API_KEY="test\\$HOME\\${TOKEN}\\$(id)\\"quote\\\\path"\n'
+                         'AZURE_OPENAI_REALTIME_DEPLOYMENT="realtime"\n')
 
     def test_failed_file_write_leaves_no_launchable_entry_point(self):
         directory = self.root / "partial"
@@ -468,7 +466,7 @@ class PersistenceTests(TemporarySetupTests):
                     for variable in ("SPEC_COMMAND", "SPEC_SSH_BINARY", "SPEC_UI_DIR", *self.voice):
                         self.assertNotIn(variable, record["env"])
                     self.assertEqual(record["env"]["SPEC_SETTINGS_FILE"], str(destination / "profile.json"))
-                    self.assertEqual(record["env"]["SPEC_AZURE_VOICE_ENV_FILE"], str(destination / "voice.env"))
+                    self.assertEqual(record["env"]["SPEC_AZURE_REALTIME_ENV_FILE"], str(destination / "voice.env"))
         self.assertEqual(self.env["SPEC_WORKSPACE"], before["SPEC_WORKSPACE"])
         self.assertFalse(Path(self.env["SPEC_WORKSPACE"]).exists())
 

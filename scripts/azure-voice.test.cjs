@@ -5,7 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 
-const names = ['AZURE_OPENAI_VOICE_ENDPOINT', 'AZURE_OPENAI_VOICE_API_KEY', 'AZURE_OPENAI_WHISPER_DEPLOYMENT', 'AZURE_OPENAI_AUDIO_DEPLOYMENT'];
+const names = ['ENDPOINT', 'API_KEY', 'DEPLOYMENT'].map(n => `AZURE_OPENAI_REALTIME_${n}`);
 const fakeKey = 'fake-voice-key-not-a-credential';
 const existing = Object.fromEntries(names.map((n, i) => [n, `existing-${i}`]));
 
@@ -46,7 +46,7 @@ console.log(args[2] === 'show' ? 'mock-domain' : ${JSON.stringify(fakeKey)});
   return (extra = {}, args = []) => {
     const result = spawnSync('/bin/bash', [
       path.join(__dirname, 'azure-voice.bash'),
-      'resource group', 'voice resource', 'whisper deployment', 'audio deployment',
+      'resource group', 'voice resource', 'voice deployment',
       process.execPath, target, ...args,
     ], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 5000 });
     assert.ifError(result.error);
@@ -79,7 +79,7 @@ const keyArgs = [
   '--query', 'key1', '-o', 'tsv', '--only-show-errors',
 ];
 
-test('fetches only four voice exports, preserves text settings and spaced arguments', t => {
+test('fetches only three voice exports, preserves text settings and spaced arguments', t => {
   const args = ['two words', '', 'literal * $HOME ; value'];
   const r = fixture(t)({}, args);
   assert.equal(r.status, 0, r.stderr);
@@ -90,8 +90,7 @@ test('fetches only four voice exports, preserves text settings and spaced argume
       ...r.input,
       [names[0]]: 'https://mock-domain.openai.azure.com',
       [names[1]]: fakeKey,
-      [names[2]]: 'whisper deployment',
-      [names[3]]: 'audio deployment',
+      [names[2]]: 'voice deployment',
     },
   });
   assert.equal(r.stdout + r.stderr, '');
@@ -104,13 +103,13 @@ test('all existing voice exports skip az and remain unchanged', t => {
   assert.deepEqual(r.launched, { args: [], env: r.input });
 });
 
-for (let mask = 1; mask < 15; mask++) {
+for (let mask = 1; mask < 7; mask++) {
   test(`partial voice exports (mask ${mask}) reject without az or target`, t => {
     const partial = Object.fromEntries(names.filter((_, i) => mask & (1 << i))
       .map(n => [n, existing[n]]));
     const r = fixture(t)(partial);
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /Set all four/);
+    assert.match(r.stderr, /Set all three/);
     assert.deepEqual(r.calls, []);
     assert.equal(r.launched, null);
   });
@@ -129,7 +128,7 @@ for (const name of names) {
 }
 
 test('explicit voice env file without voice exports skips az', t => {
-  const r = fixture(t)({ SPEC_AZURE_VOICE_ENV_FILE: '/unused/voice settings.env' });
+  const r = fixture(t)({ SPEC_AZURE_REALTIME_ENV_FILE: '/unused/voice settings.env' });
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(r.calls, []);
   assert.deepEqual(r.launched, { args: [], env: r.input });
@@ -137,9 +136,9 @@ test('explicit voice env file without voice exports skips az', t => {
 
 for (const complete of [false, true]) {
   test(`empty voice env file rejects with ${complete ? 'all' : 'no'} voice exports`, t => {
-    const r = fixture(t)({ ...(complete ? existing : {}), SPEC_AZURE_VOICE_ENV_FILE: '' });
+    const r = fixture(t)({ ...(complete ? existing : {}), SPEC_AZURE_REALTIME_ENV_FILE: '' });
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /Unset SPEC_AZURE_VOICE_ENV_FILE or supply a nonempty file path/);
+    assert.match(r.stderr, /Unset SPEC_AZURE_REALTIME_ENV_FILE or supply a nonempty file path/);
     assert.deepEqual(r.calls, []);
     assert.equal(r.launched, null);
   });

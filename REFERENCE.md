@@ -45,7 +45,7 @@ Rebuild and restart the local server, then reconnect using its new token URL. Al
 - **Save repo changes:** shown only when the configured remote directory belongs to a Git worktree with uncommitted changes. Uses the saved AI profile (or `azure/gpt-6-sol` fallback), the existing repository workflow, and the saved spec as context.
 - **Recoverable output:** reopening a saved spec restores its latest build output after browser or server restart, without rerunning the build.
 - **Separate session chat:** ask about the current nohup output, written spec, or general topics in a dedicated browser window, without adding chat to the editor/output panes.
-- **Voice and context tools:** independent OpenAI Realtime and Azure Record/Send voice panels (Whisper STT plus gpt-audio-mini spoken answers), current/last-answer context inspection, and a revision-checked Agent.md editor.
+- **Voice and context tools:** independent OpenAI and Azure Realtime voice panels, current/last-answer context inspection, and a revision-checked Agent.md editor.
 - **Accessible responsive styling:** dark, rainbow-accented UI with visible keyboard focus, reduced-motion support, forced-colors fallbacks, and narrow-screen layouts.
 - **Local API protection:** loopback binding, a random access token, no permissive CORS, constrained filenames, and symlink rejection.
 
@@ -427,14 +427,12 @@ Questions send up to the first **64 KiB of spec**, the last **64 KiB of availabl
 
 The separate **OpenAI voice conversation** mic button opens **OpenAI Realtime** voice input and audio responses. Set server-side `OPENAI_API_KEY` (optionally `OPENAI_REALTIME_MODEL`, default `gpt-realtime`), restart, and reload. Voice is independent of Azure text chat and requires microphone permission on HTTPS or localhost. See [voice setup and privacy](docs/realtime.md).
 
-The **Azure mic** button opens a separate **Azure voice conversation** panel. Select **Record question**, then **Send recording**: only Send uploads audio through the Rust server to Whisper STT, then uses its transcript with fresh spec/output context and recent voice history for a **gpt-audio-mini** spoken answer. This model generates text and audio through Chat Completions, not `/audio/speech` TTS; the dedicated alternative `gpt-4o-mini-tts` is not used. The microphone is off during generation/playback. Use **Stop audio** or **Interrupt and record question** deliberately; there is no hands-free VAD or spoken interruption detection. This trades streaming latency and hands-free turns for explicit control. Whisper is not intended-speaker isolation and does not guarantee recognition accuracy.
-
-Set all four local Rust server-side variables `AZURE_OPENAI_VOICE_ENDPOINT="https://your-resource.openai.azure.com"`, `AZURE_OPENAI_VOICE_API_KEY`, `AZURE_OPENAI_WHISPER_DEPLOYMENT`, and `AZURE_OPENAI_AUDIO_DEPLOYMENT`, then restart and reload. The endpoint accepts only a canonical public Azure HTTPS resource origin, optionally ending in `/`, not an `/openai/v1` URL. Invalid Azure voice configuration disables only Azure voice with a sanitized warning; shared text configuration errors still fail startup. There is no text/OpenAI credential fallback. The authenticated `POST /api/voice/azure` and `azureVoice` capability replace the removed `/api/realtime/azure` and `azureRealtime`; old Azure Realtime environment settings are no longer read. OpenAI's `/api/realtime` and `realtime` capability are unchanged. See [Azure setup, protocol, limits, and privacy](docs/realtime.md#azure-setup).
+The **Azure OpenAI mic** button opens a separate **Azure OpenAI Realtime** panel for voice input and audio responses, preserving the OpenAI button. Select **Start Azure voice conversation** and allow microphone access. Starting either provider stops the other voice session in that chat window. Set all three local Rust server-side variables `AZURE_OPENAI_REALTIME_ENDPOINT="https://your-resource.openai.azure.com"`, `AZURE_OPENAI_REALTIME_API_KEY`, and `AZURE_OPENAI_REALTIME_DEPLOYMENT`, then restart and reload. The endpoint accepts only a canonical public Azure HTTPS resource origin, optionally ending in `/`, not an `/openai/v1` URL. Invalid Azure voice configuration disables Azure voice only with a sanitized stderr warning, without aborting the text server; shared text configuration errors still fail startup. There is no fallback to OpenAI or Azure text credentials. The authenticated `POST /api/realtime/azure` endpoint and `azureRealtime` capability are independent of OpenAI. Azure uses GA client-secret minting followed by raw-SDP negotiation, keeping both credentials backend-side. Spec/log snapshots and microphone audio go to the selected provider and incur its charges. See [Azure setup, protocol, and privacy](docs/realtime.md#azure-setup).
 
 To use an **existing private voice-only dotenv file** on the end user's machine, launch from the repository root with your actual file path:
 
 ```sh
-SPEC_AZURE_VOICE_ENV_FILE="$HOME/.config/spec/azure-voice.env" ./run.sh --local
+SPEC_AZURE_REALTIME_ENV_FILE="$HOME/.config/spec/azure-voice.env" ./run.sh --local
 ```
 
 This exports the voice-only selector without sourcing the file or changing `SPEC_AI_ENV_FILE` or text variables. Omit `--local` to keep remote builds enabled. Use an absolute path because the launcher changes to `backend/`. Browser and remote build environments are not automatically transferred to the local Rust server. Never put secrets in the browser or frontend environment variables. Restart the server and reload the browser after changing configuration.
@@ -442,14 +440,10 @@ This exports the voice-only selector without sourcing the file or changing `SPEC
 With Azure CLI already signed in, the isolated launcher can retrieve an existing resource's voice settings without writing credentials to disk or changing text configuration:
 
 ```sh
-bash scripts/azure-voice.bash RESOURCE_GROUP RESOURCE WHISPER_DEPLOYMENT AUDIO_DEPLOYMENT COMMAND [ARG...]
-# Rebuild/relaunch after stopping the existing app; omit --local for remote builds:
-bash scripts/azure-voice.bash founderies spec-realtime-a8ba4251 spec-whisper spec-audio-mini ./run.sh --local
+bash scripts/azure-voice.bash RESOURCE_GROUP RESOURCE REALTIME_DEPLOYMENT ./run.sh --local
 ```
 
-The launcher exports the four new voice variables only, preserving text settings. Complete local voice exports take precedence, then an explicit `SPEC_AZURE_VOICE_ENV_FILE`, then Azure CLI; empty/partial exports are rejected. On 2026-11-04, Azure CLI successfully deployed `spec-whisper` (`whisper` `001`, Standard capacity 3) and `spec-audio-mini` (`gpt-audio-mini` `2025-12-15`, GlobalStandard capacity 1) on `spec-realtime-a8ba4251`, group `founderies`, region `eastus2`. The old `spec-voice` deployment was intentionally retained to avoid disrupting other clients. A live synthetic-audio check passed through the Rust endpoint and both deployed models, returning an MP3 answer. Real-microphone acoustic validation remains pending, and the running app has not yet been restarted for this migration; provisioning alone is not an application health check.
-
-Azure refreshes context on each Send and keeps only the latest **four complete question/answer pairs (eight messages)**, separately from text chat and OpenAI; changing runs clears that history. Recording stops at 60 seconds and waits for explicit Send, with a 4 MiB audio cap. Browser echo cancellation/noise suppression are optional preferences, not Realtime `near_field` processing. OpenAI still takes a fixed snapshot at connection time and uses automatic VAD with a live microphone during playback. Starting either voice provider stops the other in that window; merely opening a panel does not. Use **Resume audio** if playback is blocked, and stop or close the panel to release resources. Provider charges and data policies apply.
+Voice takes a fresh spec/output snapshot at connection time; subsequent edits are not streamed into the call. Recent provider-supplied transcripts appear separately from text chat. Use **Resume audio** if playback is blocked, and stop or close the panel to release the microphone.
 
 ### Frontend development
 
@@ -479,21 +473,20 @@ These are the Rust server's defaults when launched directly. `run.sh` supplies t
 | `AZURE_OPENAI_API_KEY` | unset | Server-side Azure completion key; required with the endpoint |
 | `DEPLOYMENT_NAME` | `gpt-5.5` | Azure completion deployment name |
 | `AZURE_OPENAI_API_VERSION` | unset | Required only for legacy Azure resource-root endpoints |
-| `SPEC_AI_ENV_FILE` | nearest `.env` in current/ancestor directories | Optional path to the server-side dotenv file shared by chat, ghost text, and Azure voice; explicit files must exist |
-| `SPEC_AZURE_VOICE_ENV_FILE` | shared AI dotenv file | Exported selector for an Azure voice-only dotenv file, replacing the shared file for Azure voice only; absolute path recommended |
+| `SPEC_AI_ENV_FILE` | nearest `.env` in current/ancestor directories | Optional path to the server-side dotenv file shared by chat, ghost text, and Azure Realtime voice; explicit files must exist |
+| `SPEC_AZURE_REALTIME_ENV_FILE` | shared AI dotenv file | Exported selector for an Azure voice-only dotenv file, replacing the shared file for Azure voice only; absolute path recommended |
 | `OPENAI_API_KEY` | unset | Server-side OpenAI Realtime key; enables `/api/realtime` independently of Azure |
 | `OPENAI_REALTIME_MODEL` | `gpt-realtime` | OpenAI Realtime model |
-| `AZURE_OPENAI_VOICE_ENDPOINT` | unset | Azure voice canonical HTTPS resource origin `https://RESOURCE.openai.azure.com`; all four Azure voice variables required together |
-| `AZURE_OPENAI_VOICE_API_KEY` | unset | Independent server-side Azure voice resource key |
-| `AZURE_OPENAI_WHISPER_DEPLOYMENT` | unset | Explicit Whisper STT deployment name; no text/OpenAI fallback |
-| `AZURE_OPENAI_AUDIO_DEPLOYMENT` | unset | Explicit audio Chat Completions deployment name (gpt-audio-mini), not a dedicated TTS deployment |
+| `AZURE_OPENAI_REALTIME_ENDPOINT` | unset | Azure Realtime canonical HTTPS resource origin `https://RESOURCE.openai.azure.com`; all three Azure Realtime variables required together |
+| `AZURE_OPENAI_REALTIME_API_KEY` | unset | Independent server-side Azure Realtime resource key |
+| `AZURE_OPENAI_REALTIME_DEPLOYMENT` | unset | Explicit Azure Realtime deployment name; no text/OpenAI fallback |
 
-Azure voice's four dedicated variables can be set in the same `.env` as text
-chat without changing text settings. Export `SPEC_AZURE_VOICE_ENV_FILE` in the
+Azure Realtime's three dedicated variables can be set in the same `.env` as text
+chat without changing text settings. Export `SPEC_AZURE_REALTIME_ENV_FILE` in the
 server's launch environment (not inside dotenv) to select a separate voice file;
 missing values in that file are not filled from the shared file. If unset, voice
-uses `SPEC_AI_ENV_FILE` or the nearest `.env`. Process exports of the four voice
-variables take precedence, including empty values; unset unwanted exports to use
+uses `SPEC_AI_ENV_FILE` or the nearest `.env`. Process `AZURE_OPENAI_REALTIME_*`
+exports take precedence, including empty values; unset unwanted exports to use
 file values. Restart the server and reload the browser after changing configuration.
 
 Supply your own credentials; there is no automatic service installation. Historical tracked run artifacts remain in Git clones/history, while release source archives exclude `.out` and `.spec-runs` artifacts; this is not a historical secret audit. The existing `spec` shell alias is not modified. Run the new binary explicitly from `backend/target/release/spec` if the old shell function shadows its name.

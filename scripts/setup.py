@@ -198,7 +198,7 @@ def save_setup(directory, env, notes, profile, voice):
     if voice is not None:
         # dotenvy understands double-quoted escapes; escape $ to prevent expansion.
         write("voice.env", "".join(key + "=" + json.dumps(value).replace("$", "\\$") + "\n" for key, value in voice.items()))
-        env["SPEC_AZURE_VOICE_ENV_FILE"] = str(directory / "voice.env")
+        env["SPEC_AZURE_REALTIME_ENV_FILE"] = str(directory / "voice.env")
     write("requirements.txt", notes + "\n")
     lines = ["#!/usr/bin/env bash", "set -euo pipefail", "umask 077",
              "unset SPEC_COMMAND SPEC_SSH_BINARY SPEC_UI_DIR"]
@@ -280,7 +280,7 @@ def main(argv=None):
         print("  Azure voice: " + ("new private voice file (key hidden)" if voice else "inherit launch environment and default dotenv"))
         if voice:
             for key, value in voice.items():
-                if key != "AZURE_OPENAI_VOICE_API_KEY":
+                if key != "AZURE_OPENAI_REALTIME_API_KEY":
                     print("  " + key + ": " + value)
         print("  New private setup directory: " + str(directory))
         print("  Missing prerequisites: " + (", ".join(missing) if missing else "none detected"))

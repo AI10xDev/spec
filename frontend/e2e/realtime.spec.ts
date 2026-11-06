@@ -26,8 +26,6 @@ type Harness = {
   constraints: MediaStreamConstraints[]
   tracks: { kind: "mic" | "remote"; request: number; track: MediaStreamTrack; stops: number }[]
   autoReady: boolean; blockAudio: boolean; plays: number; pauses: number
-  mime: string; recorders: MediaRecorder[]; urls: string[]; revoked: string[]; blobs: Blob[]
-  nativeRecorder: typeof MediaRecorder
 }
 declare global { interface Window { __realtimeTest: Harness } }
 
@@ -36,20 +34,15 @@ function installVoiceMocks() {
   const state: Harness = window.__realtimeTest = {
     permission: "granted", permissions: 0, pending: [], peers: [], tracks: [], constraints: [],
     autoReady: true, blockAudio: false, plays: 0, pauses: 0,
-    mime: "audio/webm;codecs=opus", recorders: [], urls: [], revoked: [], blobs: [], nativeRecorder: MediaRecorder,
   }
   function stream(kind: "mic" | "remote", request: number) {
     const audio = new AudioContext()
-    const destination = audio.createMediaStreamDestination()
-    const oscillator = audio.createOscillator()
-    oscillator.connect(destination)
-    oscillator.start()
-    const media = destination.stream
+    const media = audio.createMediaStreamDestination().stream
     const track = media.getAudioTracks()[0]
     const record = { kind, request, track, stops: 0 }
     state.tracks.push(record)
     const stop = track.stop.bind(track)
-    track.stop = () => { record.stops++; stop(); oscillator.stop(); void audio.close() }
+    track.stop = () => { record.stops++; stop(); void audio.close() }
     return media
   }
   Object.defineProperty(navigator.mediaDevices, "getUserMedia", { value: async (constraints: MediaStreamConstraints) => {
@@ -123,31 +116,6 @@ function installVoiceMocks() {
     close() { this.closes++; this.connectionState = "closed"; this.onconnectionstatechange?.() }
   }
   Object.defineProperty(window, "RTCPeerConnection", { configurable: true, value: MockPeer })
-  class MockRecorder {
-    state = "inactive"
-    mimeType: string
-    ondataavailable: ((event: { data: Blob }) => void) | null = null
-    onstop: (() => void) | null = null
-    onerror: (() => void) | null = null
-    static isTypeSupported(mime: string) { return mime === state.mime }
-    constructor(public stream: MediaStream, options: MediaRecorderOptions) {
-      this.mimeType = options.mimeType!
-      state.recorders.push(this as unknown as MediaRecorder)
-    }
-    start() { this.state = "recording" }
-    stop() {
-      this.state = "inactive"
-      queueMicrotask(() => {
-        this.ondataavailable?.({ data: new Blob(["recorded question"], { type: this.mimeType }) })
-        this.onstop?.()
-      })
-    }
-  }
-  Object.defineProperty(window, "MediaRecorder", { configurable: true, value: MockRecorder })
-  const create = URL.createObjectURL.bind(URL)
-  const revoke = URL.revokeObjectURL.bind(URL)
-  URL.createObjectURL = (blob) => { const url = create(blob); state.urls.push(url); if (blob instanceof Blob) state.blobs.push(blob); return url }
-  URL.revokeObjectURL = (url) => { state.revoked.push(url); revoke(url) }
   HTMLMediaElement.prototype.play = function () {
     state.plays++
     if (state.blockAudio) return Promise.reject(new DOMException("Mock autoplay blocked", "NotAllowedError"))
@@ -155,7 +123,6 @@ function installVoiceMocks() {
     return Promise.resolve()
   }
   HTMLMediaElement.prototype.pause = function () { state.pauses++ }
-  HTMLMediaElement.prototype.load = function () {}
 }
 
 let server: ChildProcess
@@ -176,12 +143,12 @@ test.beforeAll(async () => {
       SPEC_COMMAND: undefined, SPEC_SSH_TARGET: undefined, SPEC_SSH_WORKSPACE: undefined,
       SPEC_SSH_KEY: undefined, SPEC_SSH_BINARY: undefined, SPEC_OPENCODE: undefined,
       SPEC_SSH_DIR: undefined, SPEC_SSH_IDENTITY: undefined, SPEC_AI_ENV_FILE: "/dev/null",
-      SPEC_AZURE_VOICE_ENV_FILE: undefined,
+      SPEC_AZURE_REALTIME_ENV_FILE: undefined,
       AZURE_OPENAI_ENDPOINT: undefined, AZURE_OPENAI_API_KEY: undefined,
       DEPLOYMENT_NAME: undefined, AZURE_OPENAI_API_VERSION: undefined,
       OPENAI_API_KEY: undefined, OPENAI_REALTIME_MODEL: undefined,
-      AZURE_OPENAI_VOICE_ENDPOINT: undefined, AZURE_OPENAI_VOICE_API_KEY: undefined,
-      AZURE_OPENAI_WHISPER_DEPLOYMENT: undefined, AZURE_OPENAI_AUDIO_DEPLOYMENT: undefined,
+      AZURE_OPENAI_REALTIME_ENDPOINT: undefined, AZURE_OPENAI_REALTIME_API_KEY: undefined,
+      AZURE_OPENAI_REALTIME_DEPLOYMENT: undefined,
     },
     stdio: ["ignore", "pipe", "pipe"],
   })
@@ -217,8 +184,7 @@ test.beforeEach(async ({ page, context }, info) => {
   page.on("pageerror", (error) => errors.push(error.message))
   context.on("page", (page) => page.on("pageerror", (error) => errors.push(error.message)))
   await context.addInitScript(installVoiceMocks)
-  await context.route("**/api/config", (route) => route.fulfill({ json: { execution: true, completion: false, chat: true, realtime: true, azureVoice: true } }))
-  await context.route("**/api/realtime/azure", (route) => { errors.push("Obsolete Azure realtime route requested"); return route.abort() })
+  await context.route("**/api/config", (route) => route.fulfill({ json: { execution: true, completion: false, chat: true, realtime: true, azureRealtime: true } }))
   await context.route("**/api/files/*/run", (route) => route.fulfill({ json: {
     id: "voice-run", name, status: "succeeded", output: "Cached output", truncated: false, recoverable: false,
   } }))
@@ -507,50 +473,48 @@ for (const unsupported of ["insecure", "missing WebRTC"]) {
   })
 }
 
-test("Azure records explicit turns independently of text and WebRTC, authenticates fresh context and resumes blocked audio", async ({ page, context }) => {
-  await context.route("**/api/config", (route) => route.fulfill({ json: { execution: true, completion: false, chat: false, realtime: false, azureVoice: true } }))
+test("Azure mic works independently, sends fresh context to its authenticated route and plays responses", async ({ page, context }) => {
+  await context.route("**/api/config", (route) => route.fulfill({ json: { execution: true, completion: false, chat: false, realtime: false, azureRealtime: true } }))
   const azureRequests: unknown[] = []
-  await context.route("**/api/voice/azure", (route) => {
+  await context.route("**/api/realtime/azure", (route) => {
     expect(route.request().method()).toBe("POST")
     expect(route.request().headers().authorization).toBe(`Bearer ${new URLSearchParams(new URL(url).hash.slice(1)).get("token")}`)
     azureRequests.push(route.request().postDataJSON())
-    return route.fulfill({ json: voiceAnswer })
+    return route.fulfill({ json: { sdp: "mock-answer" } })
   })
   await page.getByRole("textbox", { name: `Edit ${name}` }).fill("Unsaved Azure context")
   const chat = await openChat(page)
   await expect(chat.getByRole("button", { name: "Start voice conversation", exact: true })).toBeDisabled()
   await expect(chat.getByRole("textbox", { name: "Your question" })).toBeDisabled()
-  await chat.evaluate(() => { Object.defineProperty(window, "RTCPeerConnection", { value: undefined }); window.__realtimeTest.blockAudio = true })
-  const panel = await openAzure(chat)
-  await expect(panel).toContainText("Only on Send, your recording goes through this server to Azure")
-  await expect(panel).toContainText("The voice is AI-generated")
+  await chat.getByRole("button", { name: "Open Azure OpenAI Realtime voice conversation (mic button)", exact: true }).click()
+  const panel = chat.getByRole("region", { name: "Azure OpenAI Realtime voice conversation", exact: true })
+  await expect(panel).toContainText("Your microphone transmits audio to Azure OpenAI")
   expect(await chat.evaluate(() => window.__realtimeTest.permissions)).toBe(0)
-  await panel.getByRole("button", { name: "Record question", exact: true }).click()
-  await expect(panel.getByRole("button", { name: "Send recording" })).toBeVisible()
-  expect(azureRequests).toEqual([])
-  expect(logs).toBe(0)
+  await chat.evaluate(() => { window.__realtimeTest.autoReady = false; window.__realtimeTest.blockAudio = true })
+  await panel.getByRole("button", { name: "Start Azure voice conversation" }).click()
+  await expect.poll(() => chat.evaluate(() => window.__realtimeTest.peers[0]?.remoteDescription?.sdp)).toBe("mock-answer")
   expect(await chat.evaluate(() => window.__realtimeTest.constraints)).toEqual([{
     audio: { echoCancellation: { ideal: true }, noiseSuppression: { ideal: true } },
   }])
-  await panel.getByRole("button", { name: "Send recording" }).click()
+  expect(azureRequests).toEqual([{ sdp: "mock-offer", name, spec: "Unsaved Azure context", output: { id: "voice-run", status: "succeeded", output: "Fresh output 1", truncated: true } }])
+  expect(requests).toEqual([])
+  await chat.evaluate(() => window.__realtimeTest.peers[0].connect())
+  expect(await chat.evaluate(() => window.__realtimeTest.peers[0].tracks[0].enabled)).toBe(false)
+  await chat.evaluate(() => window.__realtimeTest.peers[0].channel!.emit({ type: "session.created" }))
+  await expect(panel.getByRole("button", { name: "Stop Azure voice conversation", exact: true })).toBeVisible()
+  expect(await chat.evaluate(() => window.__realtimeTest.peers[0].tracks[0].enabled)).toBe(true)
+  expect(await panel.locator("audio").evaluate((audio: HTMLAudioElement) => audio.srcObject instanceof MediaStream && audio.srcObject.getAudioTracks().length === 1)).toBe(true)
   await expect(panel.getByRole("button", { name: "Resume audio" })).toBeVisible()
-  await expectReleased(chat)
-  expect(azureRequests).toEqual([{ audio: Buffer.from("recorded question").toString("base64"), format: "webm", name, spec: "Unsaved Azure context", output: { id: "voice-run", status: "succeeded", output: "Fresh output 1", truncated: true }, messages: [] }])
-  expect(await chat.evaluate(() => window.__realtimeTest.peers.length)).toBe(0)
-  expect(await panel.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src.startsWith("blob:") && audio.srcObject === null)).toBe(true)
-  expect(await chat.evaluate(() => window.__realtimeTest.blobs[0].type)).toBe("audio/mpeg")
-  expect(await chat.evaluate(async () => Array.from(new Uint8Array(await window.__realtimeTest.blobs[0].arrayBuffer())))).toEqual(Array.from(Buffer.from(voiceAnswer.audio, "base64")))
   await chat.evaluate(() => { window.__realtimeTest.blockAudio = false })
   await panel.getByRole("button", { name: "Resume audio" }).click()
   await expect(panel.getByRole("button", { name: "Resume audio" })).toBeHidden()
+  await chat.evaluate(() => window.__realtimeTest.peers[0].channel!.emit({ type: "response.output_audio_transcript.done", item_id: "azure-answer", transcript: "Azure spoken response" }))
   await expect(panel.getByRole("log")).toContainText("Azure spoken response")
   await expect(chat.getByRole("log", { name: "Conversation", exact: true })).not.toContainText("Azure spoken response")
-  await panel.getByRole("button", { name: "Interrupt and record question" }).click()
-  await expect(panel.getByRole("button", { name: "Send recording" })).toBeVisible()
-  expect(await chat.evaluate(() => window.__realtimeTest.revoked)).toEqual(await chat.evaluate(() => window.__realtimeTest.urls))
-  await panel.getByRole("button", { name: "Cancel recording" }).click()
-  expect(azureRequests).toHaveLength(1)
-  expect(requests).toEqual([])
+  await chat.evaluate(() => window.__realtimeTest.peers[0].channel!.emit({ type: "response.done", response: { status: "cancelled" } }))
+  await expect(panel.getByRole("button", { name: "Stop Azure voice conversation", exact: true })).toBeVisible()
+  await expect(panel.getByRole("alert")).toBeHidden()
+  expect(await chat.evaluate(() => window.__realtimeTest.peers[0].tracks[0].enabled)).toBe(true)
   await chat.setViewportSize({ width: 320, height: 740 })
   expect(await chat.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await chat.getByRole("button", { name: "Close Azure voice conversation and stop microphone", exact: true }).click()
@@ -559,12 +523,21 @@ test("Azure records explicit turns independently of text and WebRTC, authenticat
 })
 
 test("unconfigured Azure mic explains local setup without disabling text chat or OpenAI voice at 320px", async ({ page, context }) => {
-  await context.route("**/api/config", (route) => route.fulfill({ json: { execution: true, completion: false, chat: true, realtime: true, azureVoice: false } }))
+  await context.route("**/api/config", (route) => route.fulfill({ json: { execution: true, completion: false, chat: true, realtime: true, azureRealtime: false } }))
   const chat = await openChat(page)
-  const panel = await openAzure(chat)
-  await expect(panel.getByRole("button", { name: "Record question", exact: true })).toBeDisabled()
-  await expect(panel).toContainText("Azure voice is not configured on the server")
-  await expect(panel).toContainText("Never put provider secrets in the browser")
+  await chat.getByRole("button", { name: "Open Azure OpenAI Realtime voice conversation (mic button)", exact: true }).click()
+  await expect(chat.getByRole("button", { name: "Start Azure voice conversation", exact: true })).toBeDisabled()
+  await expect(chat.getByText("Azure OpenAI Realtime voice is not configured on the server. Text chat is independent.", { exact: true })).toBeVisible()
+  const panel = chat.getByRole("region", { name: "Azure OpenAI Realtime voice conversation", exact: true })
+  await expect(panel.locator("code")).toHaveText([
+    "AZURE_OPENAI_REALTIME_ENDPOINT", "AZURE_OPENAI_REALTIME_API_KEY",
+    "AZURE_OPENAI_REALTIME_DEPLOYMENT", "SPEC_AZURE_REALTIME_ENV_FILE",
+  ])
+  await expect(panel).toContainText("local Rust server's environment")
+  await expect(panel).toContainText("export SPEC_AZURE_REALTIME_ENV_FILE pointing to an existing private voice-only dotenv file (absolute path recommended)")
+  await expect(panel).toContainText("Leave text-chat settings unchanged. Restart the server and reload this page.")
+  await expect(panel).toContainText("Browser and remote build environments are not automatically transferred to the local server.")
+  await expect(panel).toContainText("Never put secrets in the browser.")
   await chat.setViewportSize({ width: 320, height: 740 })
   expect(await chat.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   expect(await panel.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
@@ -581,332 +554,44 @@ test("unconfigured Azure mic explains local setup without disabling text chat or
   await expectReleased(chat)
 })
 
-test("switching providers cancels pending permission and stops connected audio without reviving old sessions", async ({ page }) => {
+test("switching providers cancels pending permission and stops connected audio without reviving old sessions", async ({ page, context }) => {
+  await context.route("**/api/realtime/azure", (route) => route.fulfill({ json: { sdp: "mock-answer" } }))
   const chat = await openChat(page)
-  const panel = await openAzure(chat)
+  await chat.getByRole("button", { name: "Open Azure OpenAI Realtime voice conversation (mic button)", exact: true }).click()
   await chat.evaluate(() => { window.__realtimeTest.permission = "pending" })
   await chat.getByRole("button", { name: "Start voice conversation", exact: true }).click()
   await expect.poll(() => chat.evaluate(() => window.__realtimeTest.pending.length)).toBe(1)
   await chat.evaluate(() => { window.__realtimeTest.permission = "granted" })
-  await panel.getByRole("button", { name: "Record question", exact: true }).click()
-  await expect(panel.getByRole("button", { name: "Send recording" })).toBeVisible()
+  await chat.getByRole("button", { name: "Start Azure voice conversation", exact: true }).click()
+  await expect(chat.getByRole("button", { name: "Stop Azure voice conversation", exact: true })).toBeVisible()
   await chat.evaluate(() => window.__realtimeTest.pending[0]())
   await expect.poll(() => chat.evaluate(() => window.__realtimeTest.tracks.filter((entry) => entry.kind === "mic").map(({ request, track, stops }) => ({ request, state: track.readyState, stops })))).toEqual([
     { request: 2, state: "live", stops: 0 }, { request: 1, state: "ended", stops: 1 },
   ])
   expect(requests).toEqual([])
   await start(chat)
-  await expect(panel.getByRole("button", { name: "Record question", exact: true })).toBeVisible()
-  expect(await chat.evaluate(() => window.__realtimeTest.recorders[0].state)).toBe("inactive")
-  await panel.getByRole("button", { name: "Record question", exact: true }).click()
-  await expect(panel.getByRole("button", { name: "Send recording" })).toBeVisible()
-  expect(await chat.evaluate(() => window.__realtimeTest.peers.map((peer) => peer.closes))).toEqual([1])
-  await panel.getByRole("button", { name: "Cancel recording" }).click()
+  await expect(chat.getByRole("button", { name: "Start Azure voice conversation", exact: true })).toBeVisible()
+  expect(await chat.evaluate(() => window.__realtimeTest.peers.map((peer) => peer.closes))).toEqual([1, 0])
+  await chat.getByRole("button", { name: "Start Azure voice conversation", exact: true }).click()
+  await expect(chat.getByRole("button", { name: "Stop Azure voice conversation", exact: true })).toBeVisible()
+  expect(await chat.evaluate(() => window.__realtimeTest.peers.map((peer) => peer.closes))).toEqual([1, 1, 0])
+  await chat.evaluate(() => window.__realtimeTest.peers[2].channel!.emit({ type: "error", error: { message: "Azure test failure" } }))
+  await expect(chat.getByRole("alert")).toContainText("Azure OpenAI Realtime: Azure test failure")
   await expectReleased(chat)
 })
 
-test("Azure request failures release microphone and can be retried without OpenAI fallback", async ({ page, context }) => {
-  await context.route("**/api/voice/azure", (route) => route.fulfill({ json: voiceAnswer }))
-  await context.route("**/api/voice/azure", (route) => route.fulfill({ status: 502, json: { error: "Azure voice provider request failed" } }), { times: 1 })
+test("Azure handshake failures release microphone and can be retried without OpenAI fallback", async ({ page, context }) => {
+  await context.route("**/api/realtime/azure", (route) => route.fulfill({ json: { sdp: "mock-answer" } }))
+  await context.route("**/api/realtime/azure", (route) => route.fulfill({ status: 502, json: { error: "Realtime provider request failed" } }), { times: 1 })
   const chat = await openChat(page)
-  const panel = await openAzure(chat)
-  await sendAzure(chat)
-  await expect(panel.getByRole("alert")).toContainText("Azure voice provider request failed")
+  await chat.getByRole("button", { name: "Open Azure OpenAI Realtime voice conversation (mic button)", exact: true }).click()
+  await chat.getByRole("button", { name: "Start Azure voice conversation", exact: true }).click()
+  await expect(chat.getByRole("alert")).toContainText("Voice session request failed: Realtime provider request failed")
   await expectReleased(chat)
-  await sendAzure(chat)
-  await expect(panel.getByRole("button", { name: "Stop audio", exact: true })).toBeVisible()
-  await expect(panel.getByRole("alert")).toBeHidden()
+  await chat.getByRole("button", { name: "Start Azure voice conversation", exact: true }).click()
+  await expect(chat.getByRole("button", { name: "Stop Azure voice conversation", exact: true })).toBeVisible()
+  await expect(chat.getByRole("alert")).toBeHidden()
   await chat.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide")))
   await expectReleased(chat)
   expect(requests).toEqual([])
-})
-
-// Silent MPEG-1 Layer III frames keep native metadata loading valid even with play mocked.
-const silentFrame = Buffer.alloc(417)
-silentFrame.writeUInt32BE(0xfffb9000)
-const voiceAnswer = { transcript: "Spoken question", answer: "Azure spoken response", audio: Buffer.concat(Array(10).fill(silentFrame)).toString("base64"), format: "mp3" }
-
-async function openAzure(chat: Page) {
-  await chat.getByRole("button", { name: "Open Azure voice conversation", exact: true }).click()
-  return chat.getByRole("region", { name: "Azure voice conversation", exact: true })
-}
-
-async function sendAzure(chat: Page) {
-  await chat.getByRole("button", { name: "Record question", exact: true }).click()
-  await chat.getByRole("button", { name: "Send recording" }).click()
-}
-
-test("Azure permission denial and late cancellation cannot revive an old recording", async ({ page }) => {
-  const chat = await openChat(page)
-  const panel = await openAzure(chat)
-  await chat.evaluate(() => { window.__realtimeTest.permission = "denied" })
-  await panel.getByRole("button", { name: "Record question", exact: true }).click()
-  await expect(panel.getByRole("alert")).toContainText("Microphone permission was denied or blocked")
-  expect(logs).toBe(0)
-  await chat.evaluate(() => { window.__realtimeTest.permission = "pending" })
-  await panel.getByRole("button", { name: "Record question", exact: true }).click()
-  await expect.poll(() => chat.evaluate(() => window.__realtimeTest.pending.length)).toBe(1)
-  await panel.getByRole("button", { name: "Cancel recording" }).click()
-  await chat.evaluate(() => { window.__realtimeTest.permission = "granted" })
-  await panel.getByRole("button", { name: "Record question", exact: true }).click()
-  await expect(panel.getByRole("button", { name: "Send recording" })).toBeVisible()
-  await chat.evaluate(() => window.__realtimeTest.pending[0]())
-  expect(await chat.evaluate(() => window.__realtimeTest.tracks.map(({ track, stops }) => [track.readyState, stops]))).toEqual([["live", 0], ["ended", 1]])
-  expect(await chat.evaluate(() => window.__realtimeTest.recorders.length)).toBe(1)
-  await panel.getByRole("button", { name: "Cancel recording" }).click()
-  await expectReleased(chat)
-})
-
-for (const reason of ["insecure", "missing microphone", "missing MediaRecorder", "unsupported formats"]) {
-  test(`Azure explains ${reason} without requesting permission`, async ({ page }) => {
-    const chat = await openChat(page)
-    await chat.evaluate((reason) => {
-      if (reason === "insecure") Object.defineProperty(window, "isSecureContext", { value: false })
-      if (reason === "missing microphone") Object.defineProperty(navigator, "mediaDevices", { value: undefined })
-      if (reason === "missing MediaRecorder") Object.defineProperty(window, "MediaRecorder", { value: undefined })
-      if (reason === "unsupported formats") window.__realtimeTest.mime = "audio/unsupported"
-    }, reason)
-    const panel = await openAzure(chat)
-    await expect(panel.getByRole("button", { name: "Record question", exact: true })).toBeDisabled()
-    await expect(panel).toContainText(reason === "insecure" ? "HTTPS or localhost" : reason === "unsupported formats" ? "supported WebM, MP4 or WAV" : "does not support microphone recording")
-    expect(await chat.evaluate(() => window.__realtimeTest.permissions)).toBe(0)
-  })
-}
-
-for (const format of ["webm", "mp4", "wav"]) {
-  test(`Azure sends negotiated ${format} recording bytes, never an SDP offer`, async ({ page, context }) => {
-    const bodies: { format: string; audio: string }[] = []
-    await context.route("**/api/voice/azure", (route) => { bodies.push(route.request().postDataJSON()); return route.fulfill({ json: voiceAnswer }) })
-    const chat = await openChat(page)
-    await chat.evaluate((format) => { window.__realtimeTest.mime = `audio/${format}` }, format)
-    const panel = await openAzure(chat)
-    await sendAzure(chat)
-    await expect(panel.getByRole("button", { name: "Stop audio" })).toBeVisible()
-    expect(bodies[0].format).toBe(format)
-    expect(Buffer.from(bodies[0].audio, "base64").toString()).toBe("recorded question")
-    expect(await chat.evaluate(() => window.__realtimeTest.recorders[0].mimeType)).toBe(`audio/${format}`)
-    expect(await chat.evaluate(() => window.__realtimeTest.peers.length)).toBe(0)
-    await panel.getByRole("button", { name: "Stop audio" }).click()
-    await expectReleased(chat)
-    expect(await chat.evaluate(() => window.__realtimeTest.revoked)).toEqual(await chat.evaluate(() => window.__realtimeTest.urls))
-  })
-}
-
-test("Azure bounds complete history to four pairs and clears it when the displayed run changes", async ({ page, context }) => {
-  let run = "voice-run"
-  const bodies: { messages: { role: string; content: string }[]; output: { id: string; output: string }; spec: string }[] = []
-  await context.route("**/api/files/*/run", (route) => route.fulfill({ json: { id: run, name, status: "succeeded", output: "Cached output", truncated: false } }))
-  await context.route("**/api/files/*/run/log", (route) => route.fulfill({ json: { id: run, name, status: "succeeded", output: `Log ${++logs}`, truncated: false } }))
-  await context.route("**/api/voice/azure", (route) => {
-    bodies.push(route.request().postDataJSON())
-    return route.fulfill({ json: { ...voiceAnswer, transcript: `Question ${bodies.length}`, answer: `Answer ${bodies.length}` } })
-  })
-  const chat = await openChat(page)
-  const panel = await openAzure(chat)
-  await chat.clock.install()
-  await chat.getByRole("textbox", { name: "Your question" }).fill("Separate text draft")
-  for (let i = 0; i < 10; i++) {
-    await page.getByRole("textbox", { name: `Edit ${name}` }).fill(`Spec turn ${i}`)
-    await sendAzure(chat)
-    await expect(panel.getByRole("button", { name: "Stop audio" })).toBeVisible()
-    expect(bodies[i].messages).toHaveLength(Math.min(i, 4) * 2)
-    expect(bodies[i].messages.every((message, index) => message.role === (index % 2 ? "assistant" : "user"))).toBe(true)
-    expect(bodies[i].spec).toBe(`Spec turn ${i}`)
-    expect(bodies[i].output.output).toBe(`Log ${i + 1}`)
-    await panel.locator("audio").dispatchEvent("ended")
-    await expect(panel.getByRole("button", { name: "Record question", exact: true })).toBeVisible()
-  }
-  expect(bodies[9].messages[0]).toEqual({ role: "user", content: "Question 6" })
-  await expect(panel.getByRole("log").locator("article")).toHaveCount(8)
-  await expect(panel.getByRole("log")).toContainText("Latest 4 complete question/answer pairs.")
-  await expect(chat.getByRole("textbox", { name: "Your question" })).toHaveValue("Separate text draft")
-  await expect(chat.getByRole("log", { name: "Conversation", exact: true }).locator("article")).toHaveCount(0)
-  run = "new-run"
-  await chat.clock.fastForward(3100)
-  await expect(chat.getByRole("region", { name: "Chat context" })).toContainText("new-run")
-  await expect(panel.getByRole("log")).toHaveCount(0)
-  await sendAzure(chat)
-  await expect(panel.getByRole("button", { name: "Stop audio" })).toBeVisible()
-  expect(bodies[10].messages).toEqual([])
-  expect(bodies[10].output.id).toBe("new-run")
-})
-
-test("Azure releases mic before context refresh and discards cancelled late context", async ({ page, context }) => {
-  const pending: Route[] = []
-  let voiceRequests = 0
-  await context.route("**/api/files/*/run/log", (route) => { pending.push(route) })
-  await context.route("**/api/voice/azure", (route) => { voiceRequests++; return route.fulfill({ json: voiceAnswer }) })
-  const chat = await openChat(page)
-  const panel = await openAzure(chat)
-  await sendAzure(chat)
-  await expect.poll(() => pending.length).toBe(1)
-  await expectReleased(chat)
-  await panel.getByRole("button", { name: "Cancel response" }).click()
-  await pending[0].fulfill({ json: { id: "voice-run", status: "succeeded", output: "Late context", truncated: false } })
-  await expect(chat.getByRole("region", { name: "Chat context" }).locator("pre").last()).toHaveText("Late context")
-  expect(voiceRequests).toBe(0)
-  expect(await chat.evaluate(() => window.__realtimeTest.plays)).toBe(0)
-  await expect(panel.getByRole("button", { name: "Record question", exact: true })).toBeVisible()
-})
-
-for (const interrupt of ["new recording", "OpenAI", "close", "pagehide"]) {
-  test(`Azure late response cannot play after ${interrupt}`, async ({ page, context }) => {
-    const pending: Route[] = []
-    await context.route("**/api/voice/azure", (route) => { pending.push(route) })
-    const chat = await openChat(page)
-    // Simulate a transport that cannot abort, so this exercises the epoch guard too.
-    await chat.evaluate(() => {
-      const original = window.fetch
-      window.fetch = (input, init) => original(input, String(input).endsWith("/voice/azure") ? { ...init, signal: undefined } : init)
-    })
-    const panel = await openAzure(chat)
-    await sendAzure(chat)
-    await expect.poll(() => pending.length).toBe(1)
-    await expectReleased(chat)
-    if (interrupt === "new recording") await panel.getByRole("button", { name: "Interrupt and record question" }).click()
-    if (interrupt === "OpenAI") await start(chat)
-    if (interrupt === "close") await chat.getByRole("button", { name: "Close Azure voice conversation and stop microphone" }).click()
-    if (interrupt === "pagehide") await chat.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide")))
-    const plays = await chat.evaluate(() => window.__realtimeTest.plays)
-    const response = chat.waitForResponse((response) => response.url().endsWith("/voice/azure"))
-    await pending[0].fulfill({ json: voiceAnswer })
-    await (await response).finished()
-    await expect(panel.getByRole("log")).toHaveCount(0)
-    expect(await chat.evaluate(() => window.__realtimeTest.urls)).toEqual([])
-    expect(await chat.evaluate(() => window.__realtimeTest.plays)).toBe(plays)
-    if (interrupt === "new recording") await panel.getByRole("button", { name: "Cancel recording" }).click()
-    if (interrupt === "OpenAI") await chat.getByRole("button", { name: "Stop voice conversation", exact: true }).click()
-    await expectReleased(chat)
-  })
-}
-
-for (const pending of [false, true]) {
-  for (const action of ["close", "pagehide", "OpenAI"]) {
-    test(`Azure ${action} releases ${pending ? "late permission" : "recording"}`, async ({ page }) => {
-      const chat = await openChat(page)
-      const panel = await openAzure(chat)
-      if (pending) await chat.evaluate(() => { window.__realtimeTest.permission = "pending" })
-      await panel.getByRole("button", { name: "Record question", exact: true }).click()
-      if (pending) await expect.poll(() => chat.evaluate(() => window.__realtimeTest.pending.length)).toBe(1)
-      else await expect(panel.getByRole("button", { name: "Send recording" })).toBeVisible()
-      if (action === "close") await chat.getByRole("button", { name: "Close Azure voice conversation and stop microphone" }).click()
-      if (action === "pagehide") await chat.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide")))
-      if (action === "OpenAI") {
-        await chat.evaluate(() => { window.__realtimeTest.permission = "granted" })
-        await start(chat)
-        await chat.getByRole("button", { name: "Stop voice conversation", exact: true }).click()
-      }
-      if (pending) await chat.evaluate(() => window.__realtimeTest.pending[0]())
-      await expectReleased(chat)
-      expect(await chat.evaluate(() => window.__realtimeTest.recorders.every((recorder) => recorder.state === "inactive"))).toBe(true)
-    })
-  }
-}
-
-test("Azure 60-second cap stops capture without sending until explicit Send", async ({ page, context }) => {
-  let sent = 0
-  await context.route("**/api/voice/azure", (route) => { sent++; return route.fulfill({ json: voiceAnswer }) })
-  const chat = await openChat(page)
-  const panel = await openAzure(chat)
-  await chat.clock.install()
-  await panel.getByRole("button", { name: "Record question", exact: true }).click()
-  await expect(panel.getByRole("button", { name: "Send recording" })).toBeVisible()
-  await chat.clock.fastForward(60_001)
-  await expect(panel).toContainText("60-second limit reached")
-  await expectReleased(chat)
-  expect(sent).toBe(0)
-  expect(await chat.evaluate(() => window.__realtimeTest.recorders[0].state)).toBe("inactive")
-  await panel.getByRole("button", { name: "Send recording" }).click()
-  await expect(panel.getByRole("button", { name: "Stop audio" })).toBeVisible()
-  expect(sent).toBe(1)
-})
-
-for (const failure of ["size", "recorder", "microphone", "format"]) {
-  test(`Azure ${failure} capture failure releases microphone and never sends`, async ({ page }) => {
-    const chat = await openChat(page)
-    const panel = await openAzure(chat)
-    await panel.getByRole("button", { name: "Record question", exact: true }).click()
-    await expect(panel.getByRole("button", { name: "Send recording" })).toBeVisible()
-    await chat.evaluate((failure) => {
-      const recorder = window.__realtimeTest.recorders[0]
-      if (failure === "size") recorder.ondataavailable?.(new BlobEvent("dataavailable", { data: new Blob([new Uint8Array(4 * 1024 * 1024 + 1)], { type: recorder.mimeType }) }))
-      if (failure === "recorder") recorder.onerror?.(new ErrorEvent("error"))
-      if (failure === "microphone") window.__realtimeTest.tracks[0].track.dispatchEvent(new Event("ended"))
-      if (failure === "format") Object.defineProperty(recorder, "mimeType", { value: "audio/ogg" })
-    }, failure)
-    if (failure === "format") await panel.getByRole("button", { name: "Send recording" }).click()
-    await expect(panel.getByRole("alert")).toContainText(failure === "size" ? "exceeded 4 MiB" : failure === "format" ? "unsupported recording format" : failure === "microphone" ? "Microphone access ended" : "Microphone recording failed")
-    await expectReleased(chat)
-    expect(logs).toBe(0)
-  })
-}
-
-test("Azure playback errors revoke Blob URLs and preserve readable transcripts", async ({ page, context }) => {
-  await context.route("**/api/voice/azure", (route) => route.fulfill({ json: { ...voiceAnswer, answer: "<img src=x onerror=alert('xss')> Azure answer" } }))
-  const chat = await openChat(page)
-  const panel = await openAzure(chat)
-  await sendAzure(chat)
-  await expect(panel.getByRole("button", { name: "Stop audio" })).toBeVisible()
-  await panel.locator("audio").dispatchEvent("error")
-  await expect(panel.getByRole("alert")).toContainText("Answer audio could not be played")
-  await expect(panel.getByRole("log")).toContainText("<img src=x onerror=alert('xss')> Azure answer")
-  await expect(panel.locator("img, script")).toHaveCount(0)
-  expect(await panel.locator("audio").getAttribute("src")).toBeNull()
-  expect(await chat.evaluate(() => window.__realtimeTest.revoked)).toEqual(await chat.evaluate(() => window.__realtimeTest.urls))
-  await expectReleased(chat)
-})
-
-test("Azure native MediaRecorder produces a real WebM container from the mocked microphone", async ({ page, context }) => {
-  const bodies: { format: string; audio: string }[] = []
-  await context.route("**/api/voice/azure", (route) => { bodies.push(route.request().postDataJSON()); return route.fulfill({ json: voiceAnswer }) })
-  const chat = await openChat(page)
-  await chat.evaluate(() => { Object.defineProperty(window, "MediaRecorder", { value: window.__realtimeTest.nativeRecorder }) })
-  const panel = await openAzure(chat)
-  await panel.getByRole("button", { name: "Record question", exact: true }).click()
-  await expect(panel.getByRole("button", { name: "Send recording" })).toBeVisible()
-  // Let the real encoder capture audio; its media clock is not Playwright's fake timer.
-  await chat.waitForTimeout(400)
-  await panel.getByRole("button", { name: "Send recording" }).click()
-  await expect(panel.getByRole("button", { name: "Stop audio" })).toBeVisible()
-  expect(bodies[0].format).toBe("webm")
-  expect(Buffer.from(bodies[0].audio, "base64").subarray(0, 4).toString("hex")).toBe("1a45dfa3")
-  await expectReleased(chat)
-})
-
-test("Azure fresh context failures never submit recorded audio", async ({ page, context }) => {
-  let sent = 0
-  await context.route("**/api/files/*/run/log", (route) => route.fulfill({ status: 503, json: { error: "Fresh output unavailable" } }))
-  await context.route("**/api/voice/azure", (route) => { sent++; return route.fulfill({ json: voiceAnswer }) })
-  const chat = await openChat(page)
-  const panel = await openAzure(chat)
-  await sendAzure(chat)
-  await expect(panel.getByRole("alert")).toContainText("Fresh output unavailable")
-  await expectReleased(chat)
-  expect(sent).toBe(0)
-})
-
-test("Azure run changes cancel an in-flight answer and ignore its late result", async ({ page, context }) => {
-  let run = "voice-run"
-  const pending: Route[] = []
-  await context.route("**/api/files/*/run", (route) => route.fulfill({ json: { id: run, name, status: "succeeded", output: "Cached output", truncated: false } }))
-  await context.route("**/api/voice/azure", (route) => { pending.push(route) })
-  const chat = await openChat(page)
-  await chat.evaluate(() => {
-    const original = window.fetch
-    window.fetch = (input, init) => original(input, String(input).endsWith("/voice/azure") ? { ...init, signal: undefined } : init)
-  })
-  const panel = await openAzure(chat)
-  await chat.clock.install()
-  await sendAzure(chat)
-  await expect.poll(() => pending.length).toBe(1)
-  run = "new-run"
-  await chat.clock.fastForward(3100)
-  await expect(panel).toContainText("Session changed")
-  await expect(panel.getByRole("button", { name: "Record question", exact: true })).toBeVisible()
-  const response = chat.waitForResponse((response) => response.url().endsWith("/voice/azure"))
-  await pending[0].fulfill({ json: voiceAnswer })
-  await (await response).finished()
-  await expect(panel.getByRole("log")).toHaveCount(0)
-  expect(await chat.evaluate(() => window.__realtimeTest.urls)).toEqual([])
-  await expectReleased(chat)
 })

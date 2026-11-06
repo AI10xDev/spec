@@ -45,7 +45,7 @@ function App() {
   const [completion, setCompletion] = useState(false)
   const [chat, setChat] = useState(false)
   const [realtime, setRealtime] = useState(false)
-  const [azureVoice, setAzureVoice] = useState(false)
+  const [azureRealtime, setAzureRealtime] = useState(false)
   const [complete, setComplete] = useState(true)
   const [files, setFiles] = useState<Entry[]>([])
   const [tabs, setTabs] = useState<Tab[]>([])
@@ -152,14 +152,14 @@ function App() {
 
   async function refreshConfig() {
     const request = ++configRequest.current
-    const config = await api<{ execution: boolean; computeruse?: boolean; completion: boolean; chat: boolean; realtime: boolean; azureVoice: boolean }>("/config")
+    const config = await api<{ execution: boolean; computeruse?: boolean; completion: boolean; chat: boolean; realtime: boolean; azureRealtime: boolean }>("/config")
     if (request !== configRequest.current) return
     setExecution(config.execution)
     setComputeruseAvailable(config.computeruse === true)
     setCompletion(config.completion)
     setChat(config.chat)
     setRealtime(config.realtime)
-    setAzureVoice(config.azureVoice)
+    setAzureRealtime(config.azureRealtime)
   }
 
   async function connect(event?: React.FormEvent) {
@@ -827,7 +827,7 @@ function App() {
     {error && <p role="alert" className="error">{error}</p>}
   </main>
 
-  if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} realtime={realtime} azureVoice={azureVoice} />
+  if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} realtime={realtime} azureRealtime={azureRealtime} />
 
   return <div className="app">
     <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Performance: {optimization.status}</span>}<div className="analysis-actions">{execution && <button ref={activeRunsButton} aria-expanded={activeRuns} aria-controls="active-runs" onClick={() => setActiveRuns(!activeRuns)}>Active runs</button>}<button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button ref={performanceButton} className="primary" title="performance" aria-expanded={performance && !settings} aria-controls="performance-form" disabled={settings} onClick={() => { if (!performance) setUseEditorSpec(false); setPerformance(!performance) }}>Performance</button></div></div></header>

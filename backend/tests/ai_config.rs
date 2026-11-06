@@ -6,7 +6,7 @@ use tokio::{
 };
 
 const SETTINGS: &str = "export AZURE_OPENAI_ENDPOINT='https://azure.test/openai/v1'\nAZURE_OPENAI_API_KEY=mock-secret\nDEPLOYMENT_NAME=test-model\n";
-const VOICE_SETTINGS: &str = "AZURE_OPENAI_VOICE_ENDPOINT=https://voice.openai.azure.com\nAZURE_OPENAI_VOICE_API_KEY=mock-voice-secret\nAZURE_OPENAI_WHISPER_DEPLOYMENT=whisper-model\nAZURE_OPENAI_AUDIO_DEPLOYMENT=voice-model\n";
+const VOICE_SETTINGS: &str = "AZURE_OPENAI_REALTIME_ENDPOINT=https://voice.openai.azure.com\nAZURE_OPENAI_REALTIME_API_KEY=mock-voice-secret\nAZURE_OPENAI_REALTIME_DEPLOYMENT=voice-model\n";
 
 fn server(directory: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_spec"));
@@ -52,7 +52,7 @@ async fn assert_config(mut command: Command, enabled: bool, voice_enabled: bool)
             "completion": enabled,
             "chat": enabled,
             "realtime": false,
-            "azureVoice": voice_enabled,
+            "azureRealtime": voice_enabled,
         })
     );
     child.kill().await.unwrap();
@@ -120,7 +120,7 @@ async fn explicit_voice_file_respects_exported_overrides() {
     let file = root.path().join("ai.env");
     std::fs::write(
         &file,
-        format!("{SETTINGS}AZURE_OPENAI_VOICE_ENDPOINT=invalid\nAZURE_OPENAI_VOICE_API_KEY=\nAZURE_OPENAI_WHISPER_DEPLOYMENT=\nAZURE_OPENAI_AUDIO_DEPLOYMENT=\n"),
+        format!("{SETTINGS}AZURE_OPENAI_REALTIME_ENDPOINT=invalid\nAZURE_OPENAI_REALTIME_API_KEY=\nAZURE_OPENAI_REALTIME_DEPLOYMENT=\n"),
     )
     .unwrap();
     // The explicit file wins over the discovered file, then exports override it.
@@ -129,12 +129,11 @@ async fn explicit_voice_file_respects_exported_overrides() {
     command
         .env("SPEC_AI_ENV_FILE", &file)
         .env(
-            "AZURE_OPENAI_VOICE_ENDPOINT",
+            "AZURE_OPENAI_REALTIME_ENDPOINT",
             "https://override.openai.azure.com",
         )
-        .env("AZURE_OPENAI_VOICE_API_KEY", "exported-voice-secret")
-        .env("AZURE_OPENAI_WHISPER_DEPLOYMENT", "exported-whisper-model")
-        .env("AZURE_OPENAI_AUDIO_DEPLOYMENT", "exported-voice-model");
+        .env("AZURE_OPENAI_REALTIME_API_KEY", "exported-voice-secret")
+        .env("AZURE_OPENAI_REALTIME_DEPLOYMENT", "exported-voice-model");
     assert_config(command, true, true).await;
 }
 
@@ -147,9 +146,9 @@ async fn empty_export_does_not_fall_back_to_voice_file() {
     )
     .unwrap();
     let mut command = server(root.path());
-    command.env("AZURE_OPENAI_VOICE_API_KEY", "");
+    command.env("AZURE_OPENAI_REALTIME_API_KEY", "");
     let stderr = assert_config(command, true, false).await;
-    assert!(stderr.contains("AZURE_OPENAI_VOICE_API_KEY must be nonempty"));
+    assert!(stderr.contains("AZURE_OPENAI_REALTIME_API_KEY must be nonempty"));
 }
 
 #[tokio::test]
@@ -166,7 +165,7 @@ async fn voice_only_file_does_not_replace_text_settings() {
         )
         .unwrap();
         let mut command = server(root.path());
-        command.env("SPEC_AZURE_VOICE_ENV_FILE", &file);
+        command.env("SPEC_AZURE_REALTIME_ENV_FILE", &file);
         assert_config(command, text_enabled, true).await;
     }
 }
@@ -181,41 +180,40 @@ async fn voice_only_file_replaces_shared_voice_settings_and_exports_win() {
     let mut command = server(root.path());
     command
         .env("SPEC_AI_ENV_FILE", &shared)
-        .env("SPEC_AZURE_VOICE_ENV_FILE", &voice);
+        .env("SPEC_AZURE_REALTIME_ENV_FILE", &voice);
     assert_config(command, true, false).await;
 
-    std::fs::write(&voice, "AZURE_OPENAI_VOICE_ENDPOINT=invalid\nAZURE_OPENAI_VOICE_API_KEY=\nAZURE_OPENAI_WHISPER_DEPLOYMENT=\nAZURE_OPENAI_AUDIO_DEPLOYMENT=\n").unwrap();
+    std::fs::write(&voice, "AZURE_OPENAI_REALTIME_ENDPOINT=invalid\nAZURE_OPENAI_REALTIME_API_KEY=\nAZURE_OPENAI_REALTIME_DEPLOYMENT=\n").unwrap();
     let mut command = server(root.path());
     command
         .env("SPEC_AI_ENV_FILE", &shared)
-        .env("SPEC_AZURE_VOICE_ENV_FILE", &voice)
+        .env("SPEC_AZURE_REALTIME_ENV_FILE", &voice)
         .env(
-            "AZURE_OPENAI_VOICE_ENDPOINT",
+            "AZURE_OPENAI_REALTIME_ENDPOINT",
             "https://voice.openai.azure.com",
         )
-        .env("AZURE_OPENAI_VOICE_API_KEY", "mock-voice-secret")
-        .env("AZURE_OPENAI_WHISPER_DEPLOYMENT", "whisper-model")
-        .env("AZURE_OPENAI_AUDIO_DEPLOYMENT", "voice-model");
+        .env("AZURE_OPENAI_REALTIME_API_KEY", "mock-voice-secret")
+        .env("AZURE_OPENAI_REALTIME_DEPLOYMENT", "voice-model");
     assert_config(command, true, true).await;
 }
 
 #[tokio::test]
 async fn invalid_voice_configuration_keeps_text_available_without_exposing_keys() {
     for (settings, expected) in [
-        (None, "Could not read SPEC_AZURE_VOICE_ENV_FILE"),
+        (None, "Could not read SPEC_AZURE_REALTIME_ENV_FILE"),
         (
-            Some("AZURE_OPENAI_VOICE_API_KEY='mock-voice-secret\n"),
-            "Invalid Azure voice settings file",
+            Some("AZURE_OPENAI_REALTIME_API_KEY='mock-voice-secret\n"),
+            "Invalid Azure Realtime settings file",
         ),
         (
-            Some("AZURE_OPENAI_VOICE_API_KEY=mock-voice-secret\n"),
-            "Set AZURE_OPENAI_VOICE_ENDPOINT",
+            Some("AZURE_OPENAI_REALTIME_API_KEY=mock-voice-secret\n"),
+            "Set AZURE_OPENAI_REALTIME_ENDPOINT",
         ),
         (
             Some(
-                "AZURE_OPENAI_VOICE_ENDPOINT=https://voice.openai.azure.com/openai/v1\nAZURE_OPENAI_VOICE_API_KEY=mock-voice-secret\nAZURE_OPENAI_WHISPER_DEPLOYMENT=whisper-model\nAZURE_OPENAI_AUDIO_DEPLOYMENT=voice-model\n",
+                "AZURE_OPENAI_REALTIME_ENDPOINT=https://voice.openai.azure.com/openai/v1\nAZURE_OPENAI_REALTIME_API_KEY=mock-voice-secret\nAZURE_OPENAI_REALTIME_DEPLOYMENT=voice-model\n",
             ),
-            "AZURE_OPENAI_VOICE_ENDPOINT must be a canonical HTTPS resource origin",
+            "AZURE_OPENAI_REALTIME_ENDPOINT must be a canonical HTTPS resource origin",
         ),
     ] {
         let root = tempfile::tempdir().unwrap();
@@ -225,9 +223,9 @@ async fn invalid_voice_configuration_keeps_text_available_without_exposing_keys(
             std::fs::write(&file, settings).unwrap();
         }
         let mut command = server(root.path());
-        command.env("SPEC_AZURE_VOICE_ENV_FILE", &file);
+        command.env("SPEC_AZURE_REALTIME_ENV_FILE", &file);
         let stderr = assert_config(command, true, false).await;
-        assert!(stderr.contains("Azure voice disabled:"));
+        assert!(stderr.contains("Azure Realtime voice disabled:"));
         assert!(stderr.contains(expected), "{stderr}");
     }
 }

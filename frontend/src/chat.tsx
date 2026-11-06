@@ -3,9 +3,8 @@ import type { Document, Output, Tab } from "./tabs"
 import { dirty } from "./tabs"
 import { AgentEditor } from "./agent-editor"
 import { Realtime } from "./realtime"
-import { AzureVoice } from "./azure-voice"
 
-type Api = <T>(path: string, body?: unknown, method?: string, signal?: AbortSignal) => Promise<T>
+type Api = <T>(path: string, body?: unknown, method?: string) => Promise<T>
 type Context = { spec: string; unsaved: boolean; source: string; output: Output | null; updated: string }
 type Message = { role: "user" | "assistant"; content: string }
 
@@ -28,7 +27,7 @@ async function editorBuffer(name: string): Promise<Tab | null> {
   })
 }
 
-export function Chat({ name, api, available, execution, realtime, azureVoice }: { name: string; api: Api; available: boolean; execution: boolean; realtime: boolean; azureVoice: boolean }) {
+export function Chat({ name, api, available, execution, realtime, azureRealtime }: { name: string; api: Api; available: boolean; execution: boolean; realtime: boolean; azureRealtime: boolean }) {
   const [context, setContext] = useState<Context | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [question, setQuestion] = useState("")
@@ -142,7 +141,7 @@ export function Chat({ name, api, available, execution, realtime, azureVoice }: 
       </div>
       <div className="chat-extensions">
         <AgentEditor api={api} />
-        {[Realtime, AzureVoice].map((Voice, index) => <Voice key={`${name}:${index}`} api={api} available={index === 1 ? azureVoice : realtime} runId={context?.output?.id ?? null} onStart={(stop) => {
+        {(["openai", "azure"] as const).map((provider) => <Realtime key={`${name}:${provider}`} provider={provider} api={api} available={provider === "azure" ? azureRealtime : realtime} onStart={(stop) => {
           stopVoice.current?.()
           stopVoice.current = stop
         }} context={async () => {
