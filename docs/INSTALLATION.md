@@ -142,7 +142,7 @@ bash -n setup.sh
 From a directory where you keep source checkouts:
 
 ```sh
-git clone --branch v0.1.13 https://github.com/AI10xDev/spec.git
+git clone --branch v0.1.14 https://github.com/AI10xDev/spec.git
 cd spec
 unset SPEC_COMMAND
 ./run.sh --local
@@ -150,11 +150,11 @@ unset SPEC_COMMAND
 
 This selects the release tag in detached-HEAD mode. Use `git switch -c my-work`
 before making your own source commits. For the latest development branch instead,
-clone without `--branch v0.1.13`. If GitHub requests authentication, authenticate
+clone without `--branch v0.1.14`. If GitHub requests authentication, authenticate
 with an account that has repository access; never embed tokens in clone URLs.
 
 Alternatively, download **Source code (tar.gz)** or **Source code (zip)** from the
-[release page](https://github.com/AI10xDev/spec/releases/tag/v0.1.13), extract it,
+[release page](https://github.com/AI10xDev/spec/releases/tag/v0.1.14), extract it,
 and run `./run.sh --local` from the extracted directory. These archives exclude
 historical `.out` and `.spec-runs` artifacts. Git clones still contain tracked
 historical artifacts and history; archive exclusions are not a secret audit or
@@ -262,7 +262,7 @@ Do not force a checkout or discard work just to upgrade. Then select the release
 
 ```sh
 git fetch origin --tags
-git switch --detach v0.1.13
+git switch --detach v0.1.14
 ./build.sh
 ```
 
@@ -271,6 +271,13 @@ and SSH settings (`./run.sh --local` for editing only). Reconnect using the newl
 printed token URL. No automatic service restart occurs. Back up specs and private
 `.spec-output/` records; retain access to the settings file and original remote
 host/workspace for recovery. Do not publish those backups.
+
+Version v0.1.14 adds agent memory at `POST /api/memory/graphql`. Back up the
+entire `.spec-output/` directory, including JSON records and `memory.sqlite3`.
+Existing local jobs are indexed on history queries without rerunning them;
+unknown historical times and missing reports remain explicit. New reporting
+instructions apply only to builds and continuations launched after upgrading.
+See [Build memory](BUILD_MEMORY.md) for query examples and evidence limits.
 
 For wizard-based installations upgraded in place, reuse
 `bash "$HOME/.spec-setup/start.sh"` (or your custom setup launcher). It restores

@@ -25,7 +25,7 @@ README. Spec helps organize that work; you still review and test the changes.
 For the conversational setup flow, clone the release and run:
 
 ```sh
-git clone --branch v0.1.13 https://github.com/AI10xDev/spec.git
+git clone --branch v0.1.14 https://github.com/AI10xDev/spec.git
 cd spec
 ./setup.sh
 ```
@@ -69,7 +69,7 @@ bun --version
 ```
 
 If you chose Node.js instead of Bun, check `node --version` and `npm --version`.
-There is no prebuilt app installer in v0.1.13, so the first launch builds the app
+There is no prebuilt app installer in v0.1.14, so the first launch builds the app
 on your computer. You do not need a GPU.
 
 ### 2. Download And Start
@@ -77,7 +77,7 @@ on your computer. You do not need a GPU.
 In a terminal, from a folder where you keep projects, run:
 
 ```sh
-git clone --branch v0.1.13 https://github.com/AI10xDev/spec.git
+git clone --branch v0.1.14 https://github.com/AI10xDev/spec.git
 cd spec
 unset SPEC_COMMAND
 ./run.sh --local

@@ -4,9 +4,9 @@ A local-first **Rust backend + Vite / React / TypeScript frontend** for writing 
 
 This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates over SSH to the remote `spec build` alias/function. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
 
-## Latest release: v0.1.13
+## Latest release: v0.1.14
 
-[Spec v0.1.13](https://github.com/AI10xDev/spec/releases/tag/v0.1.13) adds persistent saved-editor build queues, the opt-in Computeruse shared-file bridge, and conversational guided setup. Azure voice uses Realtime WebRTC with near-field noise reduction; the intermediate Whisper/audio-mini application path has been rolled back. See the [release notes](docs/releases/v0.1.13.md) for scope, validation, and upgrade instructions.
+[Spec v0.1.14](https://github.com/AI10xDev/spec/releases/tag/v0.1.14) adds agent memory for backend-managed build sweeps: durable changes, reasons, checks, and unresolved work, with SQLite-backed GraphQL history keyed by job, session, spec, and time. Agent reports remain unverified claims, separate from operational status. See the [release notes](docs/releases/v0.1.14.md) for scope, validation, and upgrade instructions.
 
 Rebuild and restart the local server, then reconnect using its new token URL. Already-running remote supervisors are not upgraded. This is a Git-tagged source release, with no prebuilt binaries; package manifests remain at `0.1.0`, as in prior releases.
 
@@ -60,7 +60,7 @@ Read the [current code review and feature report (2026-10-28)](docs/CODE_REVIEW_
 Requirements: Linux, Rust/Cargo (tested with 1.98), and Bun (tested with 1.3.14) or Node.js 22.12+ with npm. Bun is recommended for reproducible frontend installs using `bun.lock`; the launcher's npm fallback does not use that lockfile. These tools are used for frontend dependency management/building only. The backend uses Unix file locking and process groups; Windows is not supported by this version.
 
 ```sh
-git clone --branch v0.1.13 https://github.com/AI10xDev/spec.git
+git clone --branch v0.1.14 https://github.com/AI10xDev/spec.git
 cd spec
 unset SPEC_COMMAND
 ./run.sh --local
