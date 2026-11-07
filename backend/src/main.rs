@@ -35,6 +35,7 @@ mod azure_realtime;
 mod chat;
 mod completion;
 mod computeruse;
+mod feature_review;
 mod memory;
 mod project_search;
 mod queued_builds;
@@ -53,7 +54,7 @@ const MAX_FILE: usize = 2 * 1024 * 1024;
 const MAX_BUILD_SPEC: usize = 120 * 1024;
 const MAX_OUTPUT: usize = 256 * 1024;
 const MAX_RUNS: usize = 16;
-const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 #[derive(Clone)]
 struct App {
@@ -1318,6 +1319,12 @@ fn router(app: App) -> Router {
             post(storage::upload).layer(DefaultBodyLimit::max(storage::MAX_BODY)),
         )
         .route("/api/analytics", post(analytics::report))
+        .route(
+            "/api/feature-review",
+            get(feature_review::status)
+                .post(feature_review::review)
+                .layer(DefaultBodyLimit::max(feature_review::MAX_BODY)),
+        )
         .route(
             "/api/memory/graphql",
             post(memory::graphql).layer(DefaultBodyLimit::max(64 * 1024)),

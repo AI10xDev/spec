@@ -6,6 +6,7 @@ import { Editor } from "./editor"
 import { Chat } from "./chat"
 import { LogOutput } from "./highlighting"
 import { Analytics } from "./analytics"
+import { FeatureReview } from "./feature-review"
 import { BuildProgress } from "./progress"
 import { Settings } from "./settings"
 import { ProjectPicker } from "./project-picker"
@@ -89,6 +90,7 @@ function App() {
   const [useEditorSpec, setUseEditorSpec] = useState(false)
   const performanceButton = useRef<HTMLButtonElement>(null)
   const [analytics, setAnalytics] = useState(false)
+  const [featureReview, setFeatureReview] = useState(false)
   const [settings, setSettings] = useState(false)
   const configRequest = useRef(0)
   const [outputView, setOutputView] = useState<"file" | "optimization">("file")
@@ -682,7 +684,7 @@ function App() {
 
   useEffect(() => {
     function shortcut(event: KeyboardEvent) {
-      if (settings || analytics || !connected || chatName || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key !== "Enter") return
+      if (settings || analytics || featureReview || !connected || chatName || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key !== "Enter") return
       const target = event.target as HTMLElement | null
       if (target?.closest("[inert]")) return
       if (target?.closest("input, textarea, [contenteditable=true]") && !target.matches(".editor-input textarea")) return
@@ -860,6 +862,7 @@ function App() {
       <div className="performance-actions"><button type="submit" className="primary" aria-describedby="performance-availability" disabled={performanceBusy || projectSearching || !execution || performanceBlocked}>Run Gemma RL (built)</button>{execution && <button type="button" disabled={performanceBusy} onClick={() => setPerformanceRefresh((value) => value + 1)}>Refresh Performance runs</button>}<button type="button" disabled={performanceBusy} onClick={() => { setPerformance(false); performanceButton.current?.focus() }}>Cancel</button></div>
     </form>}
     {analytics && <Analytics api={api} active={active} onClose={() => setAnalytics(false)} />}
+    {featureReview && <FeatureReview api={api} onClose={() => setFeatureReview(false)} />}
     {settings && <Settings api={api} onClose={() => setSettings(false)} onChanged={refreshConfig} />}
     <div className="workspace" hidden={settings} inert={settings}>
       <aside>
@@ -941,7 +944,7 @@ function App() {
             <div className="output-selector" role="group" aria-label="Output view"><button aria-pressed={outputView === "file"} onClick={() => setOutputView("file")}>Current file{tab ? `: ${tab.name}` : " output"}</button><button aria-pressed={outputView === "optimization"} disabled={!optimization && !execution} onClick={() => {
               setOutputView("optimization")
               if (!optimization) void recoverOptimization()
-            }}>Performance output</button></div>
+            }}>Performance output</button><button onClick={() => setFeatureReview(true)}>Feature review</button></div>
             {outputView === "optimization" && <div className="output-controls"><button disabled={performanceBusy} onClick={() => { void recoverOptimization(); setPerformanceRefresh((value) => value + 1) }}>Recover latest Performance</button></div>}
             {tab && outputView === "file" && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>{historical ? "Chat uses the associated run, not this retained log" : "Spec + current nohup output in a separate window"}</span></div>}
             <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <><button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button><button disabled={!!loadingOutput || !!retainedView?.loading || busy || !execution} onClick={() => void browseRetained(tab.name)}>Browse retained runs</button></>}{!historical && output?.recoverable && execution && <button disabled={outputView === "optimization" && performanceBusy} onClick={() => outputView === "optimization" ? void stopPerformance() : void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={!canContinue} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>

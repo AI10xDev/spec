@@ -17,6 +17,7 @@ README. Spec helps organize that work; you still review and test the changes.
 | Share instructions with local computeruse | Configure the opt-in [shared-file bridge](docs/COMPUTERUSE.md), then use the editor's Computeruse toggle. |
 | Write clearer tasks | Use the [everyday examples](#everyday-examples). |
 | Understand every setting | Read [Installation](docs/INSTALLATION.md) and the [configuration reference](REFERENCE.md#configuration). |
+| Compare repository features | Use **Feature review** beside **Performance output** for cited PDF and Markdown reports. See [scope and Azure image setup](docs/FEATURE_REVIEW.md). |
 
 ## Install And Open Spec
 

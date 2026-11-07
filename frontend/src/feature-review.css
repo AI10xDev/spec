@@ -1,0 +1,17 @@
+.feature-review input:not([type=checkbox]), .feature-review textarea { width: 100%; min-width: 0; box-sizing: border-box; padding: 10px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+.feature-review textarea { resize: vertical; }
+.feature-review input:focus-visible, .feature-review textarea:focus-visible { outline: 2px solid var(--accent); }
+.feature-review h2, .feature-review h4, .feature-review li { overflow-wrap: anywhere; }
+.feature-review h4 { font-size: 13px; margin-bottom: 6px; }
+.feature-review li, .feature-review figcaption { font-size: 12px; line-height: 1.6; }
+.feature-review a { color: var(--accent); }
+.review-checkbox { display: flex; gap: 8px; align-items: center; }
+.review-downloads { display: flex; flex-wrap: wrap; gap: 8px; }
+.review-citations { white-space: nowrap; }
+.review-citations a { margin-left: 4px; }
+.review-flow { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 18px; }
+.review-flow li { border: 1px solid var(--selected-border); background: var(--surface-raised); padding: 12px; flex: 1 1 110px; position: relative; }
+.review-flow li:not(:last-child)::after { content: ">"; position: absolute; right: -14px; top: 12px; color: var(--accent); }
+.review-image { max-width: 100%; height: auto; }
+.review-error { margin: 16px 24px; }
+@media (max-width: 600px) { .review-flow { flex-direction: column; } .review-flow li { flex-basis: auto; } .review-flow li:not(:last-child)::after { content: "v"; top: auto; bottom: -18px; left: 50%; } .feature-review figure { margin: 0; } }
