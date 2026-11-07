@@ -424,10 +424,12 @@ struct Reply {
     public: Option<&'static str>,
 }
 
+type CapturedRequest = (String, String, HeaderMap, Bytes);
+
 #[derive(Clone)]
 struct Mock {
     replies: Arc<Mutex<VecDeque<Reply>>>,
-    requests: Arc<Mutex<Vec<(String, String, HeaderMap, Bytes)>>>,
+    requests: Arc<Mutex<Vec<CapturedRequest>>>,
     blocked_at: Option<usize>,
     entered: Arc<Semaphore>,
     release: Arc<Semaphore>,
