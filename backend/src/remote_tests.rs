@@ -891,11 +891,43 @@ async fn performance_remote_detaches_then_cancels_only_its_supervised_group() {
 #[tokio::test]
 async fn selected_profiles_use_private_stdin_and_override_build_models_without_leaking() {
     for provider in ["azure", "openai", "claude", "openrouter", "huggingface"] {
+        let model = if provider == "openrouter" {
+            "anthropic/claude-sonnet-4.5"
+        } else {
+            "chosen"
+        };
         for mode in ["build", "continue", "repository-save", "optimize"] {
             let root = tempfile::tempdir().unwrap();
             let runner = root.path().join("runner");
             let remote = tests::remote_fixture(root.path(), &runner);
-            fs::write(&runner, "#!/usr/bin/env python3\nimport json,os\nc=json.loads(os.environ['OPENCODE_CONFIG_CONTENT'])\nassert c['agent']['build']['model']=='spec-execution/chosen'\nassert c['mode']['build']['model']=='spec-execution/chosen'\nassert c['agent']['build']['prompt']=='keep'\nassert c['instructions'][0]=='AGENTS.md'\nassert c['plugin'][0]=='existing'\nassert 'private-secret' not in json.dumps(c)\nprint('selected', flush=True)\nprint(os.environ['SPEC_EXECUTION_API_KEY'], flush=True)\n").unwrap();
+            fs::write(
+                &runner,
+                format!(
+                    r#"#!/usr/bin/env python3
+import json,os,sys
+c=json.loads(os.environ['OPENCODE_CONFIG_CONTENT'])
+assert c['model']=='spec-execution/{model}'
+assert c['agent']['build']['model']=='spec-execution/{model}'
+assert c['mode']['build']['model']=='spec-execution/{model}'
+assert c['agent']['build']['prompt']=='keep'
+assert c['instructions'][0]=='AGENTS.md'
+assert c['plugin'][0]=='existing'
+assert 'private-secret' not in json.dumps(c)
+p=c['provider']['spec-execution']
+assert p['models']['{model}']['id']=='{model}'
+if '{provider}'=='openrouter':
+    assert p['npm']=='@ai-sdk/openai-compatible'
+    assert p['options']['baseURL']=='https://openrouter.ai/api/v1'
+    assert p['options']['apiKey']=='{{env:SPEC_EXECUTION_API_KEY}}'
+    assert 'api-key' not in p['options'].get('headers', {{}})
+if '{mode}'=='continue':
+    assert sys.argv[sys.argv.index('--model')+1]=='spec-execution/{model}'
+print('selected', flush=True)
+print(os.environ['SPEC_EXECUTION_API_KEY'], flush=True)
+"#
+                ),
+            )
+            .unwrap();
             fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
             fs::write(
                 root.path().join(".bash_aliases"),
@@ -916,14 +948,16 @@ async fn selected_profiles_use_private_stdin_and_override_build_models_without_l
                         .success()
                 );
             }
-            let profile = serde_json::json!({"provider": provider, "model":"chosen",
-                "endpoint": if provider == "huggingface" { "http://localhost:8080/v1" } else if provider == "azure" { "https://example.test/openai/v1" } else { "https://example.test/v1" },
+            let profile = serde_json::json!({"provider": provider, "model":model,
+                "endpoint": if provider == "huggingface" { "http://localhost:8080/v1" } else if provider == "azure" { "https://example.test/openai/v1" } else if provider == "openrouter" { "https://openrouter.ai/api/v1" } else { "https://example.test/v1" },
                 "apiVersion":"2026-01-01", "apiKey":"private-secret"}).to_string();
             let id = Uuid::new_v4().to_string();
             let payload = if mode == "optimize" {
-                "import json,os,stat\nfrom pathlib import Path\np=Path(os.environ['SPEC_EXECUTION_PROFILE'])\nassert stat.S_IMODE(p.stat().st_mode)==0o600\nassert json.loads(p.read_text())['model']=='chosen'\nprint('selected')\nprint(json.loads(p.read_text())['apiKey'])\n"
+                format!(
+                    "import json,os,stat\nfrom pathlib import Path\np=Path(os.environ['SPEC_EXECUTION_PROFILE'])\nassert stat.S_IMODE(p.stat().st_mode)==0o600\nassert json.loads(p.read_text())['model']=='{model}'\nprint('selected')\nprint(json.loads(p.read_text())['apiKey'])\n"
+                )
             } else {
-                "snapshot context"
+                "snapshot context".to_owned()
             };
             let config = if mode == "optimize" { "{}" } else { "" };
             let mut command = remote.execution_command(
@@ -940,7 +974,7 @@ async fn selected_profiles_use_private_stdin_and_override_build_models_without_l
                 profile.len(),
             );
             assert!(!format!("{command:?}").contains("private-secret"));
-            command.env("OPENCODE_CONFIG_CONTENT", r#"{"instructions":["AGENTS.md"],"plugin":["existing"],"agent":{"build":{"model":"old/model","prompt":"keep"}},"mode":{"build":{"model":"old/model"}}}"#);
+            command.env("OPENCODE_CONFIG_CONTENT", r#"{"instructions":["AGENTS.md"],"plugin":["existing"],"model":"azure/default","agent":{"build":{"model":"azure/default","prompt":"keep"}},"mode":{"build":{"model":"azure/default"}}}"#);
             let mut child = command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())

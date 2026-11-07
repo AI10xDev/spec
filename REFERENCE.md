@@ -349,6 +349,16 @@ their admitted configuration. Voice settings remain independent.
 | OpenRouter | Model ID such as `openai/gpt-4.1-mini`, API key, and `https://openrouter.ai/api/v1`; uses Chat Completions. |
 | Local Hugging Face | Served model ID, loopback OpenAI-compatible API URL such as `http://127.0.0.1:8000/v1`, and an optional API key. |
 
+**OpenRouter for the spec build session agent:** select **OpenRouter**, enter your
+OpenRouter API key and full model ID (including the publisher prefix, for example
+`openai/gpt-4.1-mini`), keep `https://openrouter.ai/api/v1` as the API base URL,
+and choose **Save settings**. The build-agent summary shows the saved selection,
+not unsaved form edits. Future builds and continuations use this profile instead
+of the execution host's default Azure model; Azure credentials are not required.
+To use Azure again, select **Azure OpenAI** and save its deployment, endpoint,
+version, and key. The provider selector is the Azure opt-in/opt-out control;
+**Reset to environment** is not an Azure opt-out because host defaults may use Azure.
+
 Model defaults are examples, not availability guarantees. Cloud endpoints require
 HTTPS. Saving validates configuration, not credentials, connectivity, model
 availability, or tool support. Agent builds and optimization need a tool-capable
