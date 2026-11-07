@@ -42,6 +42,7 @@ mod realtime;
 mod recovery;
 mod remote;
 mod settings;
+mod storage;
 use azure_realtime::AzureRealtime;
 use completion::Completion;
 use realtime::Realtime;
@@ -62,6 +63,7 @@ struct App {
     computeruse: Arc<computeruse::Bridge>,
     completion: Option<Completion>,
     settings: Arc<settings::Store>,
+    storage: Arc<storage::Store>,
     realtime: Option<Realtime>,
     azure_realtime: Option<AzureRealtime>,
     files: Arc<Mutex<()>>,
@@ -1304,6 +1306,17 @@ fn router(app: App) -> Router {
                 .layer(DefaultBodyLimit::max(settings::MAX_BODY)),
         )
         .route("/api/files", get(list))
+        .route(
+            "/api/settings/storage",
+            get(storage::get)
+                .put(storage::put)
+                .delete(storage::delete)
+                .layer(DefaultBodyLimit::max(storage::MAX_BODY)),
+        )
+        .route(
+            "/api/settings/storage/upload",
+            post(storage::upload).layer(DefaultBodyLimit::max(storage::MAX_BODY)),
+        )
         .route("/api/analytics", post(analytics::report))
         .route(
             "/api/memory/graphql",
@@ -1428,6 +1441,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Err(error) => return Err(error.into()),
     };
     let realtime = Realtime::from_env()?;
+    let storage = Arc::new(
+        storage::Store::open(settings.storage_file())
+            .map_err(|_| "Could not open private storage settings")?,
+    );
     let azure_realtime = AzureRealtime::from_env().unwrap_or_else(|error| {
         eprintln!("Azure Realtime voice disabled: {error}. Text chat configuration is unchanged.");
         None
@@ -1439,6 +1456,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         computeruse,
         completion,
         settings,
+        storage,
         realtime,
         azure_realtime,
         files: Arc::new(Mutex::new(())),

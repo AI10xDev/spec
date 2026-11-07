@@ -50,6 +50,7 @@ Rebuild and restart the local server, then reconnect using its new token URL. Al
 - **Voice and context tools:** independent OpenAI and Azure Realtime voice panels, current/last-answer context inspection, and a revision-checked Agent.md editor.
 - **Accessible responsive styling:** dark, rainbow-accented UI with visible keyboard focus, reduced-motion support, forced-colors fallbacks, and narrow-screen layouts.
 - **Local API protection:** loopback binding, a random access token, no permissive CORS, constrained filenames, and symlink rejection.
+- **Private spec backups:** Settings includes Azure Blob Storage account/key/container settings and an explicit **Upload all specs** action. See [Azure Blob Storage](#azure-blob-storage).
 
 The output pane displays available stdout/stderr and explanations. It does **not** request or expose hidden model chain-of-thought.
 
@@ -89,6 +90,16 @@ SPEC_WORKSPACE="$HOME/specs" ./run.sh --local
 The original shell function mirrors specs into `$HOME/specs`, so this can display those previously written files directly. **This edits the selected files in place.** Back them up first if needed. This version does not automatically read `~/.local/state/spec/saved-files` or traverse unrelated paths from that history. Nested folders, hidden files, symlinks, and non-UTF-8 files are not editable.
 
 Files are limited to 2 MiB and filenames to 180 UTF-8 bytes; the workspace is flat and has no rename/delete API. A stale save preserves your unsaved buffer rather than overwriting a newer disk revision. See [save conflicts and recovery](docs/FEATURES.md#5-save-conflicts-and-download).
+
+### Azure Blob Storage
+
+Open **Settings**, scroll to **Azure Blob Storage**, and enter the storage account name, an existing private container name, and either account access key (`key1` or `key2`). These are storage credentials, not Azure OpenAI credentials. Only Azure public-cloud endpoints (`https://<account>.blob.core.windows.net`) are supported; SAS tokens and connection strings are not accepted.
+
+Choose **Save storage settings**, then **Upload all specs**. Saving configuration alone does not upload anything. Confirming the upload sends a snapshot of saved, top-level UTF-8 workspace documents up to 2 MiB each, including extensionless specs. Unsaved editor buffers, `.out` logs, `Agent.md`, hidden files, directories, symlinks and unsupported files are excluded. Review the uploaded/skipped/failed counts; a failed or interrupted request can still have uploaded some files, so retrying overwrites matching blob names. Existing unrelated blobs and local files are never deleted. There is no automatic sync, remote-workspace traversal or download/restore action.
+
+The backend checks container ACLs before the batch and before each block-blob upload, rejecting public blob/container access. It does not create containers, alter ACLs or generate public links/SAS tokens. Keep Azure anonymous access disabled: an administrator can change container permissions after an upload. Use a dedicated account/container when practical, since account access keys grant broad storage access.
+
+Storage credentials are separate from AI settings and build handoffs. They persist in a sibling `<SPEC_SETTINGS_FILE filename>.storage.json` file (default `profile.json.storage.json`) under the same private settings directory, with `0700` directory and `0600` file permissions, outside served roots. APIs return only the account/container and whether a key is configured. An omitted key is retained only for the same account. **Remove storage settings** removes the saved configuration/key, not remote blobs. Storage changes and concurrent uploads are blocked while a batch runs; uploads continue if the browser disconnects. All storage APIs require the workspace bearer token: `GET/PUT/DELETE /api/settings/storage` and `POST /api/settings/storage/upload`. Upload requires a JSON body with the confirmed `accountName` and `containerName`; a destination mismatch returns `412` before any Azure request (reopen Settings and confirm again). Rotating the key at the same destination does not invalidate confirmation.
 
 ### Remote execution through `spec build` (local web server)
 

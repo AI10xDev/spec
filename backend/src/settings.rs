@@ -42,7 +42,7 @@ pub struct Input {
     api_key: Option<String>,
 }
 
-fn present_key<'de, D: serde::Deserializer<'de>>(
+pub(crate) fn present_key<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Option<String>, D::Error> {
     String::deserialize(deserializer).map(Some)
@@ -65,7 +65,7 @@ struct Active {
 }
 
 pub struct Store {
-    path: PathBuf,
+    file: PrivateFile,
     active: Mutex<Active>,
     environment: Option<Profile>,
     slots: Arc<Semaphore>,
@@ -98,30 +98,15 @@ impl Store {
         ui: &Path,
         completion: Option<&Completion>,
     ) -> Result<Self> {
-        if !path.is_absolute()
-            || path
-                .components()
-                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
-            || path.file_name().is_none()
-        {
-            return Err(storage_error());
-        }
-        let root = resolved(root).map_err(|_| storage_error())?;
-        let ui = resolved(ui).map_err(|_| storage_error())?;
-        if path.starts_with(&root) || path.starts_with(&ui) {
-            return Err(storage_error());
-        }
         let store = Self {
-            path,
+            file: PrivateFile::open(path, root, ui)?,
             active: Mutex::new(Active::default()),
             environment: completion.map(Completion::profile),
             slots: completion
                 .map(|c| c.slots.clone())
                 .unwrap_or_else(|| Arc::new(Semaphore::new(4))),
         };
-        if let Some(directory) = store.directory(false)?
-            && let Some(bytes) = store.bytes(&directory)?
-        {
+        if let Some(bytes) = store.file.load()? {
             let profile: Option<Profile> =
                 serde_json::from_slice(&bytes).map_err(|_| storage_error())?;
             if let Some(profile) = profile {
@@ -132,6 +117,14 @@ impl Store {
             }
         }
         Ok(store)
+    }
+
+    pub fn storage_file(&self) -> PrivateFile {
+        let mut name = self.file.path.file_name().unwrap().to_os_string();
+        name.push(".storage.json");
+        PrivateFile {
+            path: self.file.path.with_file_name(name),
+        }
     }
 
     pub fn profile(&self) -> Option<Profile> {
@@ -203,10 +196,40 @@ impl Store {
         };
         let bytes =
             serde_json::to_vec(&saved.as_ref().map(|(p, _)| p)).map_err(|_| storage_error())?;
-        self.persist(&bytes)?;
+        self.file.persist(&bytes)?;
         // Publication and credential retention share the same lock and commit point.
         active.saved = saved;
         Ok(self.view(&active))
+    }
+}
+
+pub struct PrivateFile {
+    path: PathBuf,
+}
+
+impl PrivateFile {
+    pub fn open(path: PathBuf, root: &Path, ui: &Path) -> Result<Self> {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+            || path.file_name().is_none()
+        {
+            return Err(storage_error());
+        }
+        let root = resolved(root).map_err(|_| storage_error())?;
+        let ui = resolved(ui).map_err(|_| storage_error())?;
+        if path.starts_with(&root) || path.starts_with(&ui) {
+            return Err(storage_error());
+        }
+        Ok(Self { path })
+    }
+
+    pub fn load(&self) -> Result<Option<Vec<u8>>> {
+        match self.directory(false)? {
+            Some(directory) => self.bytes(&directory),
+            None => Ok(None),
+        }
     }
 
     fn directory(&self, create: bool) -> Result<Option<File>> {
@@ -286,7 +309,7 @@ impl Store {
         Ok(Some(bytes))
     }
 
-    fn persist(&self, bytes: &[u8]) -> Result<()> {
+    pub fn persist(&self, bytes: &[u8]) -> Result<()> {
         if bytes.len() > MAX_BODY {
             return Err(storage_error());
         }

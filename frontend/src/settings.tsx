@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react"
+import { StorageSettings } from "./storage-settings"
 
 type Provider = "azure" | "openai" | "claude" | "openrouter" | "huggingface"
 type Profile = { provider: Provider; model: string; endpoint: string; apiVersion: string }
@@ -135,6 +136,7 @@ export function Settings({ api, onClose, onChanged }: { api: Api; onClose: () =>
         </fieldset>
         <p className="settings-footnote">Reset removes the saved profile: chat and completions return to the server environment, while spec build sessions return to execution host defaults, which may use Azure OpenAI. To keep builds off Azure, save a different provider instead of resetting. Saving does not test connectivity or download a model.</p>
       </form>}
+      <StorageSettings api={api} />
     </div>
   </main>
 }

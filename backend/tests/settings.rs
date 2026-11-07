@@ -185,6 +185,112 @@ async fn settings_api_persists_across_server_restarts_and_stays_outside_served_r
 }
 
 #[tokio::test]
+async fn storage_settings_use_private_sibling_and_survive_real_server_restart() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let key = STANDARD.encode([42u8; 64]);
+    for explicit in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("ui")).unwrap();
+        let selected = root.path().join(".server-private/profile.json");
+        let path = explicit.then_some(selected.as_path());
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let (child, url, token) = start(&mut server(root.path(), path)).await;
+        let response = client
+            .put(format!("{url}/api/settings/storage"))
+            .bearer_auth(&token)
+            .json(&json!({"accountName":"testaccount", "containerName":"specs", "accountKey":key}))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let expected =
+            json!({"accountName":"testaccount", "containerName":"specs", "hasAccountKey":true});
+        assert_eq!(response.json::<Value>().await.unwrap(), expected);
+        if explicit {
+            let storage = selected.with_file_name("profile.json.storage.json");
+            assert_eq!(
+                fs::metadata(&storage).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert!(
+                !selected.exists(),
+                "storage writes must not create an AI profile"
+            );
+            assert_eq!(
+                serde_json::from_slice::<Value>(&fs::read(&storage).unwrap()).unwrap()["accountKey"],
+                key
+            );
+        }
+        stop(child).await;
+        let (child, url, token) = start(&mut server(root.path(), path)).await;
+        assert_eq!(
+            client
+                .get(format!("{url}/api/settings/storage"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap(),
+            expected
+        );
+        let ai: Value = client
+            .get(format!("{url}/api/settings"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(ai["hasApiKey"], false);
+        for route in [
+            "/profile.json.storage.json",
+            "/.server-private/profile.json.storage.json",
+            "/api/files/profile.json.storage.json",
+        ] {
+            let response = client
+                .get(format!("{url}{route}"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap();
+            assert!(!response.status().is_success());
+            assert!(!response.text().await.unwrap().contains(&key));
+        }
+        let response = client
+            .delete(format!("{url}/api/settings/storage"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let empty = json!({"accountName":"", "containerName":"", "hasAccountKey":false});
+        assert_eq!(response.json::<Value>().await.unwrap(), empty);
+        stop(child).await;
+        let (child, url, token) = start(&mut server(root.path(), path)).await;
+        assert_eq!(
+            client
+                .get(format!("{url}/api/settings/storage"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap(),
+            empty
+        );
+        stop(child).await;
+    }
+}
+
+#[tokio::test]
 async fn saved_profile_survives_restart_with_invalid_environment_but_clearing_restores_failure() {
     for invalid in [
         "missing-file",

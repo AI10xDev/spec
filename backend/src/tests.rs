@@ -46,6 +46,20 @@ pub(super) fn app(root: &FsPath) -> App {
             .unwrap(),
         ),
         realtime: None,
+        storage: Arc::new(
+            storage::Store::open(
+                settings::PrivateFile::open(
+                    root.with_extension("settings")
+                        .join("profile.json.storage.json"),
+                    root,
+                    &root.join("ui"),
+                )
+                .ok()
+                .unwrap(),
+            )
+            .ok()
+            .unwrap(),
+        ),
         azure_realtime: None,
         files: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(Vec::new())),
