@@ -663,7 +663,7 @@ async fn queued_build_worker_retries_terminal_checkpoint_under_parent_gate() {
     let (state, parent) = fixture(root.path(), false);
     enqueue(&state, &parent).await;
     fs::write(&state.remote.as_ref().unwrap().binary, format!(
-        "#!/bin/bash\nif [[ ${{!#}} == *\" snapshot 'a.md'\" ]]; then\n  printf 'SPEC-RUN-1 0 0\\n'\nelse\n  printf 'build\\n' >> '{}/launches'\nfi\n",
+        "#!/bin/bash\nif [[ ${{!#}} == *\" snapshot 'a.md'\" ]]; then\n  printf 'SPEC-RUN-1 0 0\\n'\nelif [[ ${{!#}} == *'Non-launching continuation preflight'* ]]; then\n  exit 125\nelse\n  printf 'build\\n' >> '{}/launches'\nfi\n",
         root.path().display(),
     )).unwrap();
     let record = root.path().join(format!(".spec-output/{parent}.json"));

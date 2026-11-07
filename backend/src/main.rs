@@ -35,6 +35,7 @@ mod azure_realtime;
 mod chat;
 mod completion;
 mod computeruse;
+mod memory;
 mod project_search;
 mod queued_builds;
 mod realtime;
@@ -116,6 +117,8 @@ struct Job {
     repository_save: bool,
     #[serde(default)]
     optimization: bool,
+    #[serde(default)]
+    memory: Option<memory::Sweep>,
     #[serde(skip, default = "detached_control")]
     stop: watch::Sender<RunControl>,
     #[serde(skip)]
@@ -615,6 +618,7 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
     };
     let mut optimization_spec = String::new();
     let mut queued_id = None;
+    let mut continued_revision = None;
     let (name, content, session_id) = match input {
         RunInput::Queued(id) => {
             let Some((name, content, child_id)) = queued_builds::prepare(&app, &id)? else {
@@ -699,6 +703,21 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
                 .session_id(&id, &name)
                 .await
                 .map_err(|error| Error(StatusCode::BAD_GATEWAY, error))?;
+            {
+                let mut jobs = recovery::restore(&app, &id)?;
+                let parent = jobs.iter_mut().find(|job| job.id == id).unwrap();
+                let metadata = parent.memory.get_or_insert(memory::Sweep {
+                    started_at: None,
+                    finished_at: None,
+                    parent_id: None,
+                    session_id: None,
+                    spec_revision: None,
+                    report: None,
+                });
+                metadata.session_id = Some(session.clone());
+                continued_revision = metadata.spec_revision.clone();
+                recovery::persist(&app, parent)?;
+            }
             (name, message, Some(session))
         }
     };
@@ -790,6 +809,18 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             recover: true,
             repository_save,
             optimization,
+            memory: (!performance && !repository_save && !optimization).then(|| memory::Sweep {
+                started_at: Some(memory::now()),
+                finished_at: None,
+                parent_id: parent_id.clone().or_else(|| queued_parent.clone()),
+                session_id: session_id.clone(),
+                spec_revision: if session_id.is_some() {
+                    continued_revision
+                } else {
+                    Some(format!("{:x}", Sha256::digest(content.as_bytes())))
+                },
+                report: None,
+            }),
             attached: true,
             dirty: false,
             persistence_error: None,
@@ -800,6 +831,9 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             job.status = "failed to persist latest run; SSH was not started".into();
             job.recover = false;
             job.attached = false;
+            if let Some(memory) = &mut job.memory {
+                memory.finished_at = Some(memory::now());
+            }
             recovery::persist(&app, &job)?;
             return Err(error);
         }
@@ -852,6 +886,9 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             job.status = format!("failed to start SSH ({error})");
             job.recover = false;
             job.attached = false;
+            if let Some(memory) = &mut job.memory {
+                memory.finished_at = Some(memory::now());
+            }
             recovery::persist(&app, job)?;
             // No SSH process started, so the original session is safe to retry.
             if let Some(parent_id) = &parent_id {
@@ -1071,19 +1108,49 @@ async fn output_log(
             })));
         }
     };
+    let terminal = status != "running" && !status.starts_with("unknown");
+    let observed_at = memory::now();
+    let session_id = if terminal
+        && !app.performance
+        && !job.repository_save
+        && !job.optimization
+        && job
+            .memory
+            .as_ref()
+            .is_some_and(|memory| memory.session_id.is_none())
+    {
+        remote.session_id(&id, &name).await.ok()
+    } else {
+        None
+    };
     let (status, recoverable) = {
         // Completed entries can be evicted while SSH is in flight. Restore and
         // retain the cache guard through publication, as ordinary output reads do.
         let mut jobs = recovery::restore(&app, &id)?;
         let cached = jobs.iter_mut().find(|job| job.id == id).unwrap();
-        if cached.recover && status != "running" && !status.starts_with("unknown") {
+        if terminal {
             // Keep disk-view bytes separate, but persist confirmed completion so
             // admission does not depend on another successful SSH connection.
-            let previous_status = std::mem::replace(&mut cached.status, status.clone());
+            let previous_status = cached.status.clone();
+            let previous_recover = cached.recover;
+            let previous_memory = cached.memory.clone();
+            if cached.recover {
+                cached.status = status.clone();
+            }
+            if !app.performance {
+                memory::capture(cached, &bytes, truncated);
+                if let Some(memory) = &mut cached.memory {
+                    memory.finished_at.get_or_insert(observed_at);
+                    if session_id.is_some() {
+                        memory.session_id = session_id;
+                    }
+                }
+            }
             cached.recover = false;
             if let Err(error) = recovery::persist(&app, cached) {
                 cached.status = previous_status;
-                cached.recover = true;
+                cached.recover = previous_recover;
+                cached.memory = previous_memory;
                 return Err(error);
             }
             cached.dirty = false;
@@ -1238,6 +1305,10 @@ fn router(app: App) -> Router {
         )
         .route("/api/files", get(list))
         .route("/api/analytics", post(analytics::report))
+        .route(
+            "/api/memory/graphql",
+            post(memory::graphql).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route(
             "/api/realtime",
             post(realtime::call).layer(DefaultBodyLimit::max(realtime::MAX_BODY)),
@@ -1441,6 +1512,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod memory_tests;
 
 #[cfg(test)]
 mod remote_tests;

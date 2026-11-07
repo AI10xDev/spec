@@ -774,6 +774,7 @@ async fn computeruse_inflight_run_shutdown_and_disconnected_waiter_are_ordered()
                     recover: true,
                     repository_save: false,
                     optimization: false,
+                    memory: None,
                     stop,
                     attached: false,
                     dirty: false,

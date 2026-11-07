@@ -1,7 +1,7 @@
 use super::*;
 use std::{collections::HashMap, os::unix::fs::MetadataExt};
 
-const MAX_RECORD: usize = MAX_OUTPUT * 4 + 64 * 1024;
+const MAX_RECORD: usize = MAX_OUTPUT * 4 + 192 * 1024;
 
 #[derive(Default)]
 pub(super) struct RunGates(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
@@ -106,7 +106,11 @@ pub(super) fn persist(app: &App, job: &Job) -> Result<()> {
     if data.len() > MAX_RECORD {
         return Err(invalid("Run record exceeds size limit"));
     }
-    atomic(&directory, &format!("{}.json", job.id), &data)
+    atomic(&directory, &format!("{}.json", job.id), &data)?;
+    // SQLite is a rebuildable index. Its availability must never prevent run
+    // admission or cancellation after the authoritative JSON was committed.
+    memory::schedule(app, job);
+    Ok(())
 }
 
 fn latest_name(app: &App, name: &str, optimization: bool) -> String {
@@ -249,6 +253,10 @@ pub(super) fn checkpoint(app: &App, id: &str) {
     if let Some(job) = jobs.iter_mut().find(|job| job.id == id)
         && job.dirty
     {
+        if !app.performance {
+            let bytes: Vec<_> = job.output.iter().copied().collect();
+            memory::capture(job, &bytes, job.truncated);
+        }
         match persist(app, job) {
             Ok(()) => {
                 job.dirty = false;
@@ -323,6 +331,31 @@ pub(super) async fn refresh_locked(app: &App, id: &str, cancel: bool) -> Result<
     if cancel && let Err(error) = &snapshot {
         return Err(Error(StatusCode::BAD_GATEWAY, error.clone()));
     }
+    // Session metadata is optional: an absent capture must not obscure verified
+    // terminal status or prevent recovery of builds from older launchers.
+    let observed_at = memory::now();
+    let needs_session = app.jobs.lock().unwrap().iter().any(|job| {
+        job.id == id
+            && !app.performance
+            && !job.repository_save
+            && !job.optimization
+            && job
+                .memory
+                .as_ref()
+                .is_some_and(|memory| memory.session_id.is_none())
+    });
+    let session_id = if needs_session
+        && snapshot
+            .as_ref()
+            .is_ok_and(|(status, _, _)| status != "running" && !status.starts_with("unknown"))
+    {
+        match &app.remote {
+            Some(remote) => remote.session_id(id, &name).await.ok(),
+            None => None,
+        }
+    } else {
+        None
+    };
     let mut jobs = app.jobs.lock().unwrap();
     let Some(job) = jobs.iter_mut().find(|job| job.id == id) else {
         return Ok(());
@@ -338,10 +371,23 @@ pub(super) async fn refresh_locked(app: &App, id: &str, cancel: bool) -> Result<
     );
     match snapshot {
         Ok((status, bytes, truncated)) => {
+            if !app.performance {
+                memory::capture(job, &bytes, truncated);
+            }
             job.recover = status == "running" || status.starts_with("unknown");
             job.status = status;
             job.output = bytes.into();
             job.truncated = truncated;
+            if let Some(memory) = &mut job.memory {
+                if !job.recover && memory.finished_at.is_none() {
+                    memory.finished_at = Some(observed_at);
+                    job.dirty = true;
+                }
+                if session_id.is_some() {
+                    memory.session_id = session_id;
+                    job.dirty = true;
+                }
+            }
         }
         Err(error) => job.status = format!("unavailable ({error})"),
     }

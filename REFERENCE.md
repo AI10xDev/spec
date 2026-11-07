@@ -19,6 +19,7 @@ Rebuild and restart the local server, then reconnect using its new token URL. Al
 - [Configuration reference](#configuration) and [AI settings](#ai-settings): server variables and optional providers.
 - [Performance](PERFORMANCE.md), [Optimization](OPTIMIZE.md), and [Analytics](docs/ANALYTICS.md): specialized workflows and evidence limits.
 - [Security](docs/SECURITY.md): local access, credentials, and execution boundaries.
+- [Build memory](docs/BUILD_MEMORY.md): SQLite-backed GraphQL history, sweep keys, timestamps, and evidence limits.
 
 ## Workspace showcase
 
@@ -40,6 +41,7 @@ Rebuild and restart the local server, then reconnect using its new token URL. Al
 - **Rainbow build progress:** the selected build's latest complete CLI task list drives a live completion bar; missing counts show indeterminate activity, never a made-up percentage. See [progress reporting](#build-progress-reporting).
 - **Continue completed builds:** **Use recommended & continue** resumes the same captured engine session with a fixed recommended-choice prompt, without saving or uploading editor changes.
 - **History-aware planning:** initial builds, continuations, and prose optimization agents are instructed to read relevant previous `.out` spec outputs before planning. They reconcile completed features/refactors and validation evidence with the current code, avoid repeating confirmed work, and flag missing or uncertain evidence. This is an agent-driven review using file tools, not a completion flag inferred from a successful run; snapshots and completion markers remain unchanged.
+- **Structured build memory:** each admitted build or continuation has a separate sweep record with job/session/parent keys, spec revision, observation times, and agent-reported changes, reasons, checks, and unresolved work. Read previous jobs through the authenticated [memory GraphQL API](docs/BUILD_MEMORY.md); agent claims remain separate from verified operational status.
 - **Analytics:** select a saved spec's `.out` report for read-only metric charts and optional validated `.eval` checks, with missing-report and incomplete-evidence warnings. See the [format and limitations](docs/ANALYTICS.md); local snapshots have no verified terminal status.
 - **Performance:** runs the existing built Gemma RL workflow through a fresh builder session for a remote project folder. Optional unsaved editor instructions accept any filename extension. Admission, recoverable output, and cancellation are independent of spec runs. See [performance](#performance) below.
 - **Save repo changes:** shown only when the configured remote directory belongs to a Git worktree with uncommitted changes. Uses the saved AI profile (or `azure/gpt-6-sol` fallback), the existing repository workflow, and the saved spec as context.

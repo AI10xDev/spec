@@ -178,6 +178,24 @@ are missing, unreadable, truncated, or still running, state the limitation and
 inspect the repository instead of assuming completion. Refresh this review before
 each subsequent plan rather than relying only on session memory.
 
+Build sweep memory report:
+
+Each initial build and each continuation is a separate operational sweep, even
+when they share an engine session. At the end of this sweep, emit the following
+three standalone lines in your final response, outside Markdown code fences:
+SPEC_BUILD_MEMORY_V1
+{"whatChanged":[],"why":[],"whatWasChecked":[],"unresolved":[]}
+END_SPEC_BUILD_MEMORY_V1
+Replace the arrays with concise factual strings for this sweep only. Explain the
+reason for each change, list actual checks and results (including failures and
+checks not run), and list remaining blockers, uncertainty, or follow-up work.
+Cite file paths, tests, or log evidence in the strings. Use an empty array only
+when nothing applies; do not infer that a successful process exit proves a task
+complete. Do not include secrets. Keep the JSON on one line, at most 32 KiB total,
+64 entries per array and 2048 UTF-8 bytes per entry. This is an unverified agent
+report, separate from the harness status. Missing reports remain explicitly
+unknown; never manufacture a successful report for a stopped or failed sweep.
+
 Execution workspace (JSON path): ${JSON.stringify(process.argv[5])}
 Current run directory to exclude (JSON path): ${JSON.stringify(require("node:path").dirname(process.argv[4]))}
 `);

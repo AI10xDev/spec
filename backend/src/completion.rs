@@ -1381,6 +1381,7 @@ mod tests {
                 recover: true,
                 repository_save: false,
                 optimization: false,
+                memory: None,
                 stop,
                 attached: true,
                 dirty: true,

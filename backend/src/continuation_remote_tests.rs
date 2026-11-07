@@ -7,6 +7,23 @@ const PROMPT: &str = "Use the recommended option from your last response and con
 const MISSING: &str =
     "This build has no saved session ID. Start a new build to enable continuation.";
 
+fn assert_memory_directive(text: &str) {
+    let lines: Vec<_> = text.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| *line == "SPEC_BUILD_MEMORY_V1")
+        .expect("missing standalone memory directive");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(lines[start + 1]).unwrap(),
+        serde_json::json!({"whatChanged":[],"why":[],"whatWasChecked":[],"unresolved":[]})
+    );
+    assert_eq!(lines[start + 2], "END_SPEC_BUILD_MEMORY_V1");
+    assert!(text.contains("final response, outside Markdown code fences"));
+    assert!(text.contains("Keep the JSON on one line"));
+    assert!(text.contains("unverified agent"));
+    assert!(text.contains("never manufacture a successful report for a stopped or failed sweep"));
+}
+
 fn private_file(path: impl AsRef<Path>, content: impl AsRef<[u8]>) {
     fs::write(&path, content).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -76,7 +93,7 @@ hook.event({event:{type:"session.created",properties:{info:{id:"ses_Second"}}}})
 assert.equal(fs.readFileSync(session, "utf8"), "ses_First123\n");
 assert.equal(fs.statSync(session).mode & 0o777, 0o600);
 assert.equal(process.env.OPENCODE_CONFIG, "/preserved/config.json");
-process.stdout.write(JSON.stringify({config, plugin}));
+process.stdout.write(JSON.stringify({config, plugin, text:fs.readFileSync(config.instructions.at(-1), "utf8")}));
 ' || return
     return 7
 }
@@ -122,6 +139,7 @@ process.stdout.write(JSON.stringify({config, plugin}));
             instructions.push(instruction.clone());
             expected["instructions"] = instructions.into();
             assert_eq!(observed["config"], expected);
+            assert_memory_directive(observed["text"].as_str().unwrap());
             assert!(!Path::new(observed["plugin"].as_str().unwrap()).exists());
             assert!(!Path::new(instruction.as_str().unwrap()).exists());
             assert_eq!(fs::read_to_string(snapshot).unwrap(), "unchanged snapshot");
@@ -354,6 +372,7 @@ process.stdout.write(JSON.stringify({config, instruction, text:fs.readFileSync(i
         );
         assert_eq!(observed["mode"], 0o600);
         let text = observed["text"].as_str().unwrap();
+        assert_memory_directive(text);
         for rule in [
             "completed, not pending",
             "Preserve completed text as context",
@@ -395,7 +414,15 @@ fn repository_save_does_not_install_capture_plugin() {
     private_file(&snapshot, "context");
     fs::write(
         root.path().join(".bash_aliases"),
-        "spec() { printf '%s' \"$OPENCODE_CONFIG_CONTENT\"; }\n",
+        r#"spec() {
+    runtime=$(type -P bun || type -P node)
+    "$runtime" -e '
+const fs = require("node:fs");
+const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
+process.stdout.write(JSON.stringify({config, text:fs.readFileSync(config.instructions.at(-1), "utf8")}));
+'
+}
+"#,
     )
     .unwrap();
     let output = std::process::Command::new("bash")
@@ -411,9 +438,14 @@ fn repository_save_does_not_install_capture_plugin() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
-    let config: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let observed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let config = &observed["config"];
     assert_eq!(config["plugin"], serde_json::json!(["existing-plugin"]));
     assert_eq!(config["model"], "azure/gpt-6-sol");
+    let text = observed["text"].as_str().unwrap();
+    assert!(text.contains("Repository-save invocation, not a spec implementation run"));
+    assert!(!text.contains("SPEC_BUILD_MEMORY_V1"));
+    assert_eq!(fs::read_to_string(snapshot).unwrap(), "context");
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 3);
 }
 

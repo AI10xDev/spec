@@ -256,6 +256,12 @@ async fn retained_vanished_selection_never_substitutes_or_updates_missing_latest
     assert_eq!(
         fs::read_dir(root.path().join(".spec-output"))
             .unwrap()
+            .filter(|entry| !entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("memory.sqlite3"))
             .count(),
         2
     );
