@@ -4,9 +4,9 @@ A local-first **Rust backend + Vite / React / TypeScript frontend** for writing 
 
 This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates over SSH to the remote `spec build` alias/function. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
 
-## Latest release: v0.1.14
+## Latest release: v0.1.15
 
-[Spec v0.1.14](https://github.com/AI10xDev/spec/releases/tag/v0.1.14) adds agent memory for backend-managed build sweeps: durable changes, reasons, checks, and unresolved work, with SQLite-backed GraphQL history keyed by job, session, spec, and time. Agent reports remain unverified claims, separate from operational status. See the [release notes](docs/releases/v0.1.14.md) for scope, validation, and upgrade instructions.
+[Spec v0.1.15](https://github.com/AI10xDev/spec/releases/tag/v0.1.15) adds keyword-ranked chronological build-memory retrieval, manual private Azure Blob backups of saved specs, and clearer provider settings. Uploads are bound to the confirmed destination; memory reports remain unverified claims. The release includes practical installation and workflow guides. See the [release notes](docs/releases/v0.1.15.md) for scope, validation, and upgrade instructions.
 
 Rebuild and restart the local server, then reconnect using its new token URL. Already-running remote supervisors are not upgraded. This is a Git-tagged source release, with no prebuilt binaries; package manifests remain at `0.1.0`, as in prior releases.
 
