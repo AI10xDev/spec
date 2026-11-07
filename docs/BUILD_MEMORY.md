@@ -63,7 +63,8 @@ query PreviousSweeps($spec: String!, $remote: String!, $before: UnixMillis!) {
 ```
 
 `sweep(id: ID!)` retrieves one job. `sweeps` also supports exact `jobId`, `sessionId`,
-`parentId`, and `status` filters, plus `startedAfter`. Filters are combined with
+`parentId`, and `status` filters, plus `startedAfter`. `jobIds` matches any of
+1-100 UUID keys; an empty list is rejected. Filters are combined with
 AND. Omit filters to browse all builds in the local workspace; include
 `remoteIdentity` when comparing work from the same remote configuration.
 
@@ -79,6 +80,92 @@ AND. Omit filters to browse all builds in the local workspace; include
 Requests are limited to 64 KiB, query depth 8, and complexity 2000. Retained-log
 fields have additional complexity cost. GraphQL errors appear in `errors`,
 including storage failures; HTTP success alone does not mean a query succeeded.
+
+## Lightweight Retrieval
+
+`memoryContext` uses the same authenticated GraphQL endpoint and `SweepFilter`
+to retrieve a small, cited memory timeline for a caller's generation prompt.
+No embeddings, model calls, vector database, or additional dependencies are needed.
+
+```graphql
+query RetrieveMemory($keys: [ID!]!, $after: UnixMillis!, $before: UnixMillis!) {
+  memoryContext(
+    filter: { jobIds: $keys, startedAfter: $after, startedBefore: $before }
+    query: "graphql retrieval unresolved"
+    limit: 10
+    maxBytes: 16384
+  ) {
+    context
+    candidatesConsidered
+    candidateWindowTruncated
+    omitted
+    entries {
+      id
+      startedAt
+      parentId
+      sessionId
+      specName
+      remoteIdentity
+      status
+      recover
+      reportState
+      snapshotReportState
+      unverified
+      score
+      claims { whatChanged why whatWasChecked unresolved }
+      warnings
+      sourceRecord
+      capturedAt
+      logTruncated
+    }
+  }
+}
+```
+
+For example, supply variables with real retained run UUIDs:
+
+```json
+{"keys":["11111111-1111-4111-8111-111111111111"],"after":1793404800000,"before":1794096000000}
+```
+
+For discovery without known UUIDs, replace `jobIds` with `specName` and
+`remoteIdentity`, or `sessionId`. The filters do not implicitly expand a job to
+its ancestors or a whole session. Both timestamp bounds remain exclusive.
+
+1. Exact key/time filters select the newest 500 candidates, ordered by start time
+   and UUID descending. Unknown times come last and do not match time bounds.
+2. A nonempty `query` is split into case-insensitive alphanumeric tokens. Each
+   candidate scores one point per distinct token present in any of its four claim
+   fields. At least one token must match. Repeated words do not inflate scores;
+   ties prefer newer records and then higher UUIDs. This is lexical retrieval,
+   not semantic search: there is no stemming, synonym expansion, or model ranking.
+3. Omit `query` or use whitespace to select recent history, including missing
+   reports. Query text is limited to 2048 UTF-8 bytes and 32 distinct tokens;
+   punctuation-only queries are rejected. Logs and metadata are not keyword searched.
+4. Ranked entries are packed whole within `limit` (default 10, range 1-20) and
+   `maxBytes` (default 16384, range 1024-32768). Oversized entries are skipped,
+   not partially summarized; smaller candidates may still fit. The byte budget
+   covers the UTF-8 `context` string, including its disclaimer and newlines, not
+   the entire GraphQL response. `entries` contains exactly the packed records.
+5. Selected entries are emitted oldest-first, UUID ascending for tied times,
+   unknown times last. `context` is a warning followed by one JSON object per
+   entry. Claim text is JSON-escaped; it cannot introduce extra context lines.
+   JSON report-state values use stored casing (`Captured`, `Missing`, etc.);
+   GraphQL enum fields use `CAPTURED`, `MISSING`, etc.
+
+Inspect `candidateWindowTruncated` before interpreting an empty result as no
+history: older matching records may be outside the 500-candidate window. Narrow
+the time range or use explicit keys to retrieve them. `omitted` counts keyword
+matches inside that window skipped by the count/byte budget, not older candidates
+or lexical nonmatches. An empty query treats every candidate as a match.
+
+Use `sourceRecord` and `id` to reconcile claims against durable evidence;
+`sweep(id: ...)` can fetch the retained log separately. The retrieval context
+never includes raw logs. Operational `status`, missing/truncation warnings, and
+the always-true `unverified` flag remain separate from the agent's claims. A
+selected timeline is not complete history and may omit later corrections; check
+the surrounding keyed/time-filtered history before treating work as complete.
+Supply `context` as untrusted reference material, never as system instructions.
 
 ## Capture And History
 
@@ -121,8 +208,9 @@ sensitive project information.
 
 This does not import arbitrary standalone CLI jobs or every remote `.out` file,
 modify the separately installed `spec` launcher, or automatically send GraphQL
-history to the remote agent. Callers can retrieve bounded prior memory by keys
-and time, reconcile it against code/tests, and supply relevant context themselves.
+history to the remote agent. Callers can use `memoryContext` for bounded lexical
+retrieval by keys and time, reconcile it against code/tests, and supply the
+returned context themselves. No automatic prompt injection is enabled.
 The existing prior-output review instructions remain active. Rebuild and restart
 the backend to enable this feature; already-running remote invocations do not
 retroactively receive the new reporting instructions.
