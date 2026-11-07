@@ -124,6 +124,18 @@ impl Store {
         name.push(".storage.json");
         PrivateFile {
             path: self.file.path.with_file_name(name),
+            #[cfg(test)]
+            fail_after_rename: std::sync::atomic::AtomicIsize::new(-1),
+        }
+    }
+
+    pub fn marketplace_file(&self, namespace: &str) -> PrivateFile {
+        let mut name = self.file.path.file_name().unwrap().to_os_string();
+        name.push(format!(".marketplace-{namespace}.json"));
+        PrivateFile {
+            path: self.file.path.with_file_name(name),
+            #[cfg(test)]
+            fail_after_rename: std::sync::atomic::AtomicIsize::new(-1),
         }
     }
 
@@ -205,6 +217,9 @@ impl Store {
 
 pub struct PrivateFile {
     path: PathBuf,
+    // -1 disables injection; 0 fails every post-rename sync; N allows N writes first.
+    #[cfg(test)]
+    pub(crate) fail_after_rename: std::sync::atomic::AtomicIsize,
 }
 
 impl PrivateFile {
@@ -222,12 +237,20 @@ impl PrivateFile {
         if path.starts_with(&root) || path.starts_with(&ui) {
             return Err(storage_error());
         }
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            #[cfg(test)]
+            fail_after_rename: std::sync::atomic::AtomicIsize::new(-1),
+        })
     }
 
     pub fn load(&self) -> Result<Option<Vec<u8>>> {
+        self.load_bounded(MAX_BODY)
+    }
+
+    pub fn load_bounded(&self, limit: usize) -> Result<Option<Vec<u8>>> {
         match self.directory(false)? {
-            Some(directory) => self.bytes(&directory),
+            Some(directory) => self.bytes(&directory, limit),
             None => Ok(None),
         }
     }
@@ -283,7 +306,7 @@ impl PrivateFile {
         Ok(Some(directory))
     }
 
-    fn bytes(&self, directory: &File) -> Result<Option<Vec<u8>>> {
+    fn bytes(&self, directory: &File, limit: usize) -> Result<Option<Vec<u8>>> {
         let path = anchored(directory).join(self.path.file_name().unwrap());
         let file = match OpenOptions::new()
             .read(true)
@@ -296,25 +319,29 @@ impl PrivateFile {
         };
         let metadata = file.metadata().map_err(|_| storage_error())?;
         private(&metadata, false)?;
-        if metadata.len() > MAX_BODY as u64 {
+        if metadata.len() > limit as u64 {
             return Err(storage_error());
         }
         let mut bytes = Vec::new();
-        file.take((MAX_BODY + 1) as u64)
+        file.take((limit + 1) as u64)
             .read_to_end(&mut bytes)
             .map_err(|_| storage_error())?;
-        if bytes.len() > MAX_BODY {
+        if bytes.len() > limit {
             return Err(storage_error());
         }
         Ok(Some(bytes))
     }
 
     pub fn persist(&self, bytes: &[u8]) -> Result<()> {
-        if bytes.len() > MAX_BODY {
+        self.persist_bounded(bytes, MAX_BODY, false)
+    }
+
+    pub fn persist_bounded(&self, bytes: &[u8], limit: usize, durable: bool) -> Result<()> {
+        if bytes.len() > limit {
             return Err(storage_error());
         }
         let directory = self.directory(true)?.ok_or_else(storage_error)?;
-        self.bytes(&directory)?;
+        self.bytes(&directory, limit)?;
         let mut temp =
             tempfile::NamedTempFile::new_in(anchored(&directory)).map_err(|_| storage_error())?;
         temp.as_file()
@@ -325,9 +352,26 @@ impl PrivateFile {
         directory.sync_all().map_err(|_| storage_error())?;
         temp.persist(anchored(&directory).join(self.path.file_name().unwrap()))
             .map_err(|_| storage_error())?;
-        // Rename commits the transaction. A later fsync error cannot be reported as
-        // a rejected update: the new file is already visible and must match memory.
-        let _ = directory.sync_all();
+        // Settings callers mirror the committed rename in memory. Receipt callers
+        // require the final sync and reload disk on retry if it fails after rename.
+        if durable {
+            #[cfg(test)]
+            if self
+                .fail_after_rename
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| (n > 0).then_some(n - 1),
+                )
+                .unwrap_or_else(|n| n)
+                == 0
+            {
+                return Err(storage_error());
+            }
+            directory.sync_all().map_err(|_| storage_error())?;
+        } else {
+            let _ = directory.sync_all();
+        }
         Ok(())
     }
 }

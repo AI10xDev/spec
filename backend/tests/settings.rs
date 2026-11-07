@@ -364,6 +364,27 @@ async fn saved_profile_survives_restart_with_invalid_environment_but_clearing_re
             .unwrap();
         assert_eq!(config["chat"], true, "{invalid}");
         assert_eq!(config["completion"], true, "{invalid}");
+        let marketplace = client
+            .get(format!("{url}/api/marketplace"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        if matches!(invalid, "missing-file" | "malformed-file") {
+            assert_eq!(
+                marketplace.status(),
+                reqwest::StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert!(
+                !marketplace
+                    .text()
+                    .await
+                    .unwrap()
+                    .contains("settings-test-secret")
+            );
+        } else {
+            assert_eq!(marketplace.json::<Value>().await.unwrap()["mode"], "demo");
+        }
         let cleared: Value = client
             .delete(format!("{url}/api/settings"))
             .bearer_auth(&token)

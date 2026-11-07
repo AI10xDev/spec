@@ -29,22 +29,22 @@ mod recovery_tests;
 mod queued_build_tests;
 
 pub(super) fn app(root: &FsPath) -> App {
+    let settings = settings::Store::open(
+        root.with_extension("settings").join("profile.json"),
+        root,
+        &root.join("ui"),
+        None,
+    )
+    .ok()
+    .unwrap();
     App {
+        marketplace: Arc::new(marketplace::Store::demo(&settings)),
         root: root.to_owned(),
         token: "test-token".into(),
         remote: None,
         computeruse: Arc::default(),
         completion: None,
-        settings: Arc::new(
-            settings::Store::open(
-                root.with_extension("settings").join("profile.json"),
-                root,
-                &root.join("ui"),
-                None,
-            )
-            .ok()
-            .unwrap(),
-        ),
+        settings: Arc::new(settings),
         realtime: None,
         storage: Arc::new(
             storage::Store::open(

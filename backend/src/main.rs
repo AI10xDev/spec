@@ -36,6 +36,7 @@ mod chat;
 mod completion;
 mod computeruse;
 mod feature_review;
+mod marketplace;
 mod memory;
 mod project_search;
 mod queued_builds;
@@ -65,6 +66,7 @@ struct App {
     completion: Option<Completion>,
     settings: Arc<settings::Store>,
     storage: Arc<storage::Store>,
+    marketplace: Arc<marketplace::Store>,
     realtime: Option<Realtime>,
     azure_realtime: Option<AzureRealtime>,
     files: Arc<Mutex<()>>,
@@ -1276,6 +1278,23 @@ fn router(app: App) -> Router {
         .route("/api/performance/runs/{id}/cancel", post(cancel))
         .with_state(app.performance_app());
     Router::new()
+        .route("/api/marketplace", get(marketplace::catalog))
+        .route(
+            "/api/marketplace/orders",
+            post(marketplace::order).layer(DefaultBodyLimit::max(1024)),
+        )
+        .route(
+            "/api/marketplace/orders/{id}/capture",
+            post(marketplace::capture).layer(DefaultBodyLimit::max(1024)),
+        )
+        .route(
+            "/api/marketplace/orders/{id}/replace",
+            post(marketplace::replace).layer(DefaultBodyLimit::max(1024)),
+        )
+        .route(
+            "/api/marketplace/skills/{id}/content",
+            get(marketplace::content),
+        )
         .route("/api/computeruse", get(computeruse::status))
         .route("/api/computeruse/file", get(computeruse::file))
         .route("/api/computeruse/push", post(computeruse::push))
@@ -1457,6 +1476,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         None
     });
     let app = App {
+        marketplace: Arc::new(marketplace::Store::from_env(&settings)?),
         root,
         token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
         remote,

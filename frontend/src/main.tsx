@@ -7,6 +7,7 @@ import { Chat } from "./chat"
 import { LogOutput } from "./highlighting"
 import { Analytics } from "./analytics"
 import { FeatureReview } from "./feature-review"
+import { Marketplace } from "./marketplace"
 import { BuildProgress } from "./progress"
 import { Settings } from "./settings"
 import { ProjectPicker } from "./project-picker"
@@ -91,6 +92,7 @@ function App() {
   const performanceButton = useRef<HTMLButtonElement>(null)
   const [analytics, setAnalytics] = useState(false)
   const [featureReview, setFeatureReview] = useState(false)
+  const [marketplace, setMarketplace] = useState(false)
   const [settings, setSettings] = useState(false)
   const configRequest = useRef(0)
   const [outputView, setOutputView] = useState<"file" | "optimization">("file")
@@ -684,7 +686,7 @@ function App() {
 
   useEffect(() => {
     function shortcut(event: KeyboardEvent) {
-      if (settings || analytics || featureReview || !connected || chatName || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key !== "Enter") return
+      if (settings || analytics || featureReview || marketplace || !connected || chatName || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key !== "Enter") return
       const target = event.target as HTMLElement | null
       if (target?.closest("[inert]")) return
       if (target?.closest("input, textarea, [contenteditable=true]") && !target.matches(".editor-input textarea")) return
@@ -832,7 +834,7 @@ function App() {
   if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} realtime={realtime} azureRealtime={azureRealtime} />
 
   return <div className="app">
-    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Performance: {optimization.status}</span>}<div className="analysis-actions">{execution && <button ref={activeRunsButton} aria-expanded={activeRuns} aria-controls="active-runs" onClick={() => setActiveRuns(!activeRuns)}>Active runs</button>}<button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button ref={performanceButton} className="primary" title="performance" aria-expanded={performance && !settings} aria-controls="performance-form" disabled={settings} onClick={() => { if (!performance) setUseEditorSpec(false); setPerformance(!performance) }}>Performance</button></div></div></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Performance: {optimization.status}</span>}<div className="analysis-actions">{execution && <button ref={activeRunsButton} aria-expanded={activeRuns} aria-controls="active-runs" onClick={() => setActiveRuns(!activeRuns)}>Active runs</button>}<button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button aria-haspopup="dialog" disabled={settings} onClick={() => setMarketplace(true)}>Skills</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button ref={performanceButton} className="primary" title="performance" aria-expanded={performance && !settings} aria-controls="performance-form" disabled={settings} onClick={() => { if (!performance) setUseEditorSpec(false); setPerformance(!performance) }}>Performance</button></div></div></header>
     <ActiveRuns key={token} open={activeRuns && execution} api={api} knownOutputs={Object.values(outputs)} onClose={() => { setActiveRuns(false); activeRunsButton.current?.focus() }} onOutput={(next) => {
       // A delayed recoverable response cannot undo confirmed completion of the same run.
       const updated = (previous: Output) => !previous.recoverable && next.recoverable ? previous : next.status.startsWith("unavailable")
@@ -863,6 +865,7 @@ function App() {
     </form>}
     {analytics && <Analytics api={api} active={active} onClose={() => setAnalytics(false)} />}
     {featureReview && <FeatureReview api={api} onClose={() => setFeatureReview(false)} />}
+    {marketplace && <Marketplace api={api} onClose={() => setMarketplace(false)} />}
     {settings && <Settings api={api} onClose={() => setSettings(false)} onChanged={refreshConfig} />}
     <div className="workspace" hidden={settings} inert={settings}>
       <aside>
