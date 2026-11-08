@@ -3,6 +3,7 @@ import type { Document, Output, Tab } from "./tabs"
 import { dirty } from "./tabs"
 import { AgentEditor } from "./agent-editor"
 import { Realtime } from "./realtime"
+import { publicPath } from "./deployment"
 
 type Api = <T>(path: string, body?: unknown, method?: string) => Promise<T>
 type Context = { spec: string; unsaved: boolean; source: string; output: Output | null; updated: string }
@@ -121,7 +122,7 @@ export function Chat({ name, api, available, execution, realtime, azureRealtime 
   }
 
   return <div className="app chat-app">
-    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ session chat</span></div><a href="/" target="_blank" rel="opener">Open workspace</a></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ session chat</span></div><a href={publicPath()} target="_blank" rel="opener">Open workspace</a></header>
     <main className="chat-space">
       <div className="pane-heading"><div><span className="eyebrow">A SEPARATE SPACE / SESSION CHAT</span><h1>{name}</h1></div><span className="badge">{context?.output?.status ?? "Spec only"}</span></div>
       <section className="chat-context" aria-label="Chat context">

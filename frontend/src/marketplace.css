@@ -1,3 +1,9 @@
+.topbar.skills-topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 16px; height: auto; min-height: 96px; padding-block: 16px; }
+.skills-launcher { justify-self: center; width: 240px; max-width: 100%; min-height: 56px; padding: 14px 28px; font-size: 20px; }
+@media (max-width: 1100px) {
+  .topbar.skills-topbar { grid-template-columns: auto minmax(0, 1fr); }
+  .skills-launcher { grid-column: 1 / -1; grid-row: 1; }
+}
 .skills-dialog { color: var(--text); background: var(--surface-deep); border: 1px solid var(--selected-border); border-radius: 12px; padding: 0; width: min(920px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); overflow: auto; overflow-wrap: anywhere; }
 .skills-dialog::backdrop { background: #000b; }
 .skills-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 24px 28px; border-bottom: 1px solid var(--border); }
@@ -39,8 +45,8 @@
 .skills-price { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
 .skills-price strong { font-size: 24px; font-weight: 500; }
 .skills-price span { font-size: 12px; color: var(--muted); }
-.skills-paypal { display: inline-block; background: #ffc439; border: 1px solid #ffc439; border-radius: 6px; color: #003087; padding: 10px 16px; font-weight: 700; text-decoration: none; text-align: center; }
-.skills-paypal:hover:not(:disabled) { background: #f5b92b; color: #003087; border-color: #f5b92b; }
+.skills-paypal { display: inline-block; background: linear-gradient(110deg, #ff9191, #ffc078, #ffed8a, #99e6a3, #8cceff, #c5a3ff); border: 1px solid #ddd; border-radius: 6px; color: #171523; padding: 10px 16px; font-weight: 700; text-decoration: none; text-align: center; }
+.skills-paypal:hover:not(:disabled) { background: linear-gradient(110deg, #ffa9a9, #ffd299, #fff2a8, #b1efba, #afdfff, #d6bfff); color: #171523; border-color: #fff; }
 .skills-paypal:focus-visible, .skills-preview pre:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .skills-new-tab { font-size: 11px; font-weight: 400; }
 .skills-purchase-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }

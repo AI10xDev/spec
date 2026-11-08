@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 const MAX_CONTENT: usize = 32 * 1024;
 const MAX_LEDGER: usize = 8 * 1024 * 1024;
-const KEYS: [&str; 8] = [
+const KEYS: [&str; 9] = [
     "SPEC_SKILLS_GITHUB_TOKEN",
     "SPEC_SKILLS_GITHUB_REPO",
     "SPEC_SKILLS_GITHUB_REF",
@@ -28,6 +28,7 @@ const KEYS: [&str; 8] = [
     "SPEC_PAYPAL_MERCHANT_ID",
     "SPEC_PAYPAL_RETURN_URL",
     "SPEC_PAYPAL_MODE",
+    "SPEC_SKILLS_PUBLIC_EXAMPLES",
 ];
 
 // Intentionally no Debug implementations for credentials, provider responses, or receipts.
@@ -47,13 +48,33 @@ impl Config {
         if !KEYS.iter().any(|key| values.contains_key(*key)) {
             return Ok(None);
         }
+        let public_examples = match values.get(KEYS[8]).map(String::as_str) {
+            None => false,
+            Some("1") => true,
+            Some(_) => return Err("SPEC_SKILLS_PUBLIC_EXAMPLES must be unset or exactly 1"),
+        };
+        if public_examples
+            && (values.get(KEYS[7]).map(String::as_str) != Some("sandbox")
+                || !values.get(KEYS[1]).is_some_and(|repo| {
+                    repo.eq_ignore_ascii_case("AI10x/skills-marketplace-examples")
+                })
+                || values.get(KEYS[0]).is_some_and(|token| !token.is_empty()))
+        {
+            return Err(
+                "Public examples require SPEC_PAYPAL_MODE=sandbox, repository AI10x/skills-marketplace-examples, and an unset or empty SPEC_SKILLS_GITHUB_TOKEN",
+            );
+        }
         let required =
             |key: &str| {
                 values.get(key).filter(|s| !s.trim().is_empty()).cloned()
             .ok_or("Incomplete marketplace configuration; configure GitHub and PayPal together")
             };
         let config = Self {
-            token: required(KEYS[0])?,
+            token: if public_examples {
+                String::new()
+            } else {
+                required(KEYS[0])?
+            },
             repository: required(KEYS[1])?,
             reference: values
                 .get(KEYS[2])
@@ -158,6 +179,13 @@ pub struct CatalogView {
     warning: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayPalSdkConfig {
+    client_id: String,
+    environment: &'static str,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Receipt {
     skill: Skill,
@@ -258,6 +286,19 @@ fn now() -> u64 {
 }
 
 impl Store {
+    pub fn paypal_sdk_environment(&self) -> Option<&'static str> {
+        if self.unavailable.is_some() {
+            return None;
+        }
+        self.config.as_ref().map(|config| {
+            if config.mode == "live" {
+                "production"
+            } else {
+                "sandbox"
+            }
+        })
+    }
+
     pub fn from_env(settings: &settings::Store) -> std::result::Result<Self, &'static str> {
         let mut values = match crate::ai_settings::from_env() {
             Ok(values) => values,
@@ -430,17 +471,17 @@ impl Store {
             .extend(["repos"])
             .extend(c.repository.split('/'))
             .extend(segments);
-        self.response(
-            self.client
-                .get(url)
-                .query(query)
-                .bearer_auth(&c.token)
-                .header("User-Agent", "Spec-Skills-Marketplace")
-                .header("Accept", "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28"),
-            2 * 1024 * 1024,
-        )
-        .await
+        let mut request = self
+            .client
+            .get(url)
+            .query(query)
+            .header("User-Agent", "Spec-Skills-Marketplace")
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        if !c.token.is_empty() {
+            request = request.bearer_auth(&c.token);
+        }
+        self.response(request, 2 * 1024 * 1024).await
     }
 
     async fn blob(&self, sha: &str, limit: usize) -> Result<String> {
@@ -713,6 +754,23 @@ impl Store {
             purchased: receipt.purchased,
         })
     }
+}
+
+pub async fn paypal_sdk(State(app): State<App>) -> Result<Json<PayPalSdkConfig>> {
+    let store = &app.marketplace;
+    let _guard = store.gate.lock().await;
+    store.confirmed_ledger()?;
+    let environment = store.paypal_sdk_environment().ok_or_else(|| {
+        Error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PayPal SDK unavailable; configure the marketplace before using real payments".into(),
+        )
+    })?;
+    // Only the public client ID is browser-safe, never the REST access token or secret.
+    Ok(Json(PayPalSdkConfig {
+        client_id: store.config.as_ref().unwrap().client_id.clone(),
+        environment,
+    }))
 }
 
 pub async fn catalog(State(app): State<App>) -> Result<Json<CatalogView>> {

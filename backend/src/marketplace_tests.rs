@@ -36,6 +36,14 @@ fn values() -> HashMap<String, String> {
         .collect()
 }
 
+fn public_values() -> HashMap<String, String> {
+    let mut config = values();
+    config.remove(KEYS[0]);
+    config.insert(KEYS[1].into(), "AI10x/skills-marketplace-examples".into());
+    config.insert(KEYS[8].into(), "1".into());
+    config
+}
+
 struct Mock {
     status: String,
     capture_status: String,
@@ -118,21 +126,29 @@ fn provider_response(
             .into_response();
     }
     if path.starts_with("/repos/") {
-        assert_eq!(headers["authorization"], "Bearer github-private-token");
+        let endpoint = if let Some(endpoint) =
+            path.strip_prefix("/repos/AI10x/skills-marketplace-examples/")
+        {
+            assert!(!headers.contains_key("authorization"));
+            endpoint
+        } else {
+            assert_eq!(headers["authorization"], "Bearer github-private-token");
+            path.strip_prefix("/repos/owner/private/").unwrap()
+        };
         if mock.github_failure {
             return (StatusCode::BAD_GATEWAY, "github-private-token private body").into_response();
         }
-        let value = if path == "/repos/owner/private/commits/main" {
+        let value = if endpoint == "commits/main" {
             json!({"sha":COMMIT})
-        } else if path == format!("/repos/owner/private/git/trees/{COMMIT}") {
+        } else if endpoint == format!("git/trees/{COMMIT}") {
             assert_eq!(uri.query(), Some("recursive=1"));
             json!({"truncated":mock.truncated,"tree":[
                 {"path":"skills-index.json","type":"blob","mode":"100644","sha":INDEX},
                 {"path":"nested/skills.md","type":"blob","mode":"100644","sha":BLOB}]})
-        } else if path == format!("/repos/owner/private/git/blobs/{INDEX}") {
+        } else if endpoint == format!("git/blobs/{INDEX}") {
             let content = mock.manifest.to_string();
             json!({"encoding":"base64","size":content.len(),"content":STANDARD.encode(content)})
-        } else if path == format!("/repos/owner/private/git/blobs/{BLOB}") {
+        } else if endpoint == format!("git/blobs/{BLOB}") {
             json!({"encoding":"base64","size":mock.private.len(),"content":STANDARD.encode(&mock.private)})
         } else {
             panic!("unexpected GitHub fixture path: {path}")
@@ -231,6 +247,10 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_values(&values()).await
+    }
+
+    async fn with_values(config: &HashMap<String, String>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("workspace");
         fs::create_dir(&root).unwrap();
@@ -242,7 +262,7 @@ impl Fixture {
         let task = tokio::spawn(async move {
             axum::serve(listener, server).await.unwrap();
         });
-        let mut store = Store::open(Config::parse(&values()).unwrap(), &state.settings)
+        let mut store = Store::open(Config::parse(config).unwrap(), &state.settings)
             .ok()
             .unwrap();
         store.origins = Some((origin.clone(), origin.clone()));
@@ -315,6 +335,46 @@ impl Fixture {
         let mut mock = self.mock.lock().unwrap();
         mock.status = "VOIDED".into();
         mock.mutations = vec![("/purchase_units/0/payments/captures".into(), json!([]))];
+    }
+}
+
+#[tokio::test]
+async fn marketplace_public_examples_are_anonymous_but_require_verified_paypal_capture() {
+    for token in [None, Some("")] {
+        let mut config = public_values();
+        if let Some(token) = token {
+            config.insert(KEYS[0].into(), token.into());
+        }
+        let f = Fixture::with_values(&config).await;
+        assert_eq!(f.content().await.status(), StatusCode::FORBIDDEN);
+        let response = request(f.state.clone(), "GET", "/api/marketplace", Value::Null).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let catalog = body(response).await;
+        assert_eq!(catalog["mode"], "sandbox");
+        assert_eq!(catalog["repository"], "AI10x/skills-marketplace-examples");
+        assert_eq!(catalog["skills"][0]["purchased"], false);
+        assert!(catalog["skills"][0].get("content").is_none());
+        assert!(
+            !f.mock
+                .lock()
+                .unwrap()
+                .reads
+                .iter()
+                .any(|p| p.ends_with(BLOB))
+        );
+        assert_eq!(body(f.buy().await).await["purchased"], false);
+        assert_eq!(f.content().await.status(), StatusCode::FORBIDDEN);
+        assert_eq!(f.capture().await.status(), StatusCode::CONFLICT);
+        assert!(f.mock.lock().unwrap().capture_keys.is_empty());
+        f.mock.lock().unwrap().status = "APPROVED".into();
+        f.mock.lock().unwrap().capture_status = "PENDING".into();
+        assert_eq!(f.capture().await.status(), StatusCode::CONFLICT);
+        assert_eq!(f.content().await.status(), StatusCode::FORBIDDEN);
+        f.mock.lock().unwrap().capture_status = "COMPLETED".into();
+        assert_eq!(body(f.capture().await).await, json!({"purchased":true}));
+        assert_eq!(body(f.content().await).await, json!({"content":PRIVATE}));
+        assert_eq!(f.mock.lock().unwrap().create_keys.len(), 1);
+        assert_eq!(f.mock.lock().unwrap().capture_keys.len(), 1);
     }
 }
 
@@ -600,6 +660,64 @@ async fn marketplace_demo_is_explicit_durable_and_separate_from_real_receipts() 
 }
 
 #[test]
+fn marketplace_public_examples_configuration_is_explicit_and_restricted() {
+    assert!(Config::parse(&HashMap::from([(KEYS[8].into(), "1".into())])).is_err());
+    for token in [None, Some(""), Some(" ")] {
+        for repo in ["owner/private", "AI10x/skills-marketplace-examples"] {
+            let mut config = values();
+            config.insert(KEYS[1].into(), repo.into());
+            config.remove(KEYS[0]);
+            if let Some(token) = token {
+                config.insert(KEYS[0].into(), token.into());
+            }
+            assert!(Config::parse(&config).is_err());
+        }
+    }
+    for (key, value) in [
+        (KEYS[8], ""),
+        (KEYS[8], "0"),
+        (KEYS[8], "true"),
+        (KEYS[8], "01"),
+        (KEYS[8], " 1"),
+        (KEYS[8], "1 "),
+        (KEYS[7], "live"),
+        (KEYS[7], ""),
+        (KEYS[1], "owner/private"),
+        (KEYS[1], "other/skills-marketplace-examples"),
+        (KEYS[1], "AI10x/skills-marketplace-examples-other"),
+        (KEYS[0], "inherited-token"),
+        (KEYS[0], " "),
+    ] {
+        let mut config = public_values();
+        config.insert(key.into(), value.into());
+        assert!(Config::parse(&config).is_err(), "accepted {key}={value}");
+    }
+    for key in [KEYS[1], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7]] {
+        let mut config = public_values();
+        config.remove(key);
+        assert!(Config::parse(&config).is_err(), "accepted missing {key}");
+    }
+    let mut config = public_values();
+    config.insert(KEYS[1].into(), "ai10x/SKILLS-MARKETPLACE-EXAMPLES".into());
+    assert!(Config::parse(&config).unwrap().unwrap().token.is_empty());
+    config.insert(KEYS[0].into(), "".into());
+    assert!(Config::parse(&config).unwrap().unwrap().token.is_empty());
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = app(dir.path());
+    let public = Store::open(Config::parse(&config).unwrap(), &state.settings)
+        .ok()
+        .unwrap();
+    config.remove(KEYS[8]);
+    config.insert(KEYS[0].into(), "github-private-token".into());
+    let private = Store::open(Config::parse(&config).unwrap(), &state.settings)
+        .ok()
+        .unwrap();
+    assert_eq!(public.namespace, private.namespace);
+    assert_ne!(public.namespace, "demo-v1");
+}
+
+#[test]
 fn marketplace_configuration_fails_closed_and_namespaces_bind_merchant_repo_mode() {
     assert!(Config::parse(&HashMap::new()).unwrap().is_none());
     for key in KEYS {
@@ -648,10 +766,194 @@ fn marketplace_configuration_fails_closed_and_namespaces_bind_merchant_repo_mode
 }
 
 #[tokio::test]
+async fn marketplace_paypal_sdk_public_config_is_no_store_and_environment_bound() {
+    let mut f = Fixture::new().await;
+    for (mode, environment) in [("sandbox", "sandbox"), ("live", "production")] {
+        let mut config = values();
+        config.insert(KEYS[7].into(), mode.into());
+        f.state.marketplace = Arc::new(
+            Store::open(Config::parse(&config).unwrap(), &f.state.settings)
+                .ok()
+                .unwrap(),
+        );
+        let response = request(
+            f.state.clone(),
+            "GET",
+            "/api/marketplace/paypal-sdk?environment=evil&clientId=attacker",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            body(response).await,
+            json!({"clientId":"paypal-client", "environment":environment})
+        );
+        assert!(f.state.marketplace.load().ok().unwrap().receipts.is_empty());
+    }
+    assert!(f.mock.lock().unwrap().reads.is_empty());
+}
+
+#[tokio::test]
+async fn marketplace_paypal_sdk_authentication_precedes_public_config() {
+    let f = Fixture::new().await;
+    for token in [None, Some("Bearer wrong-token")] {
+        let mut request = Request::builder()
+            .uri("/api/marketplace/paypal-sdk")
+            .header("origin", "https://untrusted.example");
+        if let Some(token) = token {
+            request = request.header("authorization", token);
+        }
+        let response = crate::router(f.state.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert!(
+            !response
+                .headers()
+                .contains_key("access-control-allow-origin")
+        );
+        let error = body(response).await;
+        assert!(error.get("clientId").is_none());
+        assert!(!error.to_string().contains("paypal-client"));
+    }
+    assert!(f.mock.lock().unwrap().reads.is_empty());
+}
+
+#[tokio::test]
+async fn marketplace_paypal_sdk_demo_unavailable_and_broken_storage_fail_closed() {
+    let mut f = Fixture::new().await;
+    for (real, unavailable) in [(false, false), (false, true), (true, true), (true, false)] {
+        let config = real.then(|| Config::parse(&values()).unwrap().unwrap());
+        let mut store = Store::open(config, &f.state.settings).ok().unwrap();
+        if unavailable {
+            store.unavailable = Some("Marketplace unavailable");
+        }
+        f.state.marketplace = Arc::new(store);
+        if real && !unavailable {
+            let ledger = f.state.marketplace.load().ok().unwrap();
+            f.state.marketplace.save(&ledger).ok().unwrap();
+            fs::set_permissions(&f.private_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let response = request(
+            f.state.clone(),
+            "GET",
+            "/api/marketplace/paypal-sdk",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let error = body(response).await;
+        assert!(error.get("clientId").is_none());
+        assert!(error.get("environment").is_none());
+        for private in [
+            "paypal-client",
+            "paypal-secret",
+            "github-private-token",
+            PRIVATE,
+        ] {
+            assert!(!error.to_string().contains(private));
+        }
+    }
+    fs::set_permissions(&f.private_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(f.mock.lock().unwrap().reads.is_empty());
+}
+
+#[tokio::test]
+async fn marketplace_paypal_csp_is_fixed_environment_scoped_and_demo_stays_strict() {
+    let mut f = Fixture::new().await;
+    let ui = f.state.root.join("ui");
+    fs::create_dir(&ui).unwrap();
+    fs::write(ui.join("index.html"), "<!doctype html><title>Spec</title>").unwrap();
+    for (mode, unavailable, origin) in [
+        (None, false, None),
+        (None, true, None),
+        (Some("sandbox"), true, None),
+        (
+            Some("sandbox"),
+            false,
+            Some("https://www.sandbox.paypal.com"),
+        ),
+        (Some("live"), false, Some("https://www.paypal.com")),
+    ] {
+        let config = mode.map(|mode| {
+            let mut config = values();
+            config.insert(KEYS[7].into(), mode.into());
+            // A configured merchant URL must never become an allowed CSP source.
+            config.insert(KEYS[6].into(), "https://untrusted.example/".into());
+            Config::parse(&config).unwrap().unwrap()
+        });
+        let mut store = Store::open(config, &f.state.settings).ok().unwrap();
+        if unavailable {
+            store.unavailable = Some("Marketplace unavailable");
+        }
+        f.state.marketplace = Arc::new(store);
+        for path in ["/", "/api/marketplace/paypal-sdk"] {
+            let response = crate::browser_router(f.state.clone(), ui.clone())
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if path == "/" {
+                    StatusCode::OK
+                } else {
+                    StatusCode::UNAUTHORIZED
+                }
+            );
+            let headers = response.headers();
+            assert_eq!(headers["x-content-type-options"], "nosniff");
+            assert_eq!(headers["referrer-policy"], "no-referrer");
+            let csp = headers["content-security-policy"].to_str().unwrap();
+            assert!(!csp.contains('*'));
+            assert!(!csp.contains("unsafe-"));
+            assert!(!csp.contains("untrusted.example"));
+            if let Some(origin) = origin {
+                assert_eq!(
+                    headers["cross-origin-opener-policy"],
+                    "same-origin-allow-popups"
+                );
+                let directives: Vec<_> = csp.split("; ").collect();
+                assert!(directives.contains(&format!("script-src 'self' {origin}").as_str()));
+                for kind in ["connect-src", "frame-src"] {
+                    assert!(directives.contains(
+                        &format!("{kind} 'self' {origin} https://www.paypalobjects.com").as_str()
+                    ));
+                }
+                for directive in [
+                    "default-src 'self'",
+                    "style-src 'self'",
+                    "object-src 'none'",
+                    "base-uri 'none'",
+                    "frame-ancestors 'none'",
+                ] {
+                    assert!(directives.contains(&directive));
+                }
+                let other = if mode == Some("live") {
+                    "https://www.sandbox.paypal.com"
+                } else {
+                    "https://www.paypal.com"
+                };
+                assert!(!csp.contains(other));
+            } else {
+                assert_eq!(csp, crate::CSP);
+                assert!(!csp.contains("paypal"));
+                assert!(!headers.contains_key("cross-origin-opener-policy"));
+            }
+        }
+    }
+    assert!(f.mock.lock().unwrap().reads.is_empty());
+}
+
+#[tokio::test]
 async fn marketplace_authentication_and_untrusted_inputs_cannot_expose_private_data() {
     let f = Fixture::new().await;
     for (method, path) in [
         ("GET", "/api/marketplace"),
+        ("GET", "/api/marketplace/paypal-sdk"),
         ("POST", "/api/marketplace/orders"),
         ("POST", "/api/marketplace/orders/ORDER1/capture"),
         ("GET", "/api/marketplace/skills/private-review/content"),
@@ -709,6 +1011,7 @@ async fn marketplace_unreadable_configuration_never_exposes_demo_routes_or_recei
     f.state.marketplace = Arc::new(store);
     for (method, path, input) in [
         ("GET", "/api/marketplace", Value::Null),
+        ("GET", "/api/marketplace/paypal-sdk", Value::Null),
         (
             "POST",
             "/api/marketplace/orders",
@@ -792,6 +1095,7 @@ async fn marketplace_post_rename_sync_failure_blocks_recovered_intent_and_approv
         let reads = f.mock.lock().unwrap().reads.len();
         for (method, path, input) in [
             ("GET", "/api/marketplace", Value::Null),
+            ("GET", "/api/marketplace/paypal-sdk", Value::Null),
             (
                 "POST",
                 "/api/marketplace/orders",
@@ -809,6 +1113,7 @@ async fn marketplace_post_rename_sync_failure_blocks_recovered_intent_and_approv
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
             let error = body(response).await;
             assert!(error.get("content").is_none());
+            assert!(error.get("clientId").is_none());
             assert!(error.get("approvalUrl").is_none());
             assert!(error.get("purchased").is_none());
         }
@@ -859,6 +1164,7 @@ async fn marketplace_github_outage_returns_receipt_catalog_with_warning_not_cont
             .status(),
         StatusCode::BAD_GATEWAY
     );
+    assert_eq!(f.mock.lock().unwrap().reads.len(), 1, "no anonymous retry");
     f.mock.lock().unwrap().github_failure = false;
     assert_eq!(f.buy().await.status(), StatusCode::OK);
     f.mock.lock().unwrap().github_failure = true;

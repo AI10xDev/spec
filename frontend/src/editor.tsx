@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react"
 import { completionPrefix } from "./completions"
+import { apiHeaders, publicPath } from "./deployment"
 import { completionMarker } from "./completion-marker"
 import { highlightSpec } from "./highlighting"
 import { recordEdit, stepHistory, type EditorHistory, type EditorSnapshot } from "./tabs"
@@ -108,9 +109,9 @@ export function Editor({ active, name, value: content, token, available, enabled
     const timer = setTimeout(async () => {
       setMessage("Completing sentence part...")
       try {
-        const response = await fetch("/api/completions", {
+        const response = await fetch(publicPath("api/completions"), {
           method: "POST",
-          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          headers: apiHeaders(token),
           body: JSON.stringify({ prefix }),
           signal: controller.signal,
         })

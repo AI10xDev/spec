@@ -28,6 +28,61 @@ mod recovery_tests;
 #[path = "queued_build_tests.rs"]
 mod queued_build_tests;
 
+#[test]
+fn auth_token_file_format_is_strict_and_read_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workspace");
+    let ui = directory.path().join("ui");
+    let path = directory.path().join("token");
+    let token = "0123456789abcdef".repeat(4);
+    for (bytes, valid) in [
+        (token.as_bytes().to_vec(), true),
+        (format!("{token}\n").into_bytes(), true),
+        (Vec::new(), false),
+        (vec![b'0'; 63], false),
+        (vec![b'0'; 65], false),
+        (vec![b'0'; 66], false),
+        (token.to_uppercase().into_bytes(), false),
+        (vec![b'g'; 64], false),
+        (vec![0xff; 64], false),
+        (vec![0; 64], false),
+        (format!("{token}\r\n").into_bytes(), false),
+        (format!("{token}\n\n").into_bytes(), false),
+        (format!("{token} ").into_bytes(), false),
+        (format!(" {}", &token[..63]).into_bytes(), false),
+    ] {
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let result = load_auth_token(Some(path.clone()), &root, &ui);
+        if valid {
+            assert_eq!(result.unwrap(), token);
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .starts_with("Could not load SPEC_AUTH_TOKEN_FILE:")
+            );
+        }
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn auth_token_without_file_remains_ephemeral() {
+    let root = FsPath::new("/unused-workspace");
+    let first = load_auth_token(None, root, root).unwrap();
+    let second = load_auth_token(None, root, root).unwrap();
+    assert_ne!(first, second);
+    for token in [first, second] {
+        assert_eq!(token.len(), 64);
+        assert!(
+            token
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        );
+    }
+}
+
 pub(super) fn app(root: &FsPath) -> App {
     let settings = settings::Store::open(
         root.with_extension("settings").join("profile.json"),

@@ -1,9 +1,12 @@
 # Skills Marketplace
 
 The marketplace lists descriptions of private GitHub skill files and unlocks the
-pinned full markdown only after a verified PayPal capture. All provider requests
-and credentials stay on the Rust server. No PayPal SDK, iframe, download URL,
-browser GitHub token, or CSP relaxation is required.
+pinned full markdown only after a verified PayPal capture. GitHub access, PayPal
+secrets, order creation and capture stay on the Rust server. Checkout uses
+`@paypal/paypal-js/sdk-v6`, following the public-client-ID one-time-payment flow in
+[PayPal's v6 sample integration](https://github.com/paypal-examples/v6-web-sdk-sample-integration).
+The browser receives only the public PayPal client ID, never the app secret,
+GitHub token, or server OAuth access token.
 
 ## Modes and Ownership
 
@@ -28,25 +31,48 @@ The automated provider tests use local fixtures, never real credentials.
 
 ## Workspace Flow
 
-1. Open **Skills** in the Spec workspace header. The modal does not change the
-   editor, save files, or launch builds; Escape or Close returns focus to Skills.
+1. Open the large, rainbow **Purchase Skills** button centered at the top of the
+   Spec workspace. On narrower screens it has its own top row above the other
+   header controls. Browsing, purchasing and revealing do not change the editor,
+   save files, or launch builds; Escape or Close returns focus to Purchase Skills.
 2. Select a listed file to preview its description, path, and price. With no
-   configuration, three examples are provided and the purchase button explicitly
-   says **Simulate purchase (no charge)**.
-3. In sandbox or live mode, choose **Buy with PayPal**, then **Continue to PayPal**.
-   The approval link opens a separate tab with no workspace token or opener access.
-   Review the amount in PayPal before approving.
-4. Return to the original modal and choose **Check payment**. This action captures
-   an approved payment; merely returning from PayPal does not unlock the file.
-   A failed or pending payment stays locked and can be checked again safely.
+   configuration, three examples are provided. The rainbow **Purchase Skills**
+   button has an associated **Simulated purchase (no charge)** explanation in demo.
+3. In sandbox or live mode, wait for PayPal eligibility and choose **Purchase Skills**.
+   The v6 SDK opens a popup without redirecting away from unsaved editor work.
+   Review the amount in PayPal; approval authorizes server-side capture. Sandbox
+   and live payments are explicitly distinguished beside the button.
+4. The SDK approval callback requests capture and unlocks only after server
+   verification. A failed, cancelled, pending or merely returned payment stays
+   locked. **Check payment** remains available to safely recover interrupted
+   captures. If popups are blocked, refresh the catalog to recover the saved order
+   and use **Continue to PayPal** (a separate tab with no workspace token or opener
+   access), then **Check payment**. Neither SDK availability nor a callback alone
+   proves payment.
 5. Choose **Display full contents** after verification (or explicit demo simulation).
    The pinned Markdown is fetched only on request and displayed as read-only text,
    never executed or automatically inserted into a spec. Hide clears the display.
+6. Optionally choose **Enable editing** for an unlocked skill. This opens a new
+   editable workspace copy named `skill-<id>.md`, using `-2`, `-3`, etc. when a saved
+   file or open tab already uses that name. Existing files and unsaved buffers are
+   preserved. The copy starts unsaved; Save and the editor's normal autosave after
+   user edits persist it through the existing revision-checked file API. A concurrent
+   filename collision produces a save conflict rather than an overwrite.
+
+Editing a copy does not change the pinned purchase receipt, GitHub source, price,
+or entitlement. Reopen the saved copy through the workspace file list to continue
+editing it; selecting Enable editing again creates another copy. Closing the
+marketplace during a content load or file-list refresh cancels the operation.
+No build, checkout, or repository push is launched by Enable editing. Configured
+editor completion behavior remains controlled by the existing editor setting.
 
 Reopening the modal restores purchased files and unresolved orders. Catalog outages
 show a warning alongside receipt-backed listings. If PayPal confirms an old order
 is voided and unpaid, **Expired order? / Start a new order** requests a safe
 replacement. Unknown, pending, or completed payments cannot be replaced.
+Repeated approval callbacks share one capture attempt. Closing the modal destroys
+the SDK session and invalidates late callbacks without cancelling a provider order.
+An SDK failure never silently creates a replacement or switches to demo mode.
 
 ## Server Setup
 
@@ -64,6 +90,18 @@ values, including empty exports. Restart the server after changes.
 | `SPEC_PAYPAL_MERCHANT_ID` | Exact receiving business account merchant ID, not an email address |
 | `SPEC_PAYPAL_RETURN_URL` | HTTPS URL returning the approval tab to Spec; no credentials, query string, or fragment |
 | `SPEC_PAYPAL_MODE` | `sandbox` (default) or explicit `live` |
+| `SPEC_SKILLS_PUBLIC_EXAMPLES` | Optional exact `1`: anonymous access only to `AI10x/skills-marketplace-examples`, with explicit `SPEC_PAYPAL_MODE=sandbox` |
+
+The example repository is temporarily public for testing. To test without a
+GitHub token, explicitly set `SPEC_SKILLS_PUBLIC_EXAMPLES=1` and the exact example
+repository above. Omit or clear `SPEC_SKILLS_GITHUB_TOKEN`; a nonempty inherited
+token is rejected in public-example mode. No Authorization header is sent to
+GitHub. Private mode remains the default and never falls back to anonymous access.
+Other flag values, repositories or live payments are rejected by this test option.
+Anonymous GitHub requests have lower rate limits (typically 60/hour per IP).
+Anyone can read or copy full public skill files without paying; this is not a
+production paywall. Restore repository privacy after testing and remove the flag
+before configuring a repository-scoped read token. Visibility has no automatic expiry.
 
 Use a sandbox business account/app as seller and a separate sandbox personal
 account as buyer for manual acceptance testing. For a local installation, use a
@@ -77,6 +115,84 @@ disabled. There are no configurable upstream HTTP endpoints in production.
 Local origin injection exists only in Rust tests. Requests have a 5-second connect
 timeout and a 20-second overall timeout each. Upstream response bodies and errors
 are not forwarded to the browser or logged with credentials.
+
+## Secure Operator Setup
+
+Run this **yourself in a private, unrecorded terminal on the server**, as the OS
+account that runs Spec. Python 3.9+ on POSIX is sufficient; there are no Python
+dependencies, network requests, browser prompts, or reads of existing credentials.
+Never paste credentials into chat, a spec, command arguments, shell history, or
+browser settings. All answers (including repository, URL and mode) use `getpass`
+without echo. Piped/non-TTY input and echo fallback are refused.
+
+```sh
+python3 /home/opencode/spec/scripts/setup_marketplace.py
+```
+
+The default new file is `.spec-marketplace/marketplace.env` under the OS account's
+login home (not an inherited `HOME` override). To choose a different absolute path
+or declare nonstandard server workspace/static roots:
+
+```sh
+python3 /home/opencode/spec/scripts/setup_marketplace.py \
+  --output /absolute/private-parent/marketplace.env \
+  --workspace /absolute/editable-workspace \
+  --ui-dir /absolute/static-ui
+```
+
+Supply the actual roots if different from `SPEC_WORKSPACE` / `SPEC_UI_DIR` in the
+setup process environment or the repository defaults (`workspace`, `frontend/dist`).
+The helper rejects output inside those trees or anywhere in this repository.
+Do not serve, edit through Spec, sync publicly, or commit the private output.
+It cannot discover other servers' roots, bind mounts, or later hosting changes.
+
+Have a fine-grained GitHub token with Contents read permission for only the private
+skills repository, its `owner/repository` and ref (default `main`), the matching
+PayPal app client ID/secret and business merchant ID, and the HTTPS Spec return URL
+ready. Values must be printable ASCII without whitespace/newlines; errors never
+repeat input. The URL must not contain credentials, query parameters, or fragments.
+Mode defaults to `sandbox`. Selecting `live` additionally requires typing
+`ENABLE LIVE PAYMENTS`; saving always requires `SAVE`. This does not verify provider
+credentials or make payments. Test sandbox separately before enabling live.
+
+Only the immediate private parent is created, with mode `0700`; earlier ancestors
+must exist and be trusted. An existing parent must already be owned by this account
+with exactly `0700`. Files are `0600`, path components cannot be symlinks, and an
+existing destination (including a dangling symlink) is always refused, never read
+or overwritten. Complete output is synchronized and published without replacement.
+Cancellation before publication leaves no final config; handled failures clean
+temporary files. A hard kill or power loss can leave a private temporary file, and
+a final sync failure can leave a complete destination: inspect privately rather
+than blindly retrying or deleting it. No values are printed to stdout or stderr.
+Storage is private plaintext, not encryption against the OS account or root.
+
+Point the **server process** at the new absolute file and restart it using your
+normal launcher, for example set this non-secret path in its launch environment:
+
+```sh
+export SPEC_AI_ENV_FILE=/absolute/private-parent/marketplace.env
+```
+
+Use the default file's absolute login-home path if you did not pass `--output`.
+Do not `source` the file or print its contents. This selects the existing **shared
+AI dotenv override**: it replaces nearest-`.env` discovery, it does not merge with
+the old file. The helper writes only marketplace variables, so previously
+file-only text-AI/Azure voice settings may stop loading. Preserve those separately
+in the server's protected launch configuration or deliberately maintain a combined
+private dotenv outside this helper. Saved AI profiles retain their existing
+precedence. Existing process exports, including empty marketplace exports, override
+the file and must be reconciled before restarting. This helper neither rewrites
+existing settings nor starts/stops the server.
+
+Offline checks (synthetic values only):
+
+```sh
+python3 -m unittest discover -s scripts -p 'test_setup_marketplace.py' -v
+```
+
+The actual Rust `dotenvy` quoting round-trip check needs `rustc` and a previously
+built debug backend dependency in `backend/target/debug/deps`; otherwise that check
+is explicitly skipped. No interactive prompt or real credential is needed.
 
 ## Private Repository
 
@@ -184,6 +300,27 @@ skill. NUL-containing or oversized content is rejected before creating a payment
 All routes require the existing `Authorization: Bearer <workspace-token>` and
 return JSON with `Cache-Control: no-store`. The token is never a URL parameter.
 
+`GET /api/marketplace/paypal-sdk` returns only
+`{"clientId":"public-app-id","environment":"sandbox"}` (or `"production"` for
+live mode). It requires workspace authentication and healthy receipt storage,
+uses `Cache-Control: no-store`, and returns 503 in demo or unavailable mode.
+The frontend validates mode consistency before loading the SDK and checks PayPal
+eligibility for the selected currency. Initialization errors disable purchase and
+offer an explicit retry without creating an order. After changing sandbox/live
+server configuration, save editor work and fully reload the page: the SDK loader
+reuses its global namespace and the document's CSP is fixed at load time.
+
+In configured mode only, CSP permits scripts from the fixed environment's
+`https://www.sandbox.paypal.com` or `https://www.paypal.com` origin, and PayPal
+connections/frames/images plus `https://www.paypalobjects.com`. It does not add
+wildcards, unsafe script directives, arbitrary return-URL origins, or external
+permissions in demo. COOP becomes `same-origin-allow-popups` for SDK communication.
+This is a trust expansion: provider JavaScript runs in the editor's origin and
+has that origin's privileges. Only enable configured checkout where trusting the
+PayPal SDK alongside the workspace is acceptable. This is not an isolated-origin
+payment application. Credentials are collected only by the offline operator
+helper, never by this third-party-script-enabled page.
+
 `GET /api/marketplace`:
 
 ```json
@@ -233,11 +370,17 @@ Amounts, currency, merchant, content, and purchased state are never browser inpu
 The order freezes the price, description, commit, and full file at purchase
 initiation. Repeated requests reuse that order rather than charging again.
 
-Open the validated approval URL in a separate tab. Only HTTPS
+The SDK receives the server-created order ID through a promise passed to
+`session.start()` synchronously within the click gesture; order creation is not
+awaited before opening the popup. The approval callback must match that exact
+order ID before calling the capture endpoint. No price or merchant comes from
+the SDK callback. Capture failure rejects the callback; normal session cleanup
+waits for SDK completion. The explicit fallback can open the validated approval
+URL in a separate tab. Only HTTPS
 `www.sandbox.paypal.com/checkoutnow` or `www.paypal.com/checkoutnow` URLs matching
 the selected mode and order token are accepted. Returning from PayPal is **not**
-proof of payment and does not unlock content. Approval alone does not capture a
-charge: the user must click **Check payment** in the original modal.
+proof of payment and does not unlock content. In the SDK flow approval initiates
+server capture; for the fallback tab, click **Check payment** in the original modal.
 
 `POST /api/marketplace/orders/{id}/capture` accepts `{}`. The server retrieves the
 order, validates its amount/currency, merchant, and skill/request binding, and
@@ -336,7 +479,7 @@ the server can access its private storage; this is not DRM against the server ow
 
 From `frontend/`, run `bun run build` and `bunx playwright test e2e/marketplace.spec.ts`
 after building the debug backend with `cargo build` in `backend/`. The browser
-suite exercises the real demo backend and mocked PayPal flows, focus wrapping,
+suite exercises the real demo backend and mocked v6 SDK/PayPal flows, focus wrapping,
 explicit reveal, recovery, editor isolation, and desktop/mobile layouts. It blocks
 external provider navigation and never makes real purchases.
 
@@ -348,5 +491,14 @@ directory-sync failures), reloads, namespace separation, configuration validatio
 bounds, redirects, and secret-safe errors. They also cover receipt-backed outage
 catalogs, safe `VOIDED` replacement, ambiguous/unsafe replacement rejection,
 retained history, concurrent retries, and interrupted retirement recovery.
-Manual sandbox acceptance should additionally verify the real PayPal approval tab
-and return navigation before deliberately enabling live mode.
+The browser regressions also cover eligibility/config failures, explicit SDK retry,
+rainbow styling, popup failure before order creation returns, duplicate and stale
+callbacks, callback rejection/completion ordering, and mode-change reload gating.
+Run `python3 -B -m unittest discover -s scripts -p 'test_setup*.py'` for setup tests
+(Rust/Cargo is used for the actual `dotenvy` round-trip check).
+
+Manual sandbox acceptance is still required with real app credentials. Verify
+SDK/module loading under the deployed CSP, popup approval/cancellation, automatic
+capture and explicit reveal, then blocked-popup fallback and recovery. Repeat on
+desktop and mobile before deliberately enabling live mode. Automated tests mock
+the SDK and do not prove real provider/CSP compatibility or make real purchases.

@@ -1,0 +1,34 @@
+[Unit]
+Description=Spec sandbox skills marketplace backend
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/spec-marketplace/private/ready
+
+[Service]
+Type=simple
+User=spec-marketplace
+Group=spec-marketplace
+WorkingDirectory=/var/lib/spec-marketplace
+UMask=0077
+Environment=SPEC_WORKSPACE=/var/lib/spec-marketplace/workspace
+Environment=SPEC_UI_DIR=/opt/spec-marketplace/ui
+Environment=SPEC_SETTINGS_FILE=/var/lib/spec-marketplace/receipts/profile.json
+Environment=SPEC_AUTH_TOKEN_FILE=/var/lib/spec-marketplace/private/auth.token
+Environment=SPEC_AI_ENV_FILE=/var/lib/spec-marketplace/private/marketplace.env
+Environment=SPEC_AZURE_REALTIME_ENV_FILE=/dev/null
+Environment=SPEC_PAYPAL_MODE=sandbox
+Environment=SPEC_PORT=4781
+ExecStart=/opt/spec-marketplace/spec
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/spec-marketplace/workspace /var/lib/spec-marketplace/receipts
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

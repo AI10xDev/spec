@@ -11,6 +11,7 @@ import { Marketplace } from "./marketplace"
 import { BuildProgress } from "./progress"
 import { Settings } from "./settings"
 import { ProjectPicker } from "./project-picker"
+import { apiHeaders, gatewayAuth, publicPath } from "./deployment"
 import { ActiveRuns } from "./active-runs"
 import { RecoveryNotice } from "./recovery-notice"
 import type { ProjectSearch } from "./project-picker"
@@ -29,6 +30,7 @@ const chatName = new URLSearchParams(location.search).get("chat")
 
 function App() {
   const [token, setToken] = useState(() => {
+    if (gatewayAuth) return ""
     const fragment = new URLSearchParams(location.hash.slice(1)).get("token")
     if (fragment) {
       sessionStorage.setItem("spec-token", fragment)
@@ -93,6 +95,7 @@ function App() {
   const [analytics, setAnalytics] = useState(false)
   const [featureReview, setFeatureReview] = useState(false)
   const [marketplace, setMarketplace] = useState(false)
+  const skillEditorFocus = useRef<string | null>(null)
   const [settings, setSettings] = useState(false)
   const configRequest = useRef(0)
   const [outputView, setOutputView] = useState<"file" | "optimization">("file")
@@ -103,6 +106,13 @@ function App() {
   const log = useRef<HTMLPreElement>(null)
   const chatWindows = useRef(new Map<Window, string>())
   const tab = tabs.find((item) => item.name === active)
+
+  useEffect(() => {
+    if (marketplace || active !== skillEditorFocus.current) return
+    // Focus after the modal's cleanup restores its opener.
+    document.querySelector<HTMLTextAreaElement>(".editor-input:not([inert]) textarea")?.focus()
+    skillEditorFocus.current = null
+  }, [active, marketplace])
   const sharing = !!tab && sharedName === tab.name
   const computeruseBlocked = !computeruse?.configured || !!computeruseError || computeruse.run?.status === "running"
   const fileOutput = outputs[active]
@@ -128,9 +138,9 @@ function App() {
       stoppedIds.current.add(id)
       setQueuedFeedback((items) => ({ ...items, ...(items[id] ? { [id]: { ...items[id], paused: "Stop requested. Queued feedback will not resume this run." } } : {}) }))
     }
-    const response = await fetch(`/api${path}`, {
+    const response = await fetch(publicPath(`api${path}`), {
       method: body === undefined ? "GET" : method,
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      headers: apiHeaders(token),
       body: body === undefined ? undefined : JSON.stringify(body),
       signal,
     })
@@ -169,7 +179,7 @@ function App() {
   async function connect(event?: React.FormEvent) {
     event?.preventDefault()
     setError("")
-    sessionStorage.setItem("spec-token", token)
+    if (!gatewayAuth) sessionStorage.setItem("spec-token", token)
     await refreshConfig()
     if (chatName) { setConnected(true); return }
     const entries = await api<Entry[]>("/files")
@@ -182,7 +192,7 @@ function App() {
     setConnected(true)
   }
 
-  useEffect(() => { if (token) void connect().catch(fail) }, [])
+  useEffect(() => { if (gatewayAuth || token) void connect().catch(fail) }, [])
 
   useEffect(() => {
     if (!connected || !computeruseAvailable || chatName) return
@@ -552,6 +562,25 @@ function App() {
     setError("")
   }
 
+  async function editSkill(id: string, content: string, signal: AbortSignal) {
+    const entries = await api<Entry[]>("/files", undefined, "GET", signal)
+    if (signal.aborted) return
+    let name = `skill-${id}.md`
+    let suffix = 2
+    while (entries.some((file) => file.name === name) || tabs.some((item) => item.name === name)) {
+      name = `skill-${id}-${suffix++}.md`
+    }
+    setFiles(entries)
+    setTabs((items) => [...items, { name, content, saved: "", revision: null }])
+    skillEditorFocus.current = name
+    selectTab(name)
+    setSection("tabs")
+    setOutputView("file")
+    setError("")
+    setNotice(`Editing ${name}. The purchased original is unchanged. Save or normal autosave stores this workspace copy; no build has started.`)
+    setMarketplace(false)
+  }
+
   function close(item: Tab) {
     if (saving?.name === item.name) return
     if (dirty(item) && !window.confirm(`Discard unsaved changes to ${item.name}?`)) return
@@ -822,10 +851,10 @@ function App() {
   if (!connected) return <main className="connect">
     <div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ local workspace</span></div>
     <h1>A place to think.<br /><span className="rainbow-text">A space to build.</span></h1>
-    <p>Connect to your Rust server. Your files stay on this machine.</p>
+    <p>{gatewayAuth ? "Connect through the authenticated gateway. Your files stay on the server." : "Connect to your Rust server. Your files stay on this machine."}</p>
     <form onSubmit={(event) => void connect(event).catch(fail)}>
-      <label htmlFor="token">Server access token</label>
-      <input id="token" type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} placeholder="Paste the token from your terminal" required />
+      {!gatewayAuth && <><label htmlFor="token">Server access token</label>
+      <input id="token" type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} placeholder="Paste the token from your terminal" required /></>}
       <button className="primary">Open workspace →</button>
     </form>
     {error && <p role="alert" className="error">{error}</p>}
@@ -834,7 +863,11 @@ function App() {
   if (chatName) return <Chat name={chatName} api={api} available={chat} execution={execution} realtime={realtime} azureRealtime={azureRealtime} />
 
   return <div className="app">
-    <header className="topbar"><div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div><div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Performance: {optimization.status}</span>}<div className="analysis-actions">{execution && <button ref={activeRunsButton} aria-expanded={activeRuns} aria-controls="active-runs" onClick={() => setActiveRuns(!activeRuns)}>Active runs</button>}<button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button aria-haspopup="dialog" disabled={settings} onClick={() => setMarketplace(true)}>Skills</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button ref={performanceButton} className="primary" title="performance" aria-expanded={performance && !settings} aria-controls="performance-form" disabled={settings} onClick={() => { if (!performance) setUseEditorSpec(false); setPerformance(!performance) }}>Performance</button></div></div></header>
+    <header className="topbar skills-topbar">
+      <div className="brand"><span className="brand-mark">spec</span><span className="brand-caption">/ {settings ? "settings" : "workspace"}</span></div>
+      <button className="skills-paypal skills-launcher" aria-haspopup="dialog" disabled={settings} onClick={() => setMarketplace(true)}>Purchase Skills</button>
+      <div className="topbar-actions"><div className="connection"><i /> Local · Rust + TypeScript</div>{optimization?.recoverable && <span className="badge">Performance: {optimization.status}</span>}<div className="analysis-actions">{execution && <button ref={activeRunsButton} aria-expanded={activeRuns} aria-controls="active-runs" onClick={() => setActiveRuns(!activeRuns)}>Active runs</button>}<button aria-current={settings ? "page" : undefined} onClick={() => setSettings(true)}>Settings</button><button title="analytics" disabled={settings} onClick={() => setAnalytics(true)}>Analytics</button><button ref={performanceButton} className="primary" title="performance" aria-expanded={performance && !settings} aria-controls="performance-form" disabled={settings} onClick={() => { if (!performance) setUseEditorSpec(false); setPerformance(!performance) }}>Performance</button></div></div>
+    </header>
     <ActiveRuns key={token} open={activeRuns && execution} api={api} knownOutputs={Object.values(outputs)} onClose={() => { setActiveRuns(false); activeRunsButton.current?.focus() }} onOutput={(next) => {
       // A delayed recoverable response cannot undo confirmed completion of the same run.
       const updated = (previous: Output) => !previous.recoverable && next.recoverable ? previous : next.status.startsWith("unavailable")
@@ -865,7 +898,7 @@ function App() {
     </form>}
     {analytics && <Analytics api={api} active={active} onClose={() => setAnalytics(false)} />}
     {featureReview && <FeatureReview api={api} onClose={() => setFeatureReview(false)} />}
-    {marketplace && <Marketplace api={api} onClose={() => setMarketplace(false)} />}
+    {marketplace && <Marketplace api={api} onClose={() => setMarketplace(false)} onEdit={editSkill} />}
     {settings && <Settings api={api} onClose={() => setSettings(false)} onChanged={refreshConfig} />}
     <div className="workspace" hidden={settings} inert={settings}>
       <aside>

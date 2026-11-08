@@ -487,6 +487,7 @@ These are the Rust server's defaults when launched directly. `run.sh` supplies t
 | --- | --- | --- |
 | `SPEC_WORKSPACE` | `../workspace` | File directory, relative to the backend process working directory |
 | `SPEC_PORT` | `4780` | Loopback HTTP port; `0` chooses an available port |
+| `SPEC_AUTH_TOKEN_FILE` | unset | Exported, nonempty absolute path to a preexisting private token file; never a raw token. Exactly 64 lowercase ASCII hex bytes, optionally followed by one LF (no CRLF or other whitespace). Uses the private settings-store checks: outside workspace/UI roots, no symlinks, owner-only `0700` parent and `0600` single-link regular file owned by the server user, trusted ancestors. Invalid/missing files fail startup with sanitized errors; nothing is created or repaired. Loaded once at startup, so unchanged contents preserve bearer auth across restarts; restart to rotate. Configured mode prints only a token-free URL and external-auth note: supply the token privately to the client/gateway. Unset retains the ephemeral UUID token and printed local token URL. Binding remains `127.0.0.1`. |
 | `SPEC_UI_DIR` | `../frontend/dist` | Built Vite assets, relative to process working directory |
 | `SPEC_SSH_TARGET` | unset | Trusted `user@host` or SSH host alias; enables remote builds together with `SPEC_SSH_WORKSPACE` |
 | `SPEC_SSH_WORKSPACE` | unset | Existing absolute remote build directory; not the local editor workspace; no `~` expansion |

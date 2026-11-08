@@ -333,19 +333,20 @@ fn save(app: &App, name: &str, input: Save) -> Result<Document> {
 }
 
 async fn authenticate(State(app): State<App>, request: Request, next: Next) -> Response {
-    if request
+    let mut response = if request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         != Some(format!("Bearer {}", app.token).as_str())
     {
-        return Error(
+        Error(
             StatusCode::UNAUTHORIZED,
-            "Paste the access token printed by the Rust server".into(),
+            "Provide the server access token".into(),
         )
-        .into_response();
-    }
-    let mut response = next.run(request).await;
+        .into_response()
+    } else {
+        next.run(request).await
+    };
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
@@ -1279,6 +1280,7 @@ fn router(app: App) -> Router {
         .with_state(app.performance_app());
     Router::new()
         .route("/api/marketplace", get(marketplace::catalog))
+        .route("/api/marketplace/paypal-sdk", get(marketplace::paypal_sdk))
         .route(
             "/api/marketplace/orders",
             post(marketplace::order).layer(DefaultBodyLimit::max(1024)),
@@ -1395,6 +1397,46 @@ fn router(app: App) -> Router {
         .with_state(app)
 }
 
+fn browser_router(app: App, ui: PathBuf) -> Router {
+    let paypal_origin = match app.marketplace.paypal_sdk_environment() {
+        Some("production") => Some("https://www.paypal.com"),
+        Some("sandbox") => Some("https://www.sandbox.paypal.com"),
+        _ => None,
+    };
+    // Permit the v6 core script and its dynamic imports, not arbitrary script hosts.
+    let csp = paypal_origin.map_or_else(
+        || CSP.to_owned(),
+        |origin| format!("default-src 'self'; script-src 'self' {origin}; style-src 'self'; connect-src 'self' {origin} https://www.paypalobjects.com; img-src 'self' data: {origin} https://www.paypalobjects.com; media-src 'self' blob:; frame-src 'self' {origin} https://www.paypalobjects.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
+    );
+    let csp = header::HeaderValue::from_str(&csp).unwrap();
+    router(app)
+        .fallback_service(ServeDir::new(ui))
+        .layer(middleware::from_fn(move |request: Request, next: Next| {
+            let csp = csp.clone();
+            async move {
+                let mut response = next.run(request).await;
+                for (key, value) in [
+                    ("x-content-type-options", "nosniff"),
+                    ("referrer-policy", "no-referrer"),
+                ] {
+                    response
+                        .headers_mut()
+                        .insert(header::HeaderName::from_static(key), value.parse().unwrap());
+                }
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_SECURITY_POLICY, csp);
+                if paypal_origin.is_some() {
+                    response.headers_mut().insert(
+                        header::HeaderName::from_static("cross-origin-opener-policy"),
+                        "same-origin-allow-popups".parse().unwrap(),
+                    );
+                }
+                response
+            }
+        }))
+}
+
 async fn detach_and_wait(app: &App) {
     tokio::join!(computeruse::shutdown(app), async {
         let groups = [&app.jobs, &app.performance_state.jobs];
@@ -1421,6 +1463,28 @@ async fn detach_and_wait(app: &App) {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
+}
+
+fn load_auth_token(
+    path: Option<PathBuf>,
+    root: &FsPath,
+    ui: &FsPath,
+) -> std::result::Result<String, &'static str> {
+    let Some(path) = path else {
+        return Ok(format!(
+            "{}{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        ));
+    };
+    let error = "Could not load SPEC_AUTH_TOKEN_FILE: expected an existing private file containing 64 lowercase hex bytes with optional LF";
+    let file = settings::PrivateFile::open(path, root, ui).map_err(|_| error)?;
+    let bytes = file.load_bounded(65).map_err(|_| error)?.ok_or(error)?;
+    let token = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+    if token.len() != 64 || !token.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(error);
+    }
+    String::from_utf8(token.to_vec()).map_err(|_| error)
 }
 
 #[tokio::main]
@@ -1454,6 +1518,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     )?));
     let completion = Completion::from_env();
     let ui = std::env::var("SPEC_UI_DIR").unwrap_or_else(|_| "../frontend/dist".into());
+    let token_file = std::env::var_os("SPEC_AUTH_TOKEN_FILE").map(PathBuf::from);
+    let external_auth = token_file.is_some();
+    let token = load_auth_token(token_file, &root, FsPath::new(&ui))?;
     let settings = Arc::new(settings::Store::from_env(
         &root,
         FsPath::new(&ui),
@@ -1478,7 +1545,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let app = App {
         marketplace: Arc::new(marketplace::Store::from_env(&settings)?),
         root,
-        token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+        token,
         remote,
         computeruse,
         completion,
@@ -1499,11 +1566,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "4780".into())
         .parse()?;
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
-    println!(
-        "Spec: http://127.0.0.1:{}/#token={}",
-        listener.local_addr()?.port(),
-        app.token
-    );
+    if external_auth {
+        println!("Spec: http://127.0.0.1:{}/", listener.local_addr()?.port());
+        println!(
+            "Access token: external auth configuration (SPEC_AUTH_TOKEN_FILE); token not printed."
+        );
+    } else {
+        println!(
+            "Spec: http://127.0.0.1:{}/#token={}",
+            listener.local_addr()?.port(),
+            app.token
+        );
+    }
     println!("Workspace: {}", app.root.display());
     if app.ai_completion().is_some() {
         println!("AI chat and ghost text: enabled");
@@ -1525,23 +1599,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         );
     }
     let queue_worker = queued_builds::spawn(app.clone());
-    let server = router(app.clone())
-        .fallback_service(ServeDir::new(ui))
-        .layer(middleware::from_fn(
-            |request: Request, next: Next| async move {
-                let mut response = next.run(request).await;
-                for (key, value) in [
-                    ("x-content-type-options", "nosniff"),
-                    ("referrer-policy", "no-referrer"),
-                    ("content-security-policy", CSP),
-                ] {
-                    response
-                        .headers_mut()
-                        .insert(header::HeaderName::from_static(key), value.parse().unwrap());
-                }
-                response
-            },
-        ));
+    let server = browser_router(app.clone(), ui.into());
     axum::serve(listener, server)
         .with_graceful_shutdown(async move {
             let mut term =

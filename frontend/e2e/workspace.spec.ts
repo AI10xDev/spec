@@ -171,7 +171,7 @@ test("token fragments are removed and manual connections reject invalid tokens a
   const rejected = page.waitForResponse((response) => response.url().endsWith("/api/config"))
   await page.getByRole("button", { name: /Open workspace/ }).click()
   expect((await rejected).status()).toBe(401)
-  await expect(page.getByRole("alert")).toContainText("Paste the access token printed by the Rust server")
+  await expect(page.getByRole("alert")).toContainText("Provide the server access token")
   await expect(input).toBeVisible()
   await expect(page.getByRole("button", { name: "Create file" })).toBeHidden()
   await input.fill(token)

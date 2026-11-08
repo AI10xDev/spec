@@ -12,6 +12,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@paypal/paypal-js": "^11.3.0",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.9",
     "mdast-util-from-markdown": "^2.0.3",
