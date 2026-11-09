@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test"
 import type { Page } from "@playwright/test"
 import { spawn } from "node:child_process"
 import type { ChildProcess } from "node:child_process"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import type { Output } from "../src/tabs"
@@ -83,6 +83,109 @@ async function workspace(page: Page, output: (Output & { continuable?: boolean }
   if (output) await expect(page.getByLabel("Run output")).toHaveText(output.output)
   return { writes, dialogs, errors }
 }
+
+test("session PDF downloads selected logs in the workspace and standalone mobile window", async ({ page }) => {
+  const { writes, errors } = await workspace(page, running)
+  const download = page.waitForEvent("download")
+  await page.getByRole("button", { name: "Download output PDF", exact: true }).click()
+  const file = await download
+  expect(file.suggestedFilename()).toBe("first.md-prior-harness-output.pdf")
+  const content = (await readFile((await file.path())!)).toString("latin1")
+  expect(content.startsWith("%PDF-")).toBe(true)
+  expect(content).toContain("Original logs: use the recommended option?")
+  expect(content).toContain("Harness status: running")
+  expect(content).not.toContain("Saved first.md")
+  await page.getByRole("tabpanel").getByRole("button", { name: /second\.md/ }).click()
+  await expect(page.getByLabel("Run output")).toHaveText(second.output)
+  const opened = page.waitForEvent("popup")
+  await page.getByRole("button", { name: "Maximize output", exact: true }).click()
+  const popup = await opened
+  popup.on("pageerror", error => errors.push(error.message))
+  await popup.setViewportSize({ width: 390, height: 844 })
+  const detachedDownload = popup.waitForEvent("download")
+  await popup.getByRole("button", { name: "Download output PDF", exact: true }).click()
+  const detachedFile = await detachedDownload
+  expect(detachedFile.suggestedFilename()).toBe("second.md-other-harness-output.pdf")
+  const detachedContent = (await readFile((await detachedFile.path())!)).toString("latin1")
+  expect(detachedContent).toContain(second.output)
+  expect(detachedContent).not.toContain(running.output)
+  expect(await popup.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await popup.close()
+  expect(writes).toEqual([])
+  expect(errors).toEqual([])
+})
+
+test("session PDF keeps the clicked snapshot while lazy loading and switching tabs", async ({ page }) => {
+  const { writes, errors } = await workspace(page, running)
+  let release!: () => void
+  const waiting = new Promise<void>(resolve => { release = resolve })
+  await page.route("**/assets/jspdf.es.min-*.js", async route => { await waiting; await route.continue() })
+  const moduleRequest = page.waitForRequest("**/assets/jspdf.es.min-*.js")
+  const download = page.waitForEvent("download")
+  await page.getByRole("button", { name: "Download output PDF", exact: true }).click()
+  await moduleRequest
+  try {
+    await expect(page.getByRole("button", { name: "Preparing PDF...", exact: true })).toBeDisabled()
+    await page.getByRole("tabpanel").getByRole("button", { name: /second\.md/ }).click()
+    await expect(page.getByLabel("Run output")).toHaveText(second.output)
+  } finally { release() }
+  const file = await download
+  expect(file.suggestedFilename()).toBe("first.md-prior-harness-output.pdf")
+  const content = (await readFile((await file.path())!)).toString("latin1")
+  expect(content).toContain(running.output)
+  expect(content).not.toContain(second.output)
+  expect(writes).toEqual([])
+  expect(errors).toEqual([])
+})
+
+test("session PDF handles missing output and allows retry after a download error", async ({ page }) => {
+  const { writes, errors } = await workspace(page, null)
+  const button = page.getByRole("button", { name: "Download output PDF", exact: true })
+  await expect(button).toBeDisabled()
+  await page.getByRole("tabpanel").getByRole("button", { name: /second\.md/ }).click()
+  await expect(button).toBeEnabled()
+  await page.evaluate(() => {
+    const create = URL.createObjectURL
+    URL.createObjectURL = () => { URL.createObjectURL = create; throw new Error("Download fixture failure") }
+  })
+  await button.click()
+  await expect(page.getByRole("alert")).toContainText("PDF export failed: Download fixture failure")
+  await expect(button).toBeEnabled()
+  const download = page.waitForEvent("download")
+  await button.click()
+  expect((await download).suggestedFilename()).toBe("second.md-other-harness-output.pdf")
+  await expect(page.getByText("PDF export failed:", { exact: false })).toHaveCount(0)
+  expect(writes).toEqual([])
+  expect(errors).toEqual([])
+})
+
+test("session PDF exports retained and Performance output rather than the associated spec run", async ({ page }) => {
+  const { writes, errors } = await workspace(page)
+  const historical = { ...completed, id: "retained-id", output: "Retained snapshot logs", truncated: true }
+  await page.route("**/api/files/first.md/retained-runs", route => route.fulfill({ json: { runs: [{ id: historical.id, modified: 1 }], truncated: false } }))
+  await page.route("**/api/files/first.md/retained-runs/retained-id/log", route => route.fulfill({ json: historical }))
+  await page.getByRole("button", { name: "Browse retained runs", exact: true }).click()
+  await page.getByLabel("Retained runs for first.md (log updated)").selectOption(historical.id)
+  await expect(page.getByLabel("Run output")).toHaveText(historical.output)
+  const retainedDownload = page.waitForEvent("download")
+  await page.getByRole("button", { name: "Download output PDF", exact: true }).click()
+  const retainedFile = await retainedDownload
+  expect(retainedFile.suggestedFilename()).toBe("first.md-retained-id-output.pdf")
+  const content = (await readFile((await retainedFile.path())!)).toString("latin1")
+  expect(content).toContain(historical.output)
+  expect(content).toContain("Older output was truncated")
+  expect(content).not.toContain(completed.output)
+  await page.route("**/api/performance", route => route.fulfill({ json: { ...completed, id: "performance-id", name: "Performance", output: "Performance snapshot logs" } }))
+  await page.getByRole("button", { name: "Performance output", exact: true }).click()
+  await expect(page.getByLabel("Run output")).toHaveText("Performance snapshot logs")
+  const performanceDownload = page.waitForEvent("download")
+  await page.getByRole("button", { name: "Download output PDF", exact: true }).click()
+  const performanceFile = await performanceDownload
+  expect(performanceFile.suggestedFilename()).toBe("Performance-performance-id-output.pdf")
+  expect((await readFile((await performanceFile.path())!)).toString("latin1")).toContain("Performance snapshot logs")
+  expect(writes).toEqual([])
+  expect(errors).toEqual([])
+})
 
 test("live checklist follows snapshots, tab selection and standalone output without assuming completion", async ({ page }) => {
   test.setTimeout(60_000)

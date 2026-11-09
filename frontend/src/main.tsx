@@ -13,6 +13,7 @@ import { ProjectPicker } from "./project-picker"
 import { ActiveRuns } from "./active-runs"
 import { RecoveryNotice } from "./recovery-notice"
 import { OutputWindow } from "./output-window"
+import { OutputDownload } from "./output-download"
 import type { ProjectSearch } from "./project-picker"
 import "./style.css"
 import "./tab-order.css"
@@ -1017,6 +1018,7 @@ function App() {
             {outputView === "optimization" && <div className="output-controls"><button disabled={performanceBusy} onClick={() => { void recoverOptimization(); setPerformanceRefresh((value) => value + 1) }}>Recover latest Performance</button></div>}
             {tab && outputView === "file" && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>{historical ? "Chat uses the associated run, not this retained log" : "Spec + current nohup output in a separate window"}</span></div>}
             <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <><button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button><button disabled={!!loadingOutput || !!retainedView?.loading || busy || !execution} onClick={() => void browseRetained(tab.name)}>Browse retained runs</button></>}{!historical && output?.recoverable && execution && <button disabled={outputView === "optimization" && performanceBusy} onClick={() => outputView === "optimization" ? void stopPerformance() : void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={!canContinue} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
+            <OutputDownload output={output} />
             {!!Object.keys(queuedFeedback).length && <section className="build-feedback chat-composer" aria-label="Queued follow-ups">
               <strong>Queued follow-ups</strong>
               {(settings || analytics) && <span role="status">Delivery is paused while Settings or Analytics is open in the workspace. Close it to resume queued follow-ups.</span>}
