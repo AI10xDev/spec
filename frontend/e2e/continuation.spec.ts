@@ -84,6 +84,51 @@ async function workspace(page: Page, output: (Output & { continuable?: boolean }
   return { writes, dialogs, errors }
 }
 
+test("live checklist follows snapshots, tab selection and standalone output without assuming completion", async ({ page }) => {
+  test.setTimeout(60_000)
+  const firstTasks = "# Todos\n[\u2713] Implement\n[\u2022] Verify\n[ ] Document\n\n"
+  let current = { ...running, output: firstTasks }
+  const { writes, errors } = await workspace(page, current)
+  await page.route("**/api/runs/prior-harness", (route) => route.fulfill({ json: current }))
+  const checklist = page.getByRole("list", { name: "Reported build checklist" })
+  await expect(checklist.getByRole("checkbox", { name: "Implement: Completed", exact: true })).toBeChecked()
+  await expect(checklist.getByRole("checkbox", { name: "Verify: In progress", exact: true })).not.toBeChecked()
+  await expect(checklist.getByRole("checkbox", { name: "Document: Pending", exact: true })).not.toBeChecked()
+  await expect(checklist.getByRole("checkbox").first()).toBeDisabled()
+  expect(await checklist.locator(".task-checkbox").first().evaluate((node) => getComputedStyle(node).backgroundImage)).toContain("linear-gradient")
+  await page.getByRole("tabpanel").getByRole("button", { name: /second\.md/ }).click()
+  await expect(checklist).toHaveCount(0)
+  await page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button", { name: /^first\.md/ }).click()
+  await expect(checklist.getByRole("checkbox")).toHaveCount(3)
+  const opened = page.waitForEvent("popup")
+  await page.getByRole("button", { name: "Maximize output", exact: true }).click()
+  const popup = await opened
+  popup.on("pageerror", (error) => errors.push(error.message))
+  await popup.setViewportSize({ width: 390, height: 844 })
+  const detached = popup.getByRole("list", { name: "Reported build checklist" })
+  await expect(detached.getByRole("checkbox")).toHaveCount(3)
+  // A partially streamed plan is unknown until its terminating blank line arrives.
+  const revision = "# Todos\n[ ] Implement\n[\u2713] Verify\n[\u00d7] Document\n"
+  current = { ...current, output: firstTasks + revision }
+  await expect(detached).toHaveCount(0)
+  current = { ...current, output: current.output + "\n" }
+  await expect(detached.getByRole("checkbox", { name: "Implement: Pending", exact: true })).not.toBeChecked()
+  await expect(detached.getByRole("checkbox", { name: "Verify: Completed", exact: true })).toBeChecked()
+  await expect(detached.getByRole("checkbox", { name: "Document: Cancelled", exact: true })).not.toBeChecked()
+  expect(await popup.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await popup.emulateMedia({ forcedColors: "active" })
+  await expect(detached.getByRole("checkbox").first()).toHaveCSS("border-top-style", "solid")
+  current = { ...current, truncated: true }
+  await expect(detached).toHaveCount(0)
+  current = { ...current, truncated: false, status: "completed", recoverable: false }
+  await expect(popup.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "33")
+  await expect(detached.getByRole("checkbox", { name: "Implement: Pending", exact: true })).not.toBeChecked()
+  await popup.close()
+  await expect(checklist.getByRole("checkbox")).toHaveCount(3)
+  expect(writes).toEqual([])
+  expect(errors).toEqual([])
+})
+
 for (const width of [1440, 390]) {
   test(`standalone output keeps live feedback, recall and controls at ${width}px`, async ({ page }) => {
     const { writes, errors } = await workspace(page, running)

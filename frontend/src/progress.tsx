@@ -2,13 +2,15 @@ import { highlightLog } from "./highlighting"
 import type { Output } from "./tabs"
 
 type Counts = { completed: number; total: number; cancelled: number }
+type Task = { text: string; status: "pending" | "in_progress" | "completed" | "cancelled" }
+const taskStates = { pending: "Pending", in_progress: "In progress", completed: "Completed", cancelled: "Cancelled" }
 
 // Read only complete CLI task-list snapshots, not checkboxes in prose/code or
 // a partially streamed list. These are agent reports, not verified completion.
-export function taskProgress(output: string): Counts | null {
+export function taskChecklist(output: string): Task[] | null {
   const lines = highlightLog(output).map((token) => token.text).join("").split("\n")
-  let latest: Counts | null = null
-  let pending: Counts | null = null
+  let latest: Task[] | null = null
+  let pending: Task[] | null = null
   let fence = ""
   for (const line of lines.slice(0, -1)) {
     const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
@@ -19,25 +21,32 @@ export function taskProgress(output: string): Counts | null {
     if (delimiter) { fence = delimiter[1]; pending = null; continue }
     if (line.trimEnd() === "# Todos") {
       latest = null
-      pending = { completed: 0, total: 0, cancelled: 0 }
+      pending = []
     } else if (pending) {
       if (!line.trim()) {
-        latest = pending.total ? pending : null
+        latest = pending.length ? pending : null
         pending = null
         continue
       }
-      const task = /^\[([ \u2713\u2022\u00d7])\] \S/.exec(line)
+      const task = /^\[([ \u2713\u2022\u00d7])\] (\S.*)$/.exec(line)
       if (!task) { pending = null; continue }
-      pending.total++
-      if (task[1] === "\u2713") pending.completed++
-      if (task[1] === "\u00d7") pending.cancelled++
+      pending.push({ text: task[2], status: task[1] === "\u2713" ? "completed" : task[1] === "\u2022" ? "in_progress" : task[1] === "\u00d7" ? "cancelled" : "pending" })
     }
   }
   return latest
 }
 
+function countsFor(tasks: Task[] | null): Counts | null {
+  return tasks ? { completed: tasks.filter((task) => task.status === "completed").length, total: tasks.length, cancelled: tasks.filter((task) => task.status === "cancelled").length } : null
+}
+
+export function taskProgress(output: string): Counts | null {
+  return countsFor(taskChecklist(output))
+}
+
 export function BuildProgress({ output }: { output: Output }) {
-  const counts = output.truncated ? null : taskProgress(output.output)
+  const tasks = output.truncated ? null : taskChecklist(output.output)
+  const counts = countsFor(tasks)
   const percent = counts ? Math.floor(100 * counts.completed / counts.total) : undefined
   const unavailable = output.transportUnavailable || output.status.startsWith("unavailable")
   const running = output.status === "running" && !unavailable
@@ -54,6 +63,13 @@ export function BuildProgress({ output }: { output: Output }) {
       <div className="build-progress-fill" style={{ width: counts ? `${percent}%` : running ? "35%" : "0%" }} />
     </div>
     <p aria-live="polite" aria-atomic="true">{state} {detail}</p>
+    {tasks && <ul className="build-checklist" aria-label="Reported build checklist" aria-live="polite">
+      {tasks.map((task, index) => <li key={index} data-status={task.status}>
+        <span className="task-checkbox" role="checkbox" aria-checked={task.status === "completed"} aria-disabled="true" aria-label={`${task.text}: ${taskStates[task.status]}`} />
+        <span className="task-text">{task.text}</span>
+        <span className="task-state">{taskStates[task.status]}</span>
+      </li>)}
+    </ul>}
     <small>Agent-reported tasks, not verified spec completion. Run: {output.id}</small>
   </section>
 }

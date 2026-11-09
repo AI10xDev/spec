@@ -1,6 +1,6 @@
 import { useEffect, useEffectEvent, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
-import { dirty, openTab, savedTab } from "./tabs"
+import { dirty, openTab, reorderTab, savedTab } from "./tabs"
 import type { Document, Output as RunOutput, Tab } from "./tabs"
 import { Editor } from "./editor"
 import { Chat } from "./chat"
@@ -17,6 +17,7 @@ import { RecoveryNotice } from "./recovery-notice"
 import { OutputWindow } from "./output-window"
 import type { ProjectSearch } from "./project-picker"
 import "./style.css"
+import "./tab-order.css"
 
 type Entry = { name: string; modified: number; bytes: number }
 type Repository = { connected: boolean; dirty: boolean; directory: string | null; model: string }
@@ -54,6 +55,8 @@ function App() {
   const [complete, setComplete] = useState(true)
   const [files, setFiles] = useState<Entry[]>([])
   const [tabs, setTabs] = useState<Tab[]>([])
+  const [tabDrag, setTabDrag] = useState<{ name: string; target: string } | null>(null)
+  const reorderedFocus = useRef<HTMLButtonElement | null>(null)
   const [active, setActive] = useState("")
   const navigation = useRef(0)
   const [section, setSection] = useState("history")
@@ -109,6 +112,14 @@ function App() {
   const log = useRef<HTMLPreElement>(null)
   const chatWindows = useRef(new Map<Window, string>())
   const tab = tabs.find((item) => item.name === active)
+
+  useEffect(() => {
+    const button = reorderedFocus.current
+    reorderedFocus.current = null
+    if (!button?.isConnected) return
+    button.focus({ preventScroll: true })
+    button.scrollIntoView({ block: "nearest", inline: "nearest" })
+  }, [tabs])
 
   useEffect(() => {
     if (featureReview || !featureReviewOpener.current?.isConnected) return
@@ -943,13 +954,49 @@ function App() {
         <div className="sidebar-footer">One workspace. Many ideas.<br /><span>Files are saved locally, not in the browser.</span></div>
       </aside>
       <main className="editor-area">
-        <nav className="editor-tabs" aria-label="Editor tabs">
-          {tabs.map((item) => <div className={`editor-tab ${item.name === active ? "active" : ""}`} key={item.name}>
-            <button onClick={() => selectTab(item.name)} aria-current={item.name === active ? "page" : undefined}>{item.name}{dirty(item) ? " •" : ""}</button>
+        <nav className="editor-tabs" aria-label="Editor tabs" onDragOver={(event) => {
+          event.preventDefault()
+          if (!tabDrag) event.dataTransfer.dropEffect = "none"
+        }} onDrop={(event) => { event.preventDefault(); setTabDrag(null) }}>
+          {tabs.map((item, index) => <div className={`editor-tab ${item.name === active ? "active" : ""}${tabDrag?.name === item.name ? " tab-dragging" : ""}${tabDrag?.target === item.name ? tabs.findIndex((tab) => tab.name === tabDrag.name) < index ? " tab-drop-after" : " tab-drop-before" : ""}`} key={item.name}
+            onDragOver={(event) => {
+              if (!tabDrag || !event.dataTransfer.types.includes("application/x-spec-tab")) return
+              event.preventDefault()
+              event.dataTransfer.dropEffect = "move"
+              const target = item.name === tabDrag.name ? "" : item.name
+              if (tabDrag.target !== target) setTabDrag({ ...tabDrag, target })
+            }} onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setTabDrag((drag) => drag ? { ...drag, target: "" } : null)
+            }} onDrop={(event) => {
+              event.preventDefault()
+              if (tabDrag && event.dataTransfer.getData("application/x-spec-tab") === tabDrag.name) {
+                setTabs((items) => reorderTab(items, tabDrag.name, item.name))
+              }
+              setTabDrag(null)
+            }}>
+            <button draggable onDragStart={(event) => {
+              event.dataTransfer.effectAllowed = "move"
+              event.dataTransfer.setData("application/x-spec-tab", item.name)
+              setTabDrag({ name: item.name, target: "" })
+            }} onDragEnd={() => setTabDrag(null)}
+              aria-describedby={tabs.length > 1 ? "tab-order-help" : undefined} aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight"
+              onKeyDown={(event) => {
+                if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229 || !["ArrowLeft", "ArrowRight"].includes(event.key)) return
+                event.preventDefault()
+                const target = tabs[index + (event.key === "ArrowLeft" ? -1 : 1)]
+                if (!target) return
+                reorderedFocus.current = event.currentTarget
+                setTabs((items) => reorderTab(items, item.name, target.name))
+              }} onClick={() => selectTab(item.name)} aria-current={item.name === active ? "page" : undefined}>{item.name}{dirty(item) ? " •" : ""}</button>
             <button className="close" aria-label={`Close ${item.name}`} disabled={saving?.name === item.name} onClick={() => close(item)}>×</button>
           </div>)}
           {!tabs.length && <span className="empty-tabs">Open a saved file or create something new</span>}
         </nav>
+        {tabs.length > 1 && <div className="tab-order-tools">
+          <span id="tab-order-help">Drag tabs to reorder, or focus a tab and use Alt+Left/Right. Move the active tab:</span>
+          <button aria-label="Move active tab left" disabled={tabs[0]?.name === active} onClick={() => setTabs((items) => reorderTab(items, active, items[items.findIndex((item) => item.name === active) - 1]?.name ?? ""))}>Move left</button>
+          <button aria-label="Move active tab right" disabled={tabs.at(-1)?.name === active} onClick={() => setTabs((items) => reorderTab(items, active, items[items.findIndex((item) => item.name === active) + 1]?.name ?? ""))}>Move right</button>
+        </div>}
         {error && <div role="alert" className="error">{error}<button aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
         {performanceError && !performance && <div role="alert" className="error">{performanceError}<button aria-label="Dismiss Performance error" onClick={() => setPerformanceError("")}>×</button></div>}
         <div className="panes">
