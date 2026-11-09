@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { dirty, openTab, savedTab, recordEdit, stepHistory, type EditorHistory, type EditorSnapshot } from "./tabs"
+import { dirty, openTab, reorderTab, savedTab, recordEdit, stepHistory, type EditorHistory, type EditorSnapshot } from "./tabs"
 
 const document = { name: "idea.md", content: "original", revision: "1" }
 
@@ -40,6 +40,30 @@ describe("editor tabs", () => {
 
   it("treats an empty new file as unsaved", () => {
     expect(dirty({ name: "new.md", content: "", saved: "", revision: null })).toBe(true)
+  })
+
+  it("reorders in both directions without changing document identity or unsaved buffers", () => {
+    const tabs = [
+      { ...document, content: "unsaved", saved: document.content },
+      { ...document, name: "second.md", saved: document.content },
+      { name: "new.md", content: "draft", saved: "", revision: null },
+    ]
+    const right = reorderTab(tabs, "idea.md", "new.md")
+    expect(right.map((tab) => tab.name)).toEqual(["second.md", "new.md", "idea.md"])
+    expect(right[0]).toBe(tabs[1])
+    expect(right[1]).toBe(tabs[2])
+    expect(right[2]).toBe(tabs[0])
+    expect(right.map(dirty)).toEqual([false, true, true])
+    expect(reorderTab(right, "idea.md", "second.md")).toEqual(tabs)
+    expect(tabs.map((tab) => tab.name)).toEqual(["idea.md", "second.md", "new.md"])
+  })
+
+  it("ignores self moves and missing or closed drag sources and targets", () => {
+    const tabs = openTab([], document)
+    for (const [name, target] of [[document.name, document.name], ["external.md", document.name], [document.name, "closed.md"]]) {
+      expect(reorderTab(tabs, name, target)).toBe(tabs)
+    }
+    expect(reorderTab([], document.name, "other.md")).toEqual([])
   })
 })
 

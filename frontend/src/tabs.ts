@@ -8,6 +8,15 @@ export function openTab(tabs: Tab[], document: Document): Tab[] {
   return [...tabs, { ...document, saved: document.content }]
 }
 
+export function reorderTab(tabs: Tab[], name: string, target: string): Tab[] {
+  const from = tabs.findIndex((tab) => tab.name === name)
+  const to = tabs.findIndex((tab) => tab.name === target)
+  if (from < 0 || to < 0 || from === to) return tabs
+  const next = [...tabs]
+  next.splice(to, 0, ...next.splice(from, 1))
+  return next
+}
+
 export function savedTab(tabs: Tab[], document: Document): Tab[] {
   // Edits typed during a save remain dirty against the snapshot acknowledged by the server.
   return tabs.map((tab) => tab.name === document.name

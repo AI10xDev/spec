@@ -345,6 +345,20 @@ input::placeholder { color: var(--subtle); opacity: 1; }
 .build-progress-track.indeterminate .build-progress-fill { animation: build-activity 1.8s ease-in-out infinite alternate; }
 .build-progress p { margin: 9px 0 4px; color: var(--muted); line-height: 1.5; }
 .build-progress small { color: var(--muted); overflow-wrap: anywhere; }
+.build-checklist { list-style: none; margin: 12px 0; padding: 0; max-height: 210px; overflow-y: auto; }
+.build-checklist li { display: flex; align-items: flex-start; gap: 9px; padding: 8px 2px; border-bottom: 1px solid var(--border); line-height: 1.5; }
+.task-checkbox { position: relative; flex: 0 0 20px; height: 20px; border: 2px solid transparent; border-radius: 6px; background: linear-gradient(var(--surface), var(--surface)) padding-box, var(--rainbow) border-box; }
+.task-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.task-state { flex-shrink: 0; font-size: 10px; color: var(--muted); padding-top: 2px; }
+.build-checklist [data-status="completed"] .task-checkbox { background: var(--rainbow); }
+.build-checklist [data-status="completed"] .task-checkbox::after { content: ""; position: absolute; left: 5px; top: 2px; width: 5px; height: 9px; border: solid #111; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.build-checklist [data-status="in_progress"] .task-checkbox::after { content: ""; position: absolute; inset: 4px; border-radius: 50%; background: var(--text); }
+.build-checklist [data-status="cancelled"] .task-checkbox::after { content: ""; position: absolute; inset: 7px 2px; background: var(--muted); transform: rotate(-45deg); }
+@media (forced-colors: active) {
+  .task-checkbox { border-color: CanvasText; }
+  .build-checklist [data-status="completed"] .task-checkbox::after { border-color: CanvasText; }
+  .build-checklist [data-status="in_progress"] .task-checkbox::after, .build-checklist [data-status="cancelled"] .task-checkbox::after { background: CanvasText; forced-color-adjust: none; }
+}
 @keyframes build-activity { from { transform: translateX(0); } to { transform: translateX(185%); } }
 @media (prefers-reduced-motion: reduce) {
   .build-progress-fill { transition: none; }

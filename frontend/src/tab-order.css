@@ -1,0 +1,14 @@
+.editor-tab button[draggable] { cursor: grab; }
+.editor-tab.tab-dragging { opacity: .55; }
+.editor-tab.tab-drop-before { box-shadow: inset 3px 0 var(--text); }
+.editor-tab.tab-drop-after { box-shadow: inset -3px 0 var(--text); }
+.tab-order-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.tab-order-tools span { flex: 1 1 220px; color: var(--muted); font-size: 11px; }
+.tab-order-tools button { padding: 6px 10px; font-size: 11px; }
+@media (pointer: coarse), (max-width: 600px) {
+  .tab-order-tools button { min-height: 44px; }
+}
+@media (forced-colors: active) {
+  .editor-tab.tab-drop-before { border-left: 3px solid Highlight; }
+  .editor-tab.tab-drop-after { border-right: 3px solid Highlight; }
+}

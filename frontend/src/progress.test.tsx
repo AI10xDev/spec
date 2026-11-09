@@ -1,12 +1,36 @@
 import { describe, expect, it } from "vitest"
 import { renderToStaticMarkup } from "react-dom/server"
-import { BuildProgress, taskProgress } from "./progress"
+import { BuildProgress, taskChecklist, taskProgress } from "./progress"
 import type { Output } from "./tabs"
 
 const tasks = "# Todos\n[\u2713] Implement\n[\u2022] Verify\n[ ] Document\n\n"
 const output: Output = { id: "run-a", name: "foo.md", status: "running", output: tasks, truncated: false, recoverable: true }
 
 describe("reported build progress", () => {
+  it("retains task text and all four statuses from the latest complete snapshot", () => {
+    expect(taskChecklist(tasks + "# Todos\n[ ] Reopened\n[\u2022] Working\n[\u2713] Done\n[\u00d7] Dropped\n\n")).toEqual([
+      { text: "Reopened", status: "pending" },
+      { text: "Working", status: "in_progress" },
+      { text: "Done", status: "completed" },
+      { text: "Dropped", status: "cancelled" },
+    ])
+    expect(taskChecklist(tasks + "# Todos\n[\u2713] Partial\n")).toBeNull()
+  })
+
+  it("renders read-only per-item checkboxes and escapes reported task text", () => {
+    const html = renderToStaticMarkup(<BuildProgress output={{ ...output, output: tasks + "# Todos\n[\u2713] <script>alert(1)</script>\n[\u00d7] Dropped\n\n" }} />)
+    expect(html).toContain('aria-label="Reported build checklist"')
+    expect(html).toContain('aria-checked="true" aria-disabled="true"')
+    expect(html).toContain('aria-checked="false" aria-disabled="true"')
+    expect(html).toContain('data-status="cancelled"')
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;")
+    expect(html).not.toContain("<script>")
+    expect(html).not.toContain(">Implement<")
+    for (const change of [{ truncated: true }, { output: "No reported tasks" }]) {
+      expect(renderToStaticMarkup(<BuildProgress output={{ ...output, ...change }} />)).not.toContain('role="checkbox"')
+    }
+  })
+
   it("counts the latest complete CLI task list and allows revised plans to decrease progress", () => {
     expect(taskProgress(tasks)).toEqual({ completed: 1, total: 3, cancelled: 0 })
     expect(taskProgress(tasks + "# Todos\n[\u2713] Implement\n[\u2713] Verify\n\n")).toEqual({ completed: 2, total: 2, cancelled: 0 })
