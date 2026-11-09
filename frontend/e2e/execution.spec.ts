@@ -489,6 +489,8 @@ test("load nohup output reports a missing directory and browses retained logs wi
   const output = page.getByLabel("Run output")
   await expect(output).not.toContainText("Fresh from disk")
   await editor.fill("Unsaved editor buffer")
+  // Isolate log recovery from focused autosave clearing its transient alerts.
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")))
   await load.click()
   await expect(output).toContainText("Fresh from disk, not cached output. <script>alert(1)</script>")
   await expect(page.getByRole("status")).toHaveText("Loaded log-file.md.out")
