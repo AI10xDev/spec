@@ -84,6 +84,117 @@ async function workspace(page: Page, output: (Output & { continuable?: boolean }
   return { writes, dialogs, errors }
 }
 
+for (const width of [1440, 390]) {
+  test(`standalone output keeps live feedback, recall and controls at ${width}px`, async ({ page }) => {
+    const { writes, errors } = await workspace(page, running)
+    let current = running
+    await page.route("**/api/runs/prior-harness", (route) => route.fulfill({ json: current }))
+    await page.route("**/api/runs/prior-harness/continue", (route) => route.fulfill({ json: { id: "window-child" } }))
+    await page.route("**/api/runs/window-child", (route) => route.fulfill({ json: { ...completed, id: "window-child", output: "Follow-up finished in standalone window" } }))
+    const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+    const message = "  Keep the exact draft.\nAnd this line."
+    await feedback.fill(message)
+    await page.getByLabel("Follow output").uncheck()
+    const opened = page.waitForEvent("popup")
+    await page.getByRole("button", { name: "Maximize output", exact: true }).click()
+    const popup = await opened
+    popup.on("pageerror", (error) => errors.push(error.message))
+    await popup.setViewportSize({ width, height: 900 })
+    await expect(popup).toHaveTitle("Output & logs | Spec")
+    await expect(page.getByLabel("Run output")).toHaveCount(0)
+    await expect(popup.getByLabel("Run output")).toHaveText(running.output)
+    await expect(popup.getByRole("region", { name: "Spec editing pane" })).toHaveCount(0)
+    await expect(popup.getByRole("button", { name: "Stop run", exact: true })).toBeVisible()
+    await expect(popup.getByLabel("Follow output")).not.toBeChecked()
+    const remoteFeedback = popup.getByRole("textbox", { name: "Feedback to build session" })
+    await expect(remoteFeedback).toHaveValue(message)
+    await expect(popup.locator(".output-window-content")).toHaveCSS("height", "900px")
+    expect(await popup.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await remoteFeedback.press("Enter")
+    await expect(popup.getByRole("region", { name: "Queued follow-ups" })).toContainText(message)
+    expect(writes).toEqual([])
+    await page.getByRole("button", { name: "Settings", exact: true }).click()
+    current = { ...completed, output: "Parent successfully finalized" }
+    await expect(popup.getByLabel("Run output")).toHaveText(current.output)
+    await expect(popup.getByRole("region", { name: "Queued follow-ups" })).toContainText("Delivery is paused")
+    expect(writes).toEqual([])
+    await page.getByRole("button", { name: "Back to workspace" }).click()
+    await expect(popup.getByLabel("Run output")).toHaveText("Follow-up finished in standalone window")
+    await remoteFeedback.press("ArrowUp")
+    await expect(remoteFeedback).toHaveValue(message)
+    await popup.getByRole("button", { name: "Feature review", exact: true }).click()
+    await expect(page.getByRole("dialog", { name: "Feature review", exact: true })).toBeVisible()
+    await page.getByRole("button", { name: "Close feature review" }).click()
+    await expect(popup.getByRole("button", { name: "Feature review", exact: true })).toBeFocused()
+    await popup.getByRole("button", { name: "Restore output", exact: true }).click()
+    await expect.poll(() => popup.isClosed()).toBe(true)
+    await expect(feedback).toHaveValue(message)
+    await expect(page.getByLabel("Run output")).toHaveText("Follow-up finished in standalone window")
+    await expect(page.getByRole("button", { name: "Maximize output", exact: true })).toBeFocused()
+    expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: { message } }])
+    expect(errors).toEqual([])
+  })
+}
+
+test("closing or reloading standalone output restores the same draft and current file", async ({ page }) => {
+  const { writes, errors } = await workspace(page)
+  for (const reload of [false, true]) {
+    const opened = page.waitForEvent("popup")
+    await page.getByRole("button", { name: "Maximize output", exact: true }).click()
+    const popup = await opened
+    await expect(popup.getByRole("button", { name: "Restore output", exact: true })).toBeVisible()
+    await page.getByRole("tabpanel").getByRole("button", { name: /second\.md/ }).click()
+    await expect(popup.getByLabel("Run output")).toHaveText(second.output)
+    await popup.getByRole("textbox", { name: "Feedback to build session" }).fill("Still an unsent draft")
+    if (reload) {
+      // The window contains a live portal, not another workspace; reload restores it to its owner.
+      await popup.reload().catch(() => { /* Restoration can close the page during navigation. */ })
+    } else await popup.close()
+    await expect.poll(() => popup.isClosed()).toBe(true)
+    await expect(page.getByRole("textbox", { name: "Feedback to build session" })).toHaveValue("Still an unsent draft")
+    await expect(page.getByLabel("Run output")).toHaveText(second.output)
+  }
+  expect(writes).toEqual([])
+  expect(errors).toEqual([])
+})
+
+test("blocked output popup leaves the inline panel and draft usable", async ({ page }) => {
+  const { writes, errors } = await workspace(page)
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  await feedback.fill("Do not lose this")
+  await page.evaluate(() => { window.open = () => null })
+  await page.getByRole("button", { name: "Maximize output", exact: true }).click()
+  await expect(page.getByRole("alert")).toContainText("Allow popups")
+  await expect(page.getByLabel("Run output")).toHaveText(completed.output)
+  await expect(feedback).toHaveValue("Do not lose this")
+  expect(writes).toEqual([])
+  expect(errors).toEqual([])
+})
+
+test("standalone errors retain drafts, parent restore works, and workspace reload closes the child", async ({ page }) => {
+  const { writes, errors } = await workspace(page)
+  await page.route("**/api/runs/prior-harness/continue", (route) => route.fulfill({ status: 409, json: { error: "Continuation unavailable" } }))
+  const opened = page.waitForEvent("popup")
+  await page.getByRole("button", { name: "Maximize output", exact: true }).click()
+  const popup = await opened
+  const feedback = popup.getByRole("textbox", { name: "Feedback to build session" })
+  await feedback.fill("Keep after failure")
+  await feedback.press("Enter")
+  await expect(popup.getByRole("alert")).toContainText("Continuation unavailable")
+  await expect(feedback).toHaveValue("Keep after failure")
+  await page.getByRole("button", { name: "Restore output here", exact: true }).click()
+  await expect.poll(() => popup.isClosed()).toBe(true)
+  await expect(page.getByRole("textbox", { name: "Feedback to build session" })).toHaveValue("Keep after failure")
+  const reopened = page.waitForEvent("popup")
+  await page.getByRole("button", { name: "Maximize output", exact: true }).click()
+  const child = await reopened
+  await expect(child.getByLabel("Run output")).toHaveText(completed.output)
+  await page.reload()
+  await expect.poll(() => child.isClosed()).toBe(true)
+  expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: { message: "Keep after failure" } }])
+  expect(errors).toEqual([])
+})
+
 for (const scenario of [
   { name: "active", output: { ...completed, status: "running", recoverable: true } },
   { name: "failed", output: { ...completed, status: "failed (exit status: 7)" } },
@@ -263,6 +374,13 @@ test("feedback stays scoped to its run, locks duplicate submissions, and never s
   await expect(page.getByLabel("Run output")).toHaveText("Feedback applied")
   await expect(feedback).toHaveValue("")
   await expect(page.getByRole("textbox", { name: "Edit first.md" })).toHaveValue("Unsaved spec")
+  await feedback.press("ArrowUp")
+  await expect(feedback).toHaveValue(message)
+  await page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button", { name: /^second\.md/ }).click()
+  await expect(feedback).toHaveValue("Second session draft")
+  await feedback.fill("")
+  await feedback.press("ArrowUp")
+  await expect(feedback).toHaveValue("")
   expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: { message } }])
   expect(errors).toEqual([])
 })
@@ -314,8 +432,9 @@ test("queued Enter guards duplicates, dispatches the original background run, an
   await expect(queue.locator("pre")).toHaveCount(1)
   await expect(queue.locator("pre")).toHaveJSProperty("textContent", message)
   await expect(feedback).toHaveValue("")
-  // This is a new draft even though its text matches the queued message exactly.
-  await feedback.fill(message)
+  // Recalling queued feedback creates a new draft without submitting it.
+  await feedback.press("ArrowUp")
+  await expect(feedback).toHaveValue(message)
   await feedback.press("Enter")
   await expect(feedback).toHaveValue(message)
   await expect(page.getByRole("button", { name: "Queue follow-up", exact: true })).toBeDisabled()
@@ -679,16 +798,54 @@ test("feedback Enter submits a second follow-up using the newly returned run ID"
   await feedback.press("Enter")
   await expect(page.getByLabel("Run output")).toHaveText("First follow-up completed")
   await expect(feedback).toHaveValue("")
+  await feedback.press("ArrowUp")
+  await expect(feedback).toHaveValue("Use option two")
   await feedback.fill("Now add the regression test")
   await expect(page.getByRole("button", { name: "Send & continue" })).toBeEnabled()
   await feedback.press("Enter")
   await expect(page.getByLabel("Run output")).toHaveText("Second follow-up completed")
   await expect(feedback).toHaveValue("")
+  await feedback.press("ArrowUp")
+  await expect(feedback).toHaveValue("Now add the regression test")
   expect(writes).toEqual([
     { path: "/api/runs/prior-harness/continue", method: "POST", body: { message: "Use option two" } },
     { path: "/api/runs/first-follow-up/continue", method: "POST", body: { message: "Now add the regression test" } },
   ])
   expect(dialogs).toEqual([])
+  expect(errors).toEqual([])
+})
+
+test("feedback Up Arrow preserves drafts and ignores modifiers, repeat and composition", async ({ page }) => {
+  const { writes, errors } = await workspace(page)
+  const feedback = page.getByRole("textbox", { name: "Feedback to build session" })
+  await feedback.press("ArrowUp")
+  await expect(feedback).toHaveValue("")
+  const message = "  Previous follow-up.\nKeep whitespace.\n"
+  await page.route("**/api/runs/prior-harness/continue", (route) => route.fulfill({ json: { id: "recall-child" } }))
+  await page.route("**/api/runs/recall-child", (route) => route.fulfill({ json: { ...running, id: "recall-child", output: "Working on follow-up" } }))
+  await feedback.fill(message)
+  await feedback.press("Enter")
+  await expect(page.getByLabel("Run output")).toHaveText("Working on follow-up")
+  await expect(feedback).toHaveValue("")
+  for (const shortcut of ["Shift+ArrowUp", "Control+ArrowUp", "Meta+ArrowUp", "Alt+ArrowUp"]) {
+    await feedback.press(shortcut)
+    await expect(feedback).toHaveValue("")
+  }
+  for (const ignored of [{ repeat: true }, { isComposing: true }, { keyCode: 229 }]) {
+    await feedback.dispatchEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true, ...ignored })
+    await expect(feedback).toHaveValue("")
+  }
+  for (const draft of ["New draft\nSecond line", " "]) {
+    await feedback.fill(draft)
+    await feedback.press("Control+Home")
+    await feedback.press("ArrowUp")
+    await expect(feedback).toHaveValue(draft)
+  }
+  await feedback.fill("")
+  await feedback.press("ArrowUp")
+  await expect(feedback).toHaveValue(message)
+  await expect(page.getByRole("region", { name: "Queued follow-ups" })).toBeHidden()
+  expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: { message } }])
   expect(errors).toEqual([])
 })
 

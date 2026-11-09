@@ -14,6 +14,7 @@ import { ProjectPicker } from "./project-picker"
 import { apiHeaders, gatewayAuth, publicPath } from "./deployment"
 import { ActiveRuns } from "./active-runs"
 import { RecoveryNotice } from "./recovery-notice"
+import { OutputWindow } from "./output-window"
 import type { ProjectSearch } from "./project-picker"
 import "./style.css"
 
@@ -70,6 +71,7 @@ function App() {
   const [repositoryError, setRepositoryError] = useState("")
   const [outputs, setOutputs] = useState<Record<string, Output>>({})
   const [feedback, setFeedback] = useState<Record<string, string>>({})
+  const [previousFeedback, setPreviousFeedback] = useState<Record<string, string>>({})
   const [queuedFeedback, setQueuedFeedback] = useState<Record<string, { name: string; message: string; paused?: string }>>({})
   const queuedIds = useRef(new Set<string>())
   const stoppedIds = useRef(new Set<string>())
@@ -94,6 +96,7 @@ function App() {
   const performanceButton = useRef<HTMLButtonElement>(null)
   const [analytics, setAnalytics] = useState(false)
   const [featureReview, setFeatureReview] = useState(false)
+  const featureReviewOpener = useRef<HTMLButtonElement | null>(null)
   const [marketplace, setMarketplace] = useState(false)
   const skillEditorFocus = useRef<string | null>(null)
   const [settings, setSettings] = useState(false)
@@ -106,6 +109,13 @@ function App() {
   const log = useRef<HTMLPreElement>(null)
   const chatWindows = useRef(new Map<Window, string>())
   const tab = tabs.find((item) => item.name === active)
+
+  useEffect(() => {
+    if (featureReview || !featureReviewOpener.current?.isConnected) return
+    featureReviewOpener.current.ownerDocument.defaultView?.focus()
+    featureReviewOpener.current.focus()
+    featureReviewOpener.current = null
+  }, [featureReview])
 
   useEffect(() => {
     if (marketplace || active !== skillEditorFocus.current) return
@@ -741,6 +751,7 @@ function App() {
     if (!canQueueFeedback || stoppedIds.current.has(output.id)) return
     queuedIds.current.add(output.id)
     setQueuedFeedback((items) => ({ ...items, [output.id]: { name: output.name, message } }))
+    setPreviousFeedback((items) => ({ ...items, [output.id]: message }))
     setFeedback((items) => ({ ...items, [output.id]: "" }))
     setNotice(`Feedback queued for ${output.name}. Keep this page open; it sends after confirmed completion.`)
   }
@@ -761,6 +772,10 @@ function App() {
     setNotice(`Submitting ${message === undefined ? "recommendation" : "feedback"} for ${name}...`)
     try {
       const job = await api<{ id: string }>(`/runs/${id}/continue`, message === undefined ? {} : { message })
+      setPreviousFeedback((items) => {
+        const previous = message ?? items[id]
+        return previous === undefined ? items : { ...items, [id]: previous, [job.id]: previous }
+      })
       if (queuedOutput) removeQueuedFeedback(id)
       setOutputs((items) => ({ ...items, [name]: { ...job, name, output: "Starting...", status: "running", truncated: false, recoverable: true, continuable: true } }))
       if (message !== undefined) setFeedback((items) => {
@@ -975,17 +990,24 @@ function App() {
               }}>Save repo changes</button>}
             </div>}
           </section>
-          <section className="output-pane" aria-label="Output and logs pane">
-            <div className="pane-heading"><div><span className="eyebrow">02 / OUTPUT</span><h2>Output & logs</h2></div><span className="badge">{output?.transportUnavailable ? `${output.status} (connection unavailable)` : output?.status ?? "Idle"}</span></div>
+          <OutputWindow>{(windowControl, detached) => <section className="output-pane" aria-label="Output and logs pane">
+            <div className="pane-heading"><div><span className="eyebrow">02 / OUTPUT</span><h2>Output & logs</h2></div><div className="output-window-actions"><span className="badge">{output?.transportUnavailable ? `${output.status} (connection unavailable)` : output?.status ?? "Idle"}</span>{windowControl}</div></div>
+            {detached && <>
+              <p className="hint">Keep the workspace open for live output and queued follow-ups. This window follows the selected file. Close this window to restore the panel.</p>
+              {error && <div role="alert" className="error">{error}<button aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
+              {performanceError && <div role="alert" className="error">{performanceError}</div>}
+              <div className="statusbar"><span role="status">{notice || "Ready"}</span></div>
+            </>}
             <div className="output-selector" role="group" aria-label="Output view"><button aria-pressed={outputView === "file"} onClick={() => setOutputView("file")}>Current file{tab ? `: ${tab.name}` : " output"}</button><button aria-pressed={outputView === "optimization"} disabled={!optimization && !execution} onClick={() => {
               setOutputView("optimization")
               if (!optimization) void recoverOptimization()
-            }}>Performance output</button><button onClick={() => setFeatureReview(true)}>Feature review</button></div>
+            }}>Performance output</button><button onClick={(event) => { featureReviewOpener.current = event.currentTarget; window.focus(); setFeatureReview(true) }}>Feature review</button></div>
             {outputView === "optimization" && <div className="output-controls"><button disabled={performanceBusy} onClick={() => { void recoverOptimization(); setPerformanceRefresh((value) => value + 1) }}>Recover latest Performance</button></div>}
             {tab && outputView === "file" && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>{historical ? "Chat uses the associated run, not this retained log" : "Spec + current nohup output in a separate window"}</span></div>}
             <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <><button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button><button disabled={!!loadingOutput || !!retainedView?.loading || busy || !execution} onClick={() => void browseRetained(tab.name)}>Browse retained runs</button></>}{!historical && output?.recoverable && execution && <button disabled={outputView === "optimization" && performanceBusy} onClick={() => outputView === "optimization" ? void stopPerformance() : void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={!canContinue} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
             {!!Object.keys(queuedFeedback).length && <section className="build-feedback chat-composer" aria-label="Queued follow-ups">
               <strong>Queued follow-ups</strong>
+              {(settings || analytics) && <span role="status">Delivery is paused while Settings or Analytics is open in the workspace. Close it to resume queued follow-ups.</span>}
               <span>Keep this page open. One follow-up per run; sent after confirmed completion, not as live input. Cancel to replace.</span>
               {Object.entries(queuedFeedback).map(([id, queued]) => <div key={id}>
                 <strong>{queued.name}</strong>
@@ -1012,16 +1034,22 @@ function App() {
             {!historical && output && outputView === "file" && output.continuable === true && <form className="chat-composer build-feedback" onSubmit={(event) => { event.preventDefault(); submitFeedback() }}>
               <label htmlFor="build-feedback">Feedback to build session</label>
               <textarea id="build-feedback" aria-describedby="feedback-help feedback-limit feedback-shortcuts" placeholder="Answer the agent or explain what to change..." value={message} disabled={actionBusy} onChange={(event) => setFeedback((items) => ({ ...items, [output.id]: event.target.value }))} onKeyDown={(event) => {
-                if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing || event.keyCode === 229) return
+                if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing || event.keyCode === 229) return
+                if (event.key === "ArrowUp" && !event.repeat && !event.currentTarget.value && previousFeedback[output.id]) {
+                  event.preventDefault()
+                  setFeedback((items) => ({ ...items, [output.id]: previousFeedback[output.id] }))
+                  return
+                }
+                if (event.key !== "Enter") return
                 event.preventDefault()
                 if (!event.repeat) event.currentTarget.form?.requestSubmit()
               }} />
-              <span id="feedback-shortcuts">Enter to send. Shift+Enter for a new line.</span>
+              <span id="feedback-shortcuts">Enter to send. Shift+Enter for a new line. Up Arrow in an empty input recalls the previous follow-up.</span>
               <span id="feedback-limit">{new TextEncoder().encode(message).length.toLocaleString()} / 16,384 bytes</span>
               <div><span id="feedback-help">{queuedFeedback[output.id] ? "A follow-up is already queued for this run. Cancel it to submit a replacement." : canContinue ? "Continues the same session with automatic tool approval. Can modify files and incur provider costs. Editor changes are not sent." : canQueueFeedback ? "Queues for the same session after confirmed completion. Keep this page open. Automatic tool approval can modify files and incur provider costs. Editor changes are not sent." : "Waiting for a supported run. Stopped, failed and unconfirmed runs cannot be continued."}</span><button className="primary" disabled={(!canContinue && !canQueueFeedback) || !message.trim() || message.includes("\0") || new TextEncoder().encode(message).length > 16 * 1024}>{output.status === "running" ? "Queue follow-up" : "Send & continue"}</button></div>
             </form>}
             <footer className="output-footer">{output && <span>Harness: {output.status}{output.recoverable ? " (completion not confirmed)" : ""}. CLI success alone does not verify saved changes.<br /></span>}Available output only. No hidden model reasoning is requested.</footer>
-          </section>
+          </section>}</OutputWindow>
         </div>
         <div className="statusbar"><span role="status">{notice || "Ready"}</span><span id="editor-shortcuts">/ toggle completed (outside fenced code); Alt+/ type /</span><span>Autosave after 500 ms in focused window · Ctrl/Cmd+S save · Ctrl/Cmd+Enter save &amp; run · 2 MiB file limit</span></div>
       </main>

@@ -128,6 +128,15 @@ aside { width: 260px; flex-shrink: 0; background: var(--surface); border-right: 
 .editor-pane, .output-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; }
 .editor-pane { background: var(--bg); border-right: 1px solid var(--border); }
 .output-pane { background: var(--surface-deep); }
+.output-window-host, .output-window-content { display: flex; flex-direction: column; min-width: 0; min-height: 0; flex: 1; }
+.output-window-content > .output-pane { flex: 1; }
+.output-window-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.output-window-actions button { font-size: 11px; }
+.output-window-placeholder { padding: 24px; color: var(--muted); line-height: 1.6; }
+.output-window-placeholder button { margin: 0 8px 8px 0; }
+.output-window-body .output-window-content { height: 100dvh; }
+.output-window-body .output-pane { min-height: 0; max-height: none; }
+.output-window-body .output-pane .output { max-height: none; }
 .pane-heading > div { min-width: 0; }
 .pane-heading { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 26px 24px 22px; border-bottom: 1px solid var(--border); }
 .eyebrow { font: 10px ui-monospace, monospace; letter-spacing: 2px; color: var(--accent); }

@@ -143,6 +143,15 @@ test("full workspace, demo purchase and chat stay under the Basic-authenticated 
   expect(requests).toContain("/api/files/skill-code-review.md")
   await page.getByRole("tabpanel").getByRole("button", { name: /hello world\.md/ }).click()
 
+  const outputPopup = context.waitForEvent("page")
+  await page.getByRole("button", { name: "Maximize output", exact: true }).click()
+  const outputWindow = await outputPopup
+  expect(new URL(outputWindow.url()).pathname).toBe(`${prefix}/output-window.html`)
+  await expect(outputWindow.getByLabel("Run output")).toContainText("Remote execution is disabled")
+  await expect(outputWindow.locator(".output-window-content")).toHaveCSS("height", `${await outputWindow.evaluate(() => innerHeight)}px`)
+  await outputWindow.getByRole("button", { name: "Restore output", exact: true }).click()
+  await expect.poll(() => outputWindow.isClosed()).toBe(true)
+
   const popup = context.waitForEvent("page")
   await page.getByRole("button", { name: "Open session chat" }).click()
   const chat = await popup
