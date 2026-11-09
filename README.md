@@ -224,6 +224,16 @@ Report the changed files, test commands and results, and anything not checked.
 
 ### Save, Run, Or Continue?
 
+Use **Download output PDF** in **Output & logs** to download the selected session's
+available logs, including retained runs or Performance output. It also works in
+the maximized output window. The PDF captures a snapshot at click time with the
+run ID, status, export time, and warnings for incomplete or truncated output; it
+does not fetch missing history or include editor text or unsent follow-ups.
+Logs are wrapped and paginated, terminal styling is removed, and unsupported
+Unicode glyphs are represented explicitly as `[U+XXXX]`. Export runs locally in
+the browser without starting a run or saving changes. The editor's **Download**
+button still downloads the spec as text.
+
 | What you want | What to use |
 | --- | --- |
 | Keep your writing without starting work | **Save**. |
