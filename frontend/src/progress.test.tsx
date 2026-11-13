@@ -80,6 +80,17 @@ describe("reported build progress", () => {
     expect(html).toContain('aria-valuenow="33"')
   })
 
+  it("keeps reported task completion separate from successful build completion", () => {
+    const running = renderToStaticMarkup(<BuildProgress output={{ ...output, output: "# Todos\n[\u2713] Done\n\n" }} />)
+    expect(running).toContain('aria-valuenow="100"')
+    expect(running).toContain("Build in progress.")
+    expect(running).not.toContain("Build run completed.")
+    const completed = renderToStaticMarkup(<BuildProgress output={{ ...output, status: "completed", recoverable: false }} />)
+    expect(completed).toContain("Build run completed.")
+    expect(completed).toContain('aria-valuenow="33"')
+    expect(completed).toContain("1 of 3 tasks reported complete")
+  })
+
   it("marks truncated output unknown rather than treating a partial transcript as a full plan", () => {
     const html = renderToStaticMarkup(<BuildProgress output={{ ...output, truncated: true }} />)
     expect(html).not.toContain("aria-valuenow")

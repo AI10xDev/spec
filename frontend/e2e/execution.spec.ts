@@ -28,7 +28,7 @@ test.beforeAll(async () => {
 const fs = require("node:fs")
 if (process.cwd() !== ${JSON.stringify(remoteWorkspace)}) process.exit(91)
 if (process.argv.length !== 4 || process.argv[2] !== "build" || process.env.SPEC_BUILD_AUTO !== "1" || process.env.SPEC_BUILD_FOREGROUND !== "1") process.exit(90)
-if (process.env.OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS !== "1" || process.env.OPENCODE_QUESTION_AUTO_RECOMMEND !== "1") process.exit(92)
+if (process.env.SPEC_BUILD_SUPERVISED !== "1" || process.env.OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS !== "0" || process.env.OPENCODE_QUESTION_AUTO_RECOMMEND !== "0") process.exit(92)
 if ("SPEC_SESSION_DIR" in process.env || "KIBI_SPEC_SESSION" in process.env) process.exit(93)
 const content = fs.readFileSync(process.argv[3], "utf8")
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT)
@@ -47,6 +47,17 @@ fs.appendFileSync(${JSON.stringify(path.join(directory, "launches"))}, "launch\\
       process.exit(0)
     }, 50)
     setTimeout(() => process.exit(2), 15_000)
+  } else if (content.startsWith("PROGRESS\\n") && ${JSON.stringify(process.env.SPEC_E2E_PROGRESS_PRODUCER ?? "")}) {
+    const child = require("node:child_process").spawn("bun", [${JSON.stringify(process.env.SPEC_E2E_PROGRESS_PRODUCER ?? "")}, ${JSON.stringify(path.join(directory, "progress-phase"))}], { stdio: ["ignore", "pipe", "inherit"] })
+    let previous = ""
+    require("node:readline").createInterface({ input: child.stdout }).on("line", (line) => {
+      const snapshot = JSON.parse(line)
+      if (!snapshot.output.startsWith(previous)) throw new Error("Progress producer must emit cumulative coordinator output")
+      process.stdout.write(snapshot.output.slice(previous.length))
+      previous = snapshot.output
+    })
+    child.on("error", () => process.exit(1))
+    child.on("exit", (code) => process.exit(code ?? 1))
   } else if (content.startsWith("PROGRESS\\n")) {
     let previous = "0"
     setInterval(() => {
@@ -90,7 +101,7 @@ async function startServer(execution = true) {
       ...process.env,
       SPEC_WORKSPACE: workspace,
       SPEC_PORT: url ? new URL(url).port : "0",
-      SPEC_UI_DIR: path.resolve("dist"),
+      SPEC_UI_DIR: process.env.SPEC_E2E_UI_DIR ?? path.resolve("dist"),
       SPEC_COMMAND: undefined,
       SPEC_SSH_TARGET: execution ? "fixture@host" : undefined,
       SPEC_SSH_WORKSPACE: execution ? path.join(directory, "remote-project") : undefined,
@@ -139,7 +150,9 @@ test.afterAll(async () => {
   }
 })
 
-test("rainbow completion follows live task reports and resets across runs and tabs", async ({ page }) => {
+test("rainbow completion follows live task reports and resets across runs and tabs", async ({ page }, testInfo) => {
+  const pageErrors: string[] = []
+  page.on("pageerror", error => pageErrors.push(error.message))
   await writeFile(path.join(directory, "progress-phase"), "0")
   await page.goto(url)
   await page.getByRole("textbox", { name: "New filename" }).fill("progress.md")
@@ -165,6 +178,7 @@ test("rainbow completion follows live task reports and resets across runs and ta
   await expect(section.getByRole("checkbox", { name: "Verify: In progress", exact: true })).not.toBeChecked()
   await expect(section.getByRole("checkbox", { name: "Document: Pending", exact: true })).not.toBeChecked()
   expect(await bar.locator("div").evaluate((element) => getComputedStyle(element).backgroundImage)).toContain("linear-gradient")
+  await page.screenshot({ path: testInfo.outputPath("build-progress-33-desktop.png"), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
   await editor.fill("Unsaved edits do not change measured progress.")
@@ -181,9 +195,10 @@ test("rainbow completion follows live task reports and resets across runs and ta
   await expect(section.getByRole("checkbox", { checked: true })).toHaveCount(3)
   await expect(section).toContainText("Build in progress")
   await writeFile(path.join(directory, "progress-phase"), "3")
-  await expect(section).toContainText("Build turn ended")
+  await expect(section).toContainText("Build run completed")
   await expect(bar).toHaveAttribute("aria-valuenow", "100")
   await expect(run).toBeEnabled()
+  await page.screenshot({ path: testInfo.outputPath("build-progress-100-mobile.png"), fullPage: true })
 
   await writeFile(path.join(directory, "progress-phase"), "0")
   await editor.fill("PROGRESS\nA fresh session.")
@@ -196,6 +211,7 @@ test("rainbow completion follows live task reports and resets across runs and ta
   await expect(section).toContainText("Build cancelled")
   await expect(bar).not.toHaveClass(/indeterminate/)
   await expect(bar).not.toHaveAttribute("aria-valuenow")
+  expect(pageErrors).toEqual([])
 })
 
 test("enabled execution: confirmation, saved snapshot, per-file polling, completion and cancellation", async ({ page }) => {

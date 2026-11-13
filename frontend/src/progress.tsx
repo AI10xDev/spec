@@ -52,7 +52,7 @@ export function BuildProgress({ output }: { output: Output }) {
   const running = output.status === "running" && !unavailable
   const state = unavailable ? "Connection unavailable; progress may be stale."
     : running ? "Build in progress."
-    : output.status === "completed" ? "Build turn ended."
+    : output.status === "completed" ? "Build run completed."
     : `Build ${output.status}.`
   const detail = counts
     ? `${counts.completed} of ${counts.total} tasks reported complete (${percent}%)${counts.cancelled ? `; ${counts.cancelled} cancelled` : ""}.`

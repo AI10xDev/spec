@@ -162,9 +162,12 @@ For responsiveness, files over 256 Ki characters or 5,000 lines use a labeled pl
 
 #### Build progress reporting
 
-The rainbow bar above the associated build output updates with the existing live
-poll (normally every 650 ms). It counts completed tasks in the latest complete
-OpenCode CLI `# Todos` block, ignoring ANSI styling and fenced examples. Cancelled
+The rainbow bar and read-only step checklist appear above the associated build
+output and in the selected build's Active runs detail. They update with the
+existing live poll (normally every 650 ms). The bar counts completed tasks in the
+latest complete OpenCode CLI `# Todos` block, ignoring ANSI styling and fenced
+examples. The supervised runner forwards the builder's structured `todo.updated`
+snapshots into this format; supervisor tasks are not included. Cancelled
 tasks stay in the total but do not count as completed. A revised task list can
 lower the percentage; these are agent-reported tasks, not independently verified
 requirements, elapsed-time estimates, or progress inferred from editor `# ` markers.
@@ -174,6 +177,8 @@ show indeterminate activity while the build runs. Truncated output also has no
 percentage because the complete task-list context is unavailable. Activity stops
 on terminal or unavailable states; unavailable states label any last reported
 counts as potentially stale. A successful CLI exit alone never fills the bar.
+Likewise, 100% reported tasks does not mark a running process complete: the build's
+status must independently reach `completed` before the UI says "Build run completed."
 New runs and continuations start fresh, and switching files follows that file's
 run. Retained historical views, repository-save jobs, and Performance output do
 not display this build-task bar. Reduced-motion and forced-colors settings are
@@ -542,6 +547,14 @@ node --test scripts/azure-voice.test.cjs
 ```
 
 Build the debug backend and frontend assets before browser tests: the fixtures use `backend/target/debug/spec` and `frontend/dist` without rebuilding them. Run in an environment without production provider/SSH exports so inherited settings cannot enable live integrations.
+
+The active-runs, continuation and execution browser suites accept `SPEC_E2E_UI_DIR`
+for assets built into an isolated directory rather than replacing the running UI.
+The execution progress fixture also accepts `SPEC_E2E_PROGRESS_PRODUCER`: an absolute
+path to a Bun script that takes a phase-file path (0 through 3) and emits JSONL
+snapshots with cumulative CLI-formatted `output`, exiting successfully at phase 3.
+This allows the same browser test to exercise a deployed supervisor's actual task
+event renderer through the Rust API instead of the default deterministic text fixture.
 
 Browser tests start isolated real Rust servers and temporary workspaces. They cover authentication, saved files, tabs, conflicts/downloads, in-flight saves, desktop/mobile layouts, optimization controls/recovery, same-session continuation, repository saving, chat/context editing, and both voice panels. Remote-build streaming/completion/cancellation/failure uses a local SSH stand-in and the actual fixed remote scripts; providers are mocked. They never use your specs or invoke a model. Screenshots are written under `frontend/test-results/`, not over the documentation image. See the [v0.1.13 validation record](docs/releases/v0.1.13.md#validation) and the [historical validation results](docs/REVIEW.md#validation) for the original review.
 

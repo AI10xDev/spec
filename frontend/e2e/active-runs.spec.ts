@@ -14,7 +14,7 @@ test.beforeAll(async () => {
   directory = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "spec-active-runs-e2e-"))
   server = spawn(path.resolve("../backend/target/debug/spec"), [], {
     cwd: path.resolve("../backend"),
-    env: { ...process.env, SPEC_WORKSPACE: directory, SPEC_PORT: "0", SPEC_UI_DIR: path.resolve("dist"), SPEC_SSH_TARGET: undefined, SPEC_SSH_WORKSPACE: undefined, SPEC_SSH_KEY: undefined, SPEC_SSH_BINARY: undefined, SPEC_AI_ENV_FILE: "/dev/null" },
+    env: { ...process.env, SPEC_WORKSPACE: directory, SPEC_PORT: "0", SPEC_UI_DIR: process.env.SPEC_E2E_UI_DIR ?? path.resolve("dist"), SPEC_SSH_TARGET: undefined, SPEC_SSH_WORKSPACE: undefined, SPEC_SSH_KEY: undefined, SPEC_SSH_BINARY: undefined, SPEC_AI_ENV_FILE: "/dev/null" },
     stdio: ["ignore", "pipe", "pipe"],
   })
   url = await new Promise<string>((resolve, reject) => {
@@ -83,6 +83,59 @@ async function workspace(page: Page, options: { execution?: boolean; file?: type
 
 const inspector = (page: Page) => page.getByRole("region", { name: "Active runs", exact: true })
 const load = (page: Page, id = "unopened-run") => inspector(page).getByRole("button", { name: new RegExp(`Load output.*${id}`) }).click()
+
+for (const width of [1440, 390]) {
+  test(`active build checklist tracks progress, stale connections and completion at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 })
+    const { requests, errors } = await workspace(page)
+    let current = { ...detail, status: "running", output: "Starting build\n" }
+    let unavailable = false
+    await page.route("**/api/runs/unopened-run", route => unavailable
+      ? route.fulfill({ status: 502, json: { error: "SSH unavailable" } })
+      : route.fulfill({ json: current }))
+    await page.getByRole("button", { name: "Active runs", exact: true }).click()
+    await load(page)
+    const section = inspector(page).getByRole("region", { name: "Build progress for unopened.md", exact: true })
+    const bar = section.getByRole("progressbar")
+    await expect(bar).toBeVisible()
+    await expect(bar).not.toHaveAttribute("aria-valuenow")
+    await expect(bar).toHaveClass(/indeterminate/)
+    await expect(section.getByRole("checkbox")).toHaveCount(0)
+
+    current = { ...current, output: "# Todos\n[\u2713] Implement\n[\u2022] Verify\n[ ] Document\n\n" }
+    await expect(bar).toHaveAttribute("aria-valuenow", "33")
+    await expect(section).toContainText("1 of 3 tasks reported complete (33%)")
+    await expect(section.getByRole("checkbox", { name: "Implement: Completed", exact: true })).toBeChecked()
+    await expect(section.getByRole("checkbox", { name: "Verify: In progress", exact: true })).not.toBeChecked()
+    await expect(section.getByRole("checkbox", { name: "Document: Pending", exact: true })).not.toBeChecked()
+    await expect(section.getByRole("checkbox").first()).toBeDisabled()
+
+    await load(page, "deleted-run")
+    await expect(inspector(page).getByRole("progressbar")).toHaveCount(0)
+    await load(page)
+    await expect(bar).toHaveAttribute("aria-valuenow", "33")
+    unavailable = true
+    await inspector(page).getByRole("button", { name: "Check status", exact: true }).click()
+    await expect(section).toContainText("Connection unavailable; progress may be stale")
+    await expect(bar).toHaveAttribute("aria-valuenow", "33")
+    await expect(section.getByRole("checkbox")).toHaveCount(3)
+    await expect(section).not.toContainText("Build run completed")
+
+    unavailable = false
+    current = { ...current, output: "# Todos\n[\u2713] Implement\n[\u2713] Verify\n[\u2713] Document\n\n" }
+    await inspector(page).getByRole("button", { name: "Check status", exact: true }).click()
+    await expect(bar).toHaveAttribute("aria-valuenow", "100")
+    await expect(section.getByRole("checkbox", { checked: true })).toHaveCount(3)
+    await expect(section).toContainText("Build in progress.")
+    current = { ...current, status: "completed", recoverable: false }
+    await expect(section).toContainText("Build run completed.")
+    await expect(bar).toHaveAttribute("aria-valuenow", "100")
+    await expect(inspector(page).getByRole("button", { name: "Stop run", exact: true })).toHaveCount(0)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    expect(requests.filter(request => request.method !== "GET" || request.path.startsWith("/api/files/"))).toEqual([])
+    expect(errors).toEqual([])
+  })
+}
 
 for (const width of [1440, 390, 320]) {
   test(`lists unopened and deleted-file blockers without tabs or source reads at ${width}px`, async ({ page }) => {
