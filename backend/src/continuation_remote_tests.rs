@@ -48,7 +48,7 @@ async fn launch(mut command: tokio::process::Command, payload: &str) -> std::pro
 }
 
 #[test]
-fn capture_plugin_merges_config_records_first_root_synchronously_and_cleans_up() {
+fn initial_build_exports_supervisor_scope_without_capture_plugin_and_cleans_up() {
     let mut runtimes = 0;
     for runtime in ["bun", "node"] {
         let found = std::process::Command::new("bash")
@@ -65,35 +65,39 @@ fn capture_plugin_merges_config_records_first_root_synchronously_and_cleans_up()
             serde_json::json!({"plugin":["existing-plugin", "file:///custom/plugin.mjs", ["configured-plugin", {"enabled":true,"nested":[1,null]}]], "instructions":["AGENTS.md"], "model":"custom/model", "provider":{"custom":{"options":{"apiKey":"preserved"}}}}),
         ] {
             let root = tempfile::Builder::new()
-                .prefix("capture ' $; ")
+                .prefix("supervised ' $; ")
                 .tempdir()
                 .unwrap();
             let snapshot = root.path().join("snapshot.md");
             private_file(&snapshot, "unchanged snapshot");
             fs::write(root.path().join(".bash_aliases"), r#"
 alias spec=fixture_build
+cd /
+export SPEC_BUILD_SESSION_ID=ses_Inherited SPEC_BUILD_SESSION_FILE=/inherited/session-id
+export SPEC_BUILD_SUPERVISED=0 SPEC_BUILD_INVOCATION=repository-save OPENCODE_SESSION_ID=ses_Inherited
+export OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1 OPENCODE_QUESTION_AUTO_RECOMMEND=1
 fixture_build() {
+    [[ $# == 2 && $1 == build && $2 == "$HOME/snapshot.md" ]] || return 90
     "$TEST_RUNTIME" --input-type=module -e '
 import fs from "node:fs";
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
-const pluginURL = config.plugin.at(-1);
-const plugin = fileURLToPath(pluginURL);
-assert.equal(fs.statSync(plugin).mode & 0o777, 0o600);
-const session = process.env.HOME + "/session-id";
-const hook = await (await import(pluginURL)).default();
-hook.event({event:{type:"other"}});
-hook.event({event:{type:"session.created",properties:{info:{id:"ses_child",parentID:"ses_parent"}}}});
-hook.event({event:{type:"session.created",properties:{info:{id:"invalid"}}}});
+const session = process.env.SPEC_BUILD_SESSION_FILE;
+assert.equal(session, process.env.HOME + "/session-id");
+assert.equal(process.env.SPEC_BUILD_SESSION_ID, "");
+assert.equal(process.env.SPEC_BUILD_SUPERVISED, "1");
+assert.equal(process.env.SPEC_BUILD_INVOCATION, "build");
+assert.equal(process.env.OPENCODE_SESSION_ID, undefined);
+assert.equal(process.env.OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS, "0");
+assert.equal(process.env.OPENCODE_QUESTION_AUTO_RECOMMEND, "0");
+assert.equal(process.cwd(), process.env.HOME);
+assert.equal(fs.readdirSync(process.env.HOME).some(p => p.startsWith("spec-build-session.")), false);
 assert.equal(fs.existsSync(session), false);
-hook.event({event:{type:"session.created",properties:{info:{id:"ses_First123"}}}});
-assert.equal(fs.readFileSync(session, "utf8"), "ses_First123\n");
-hook.event({event:{type:"session.created",properties:{info:{id:"ses_Second"}}}});
-assert.equal(fs.readFileSync(session, "utf8"), "ses_First123\n");
+// The launcher/coordinator persists the builder ID, not a root-session plugin.
+fs.writeFileSync(session, "ses_Builder123\n", {mode:0o600, flag:"wx"});
 assert.equal(fs.statSync(session).mode & 0o777, 0o600);
 assert.equal(process.env.OPENCODE_CONFIG, "/preserved/config.json");
-process.stdout.write(JSON.stringify({config, plugin, text:fs.readFileSync(config.instructions.at(-1), "utf8")}));
+process.stdout.write(JSON.stringify({config, text:fs.readFileSync(config.instructions.at(-1), "utf8")}));
 ' || return
     return 7
 }
@@ -108,6 +112,7 @@ process.stdout.write(JSON.stringify({config, plugin, text:fs.readFileSync(config
                 ])
                 .arg(&snapshot)
                 .arg(root.path().join("ready"))
+                .current_dir(root.path())
                 .env("HOME", root.path())
                 .env("TEST_RUNTIME", executable.trim())
                 .env("OPENCODE_CONFIG_CONTENT", config.to_string())
@@ -117,16 +122,6 @@ process.stdout.write(JSON.stringify({config, plugin, text:fs.readFileSync(config
             assert_eq!(output.status.code(), Some(7), "{runtime}: {output:?}");
             let observed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             let mut expected = config;
-            let mut plugins = expected["plugin"].as_array().cloned().unwrap_or_default();
-            plugins.push(
-                observed["config"]["plugin"]
-                    .as_array()
-                    .unwrap()
-                    .last()
-                    .unwrap()
-                    .clone(),
-            );
-            expected["plugin"] = plugins.into();
             let mut instructions = expected["instructions"]
                 .as_array()
                 .cloned()
@@ -140,8 +135,11 @@ process.stdout.write(JSON.stringify({config, plugin, text:fs.readFileSync(config
             expected["instructions"] = instructions.into();
             assert_eq!(observed["config"], expected);
             assert_memory_directive(observed["text"].as_str().unwrap());
-            assert!(!Path::new(observed["plugin"].as_str().unwrap()).exists());
             assert!(!Path::new(instruction.as_str().unwrap()).exists());
+            assert_eq!(
+                fs::read_to_string(root.path().join("session-id")).unwrap(),
+                "ses_Builder123\n"
+            );
             assert_eq!(fs::read_to_string(snapshot).unwrap(), "unchanged snapshot");
         }
     }
@@ -149,7 +147,7 @@ process.stdout.write(JSON.stringify({config, plugin, text:fs.readFileSync(config
 }
 
 #[test]
-fn capture_rejects_invalid_plugin_config_before_launch_without_leaking_files() {
+fn build_rejects_invalid_plugin_config_before_launch_without_leaking_files() {
     for plugin in [
         serde_json::Value::Null,
         serde_json::json!("plugin"),
@@ -189,8 +187,8 @@ fn capture_rejects_invalid_plugin_config_before_launch_without_leaking_files() {
 #[tokio::test]
 async fn continuation_uses_explicit_saved_session_fixed_payload_and_new_build_run() {
     for definition in [
-        "alias opencode-source=fixture_engine",
-        "opencode-source() { fixture_engine \"$@\"; }",
+        "alias spec=fixture_engine",
+        "spec() { fixture_engine \"$@\"; }",
     ] {
         let root = tempfile::Builder::new()
             .prefix("continue ' $; ")
@@ -200,12 +198,18 @@ async fn continuation_uses_explicit_saved_session_fixed_payload_and_new_build_ru
         fs::write(root.path().join(".bash_aliases"), format!(r#"
 {definition}
 cd /
+export SPEC_BUILD_SESSION_ID=ses_Inherited SPEC_BUILD_SESSION_FILE=/inherited/session-id
+export SPEC_BUILD_SUPERVISED=0 SPEC_BUILD_INVOCATION=repository-save OPENCODE_SESSION_ID=ses_Inherited
+export OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1 OPENCODE_QUESTION_AUTO_RECOMMEND=1
 fixture_engine() {{
     [[ $SPEC_BUILD_FOREGROUND == 1 && $SPEC_BUILD_AUTO == 1 ]] || return 90
-    [[ $OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS == 1 && $OPENCODE_QUESTION_AUTO_RECOMMEND == 1 ]] || return 91
-    [[ ! -v SPEC_SESSION_DIR && ! -v KIBI_SPEC_SESSION ]] || return 92
+    [[ $OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS == 0 && $OPENCODE_QUESTION_AUTO_RECOMMEND == 0 ]] || return 91
+    [[ ! -v SPEC_SESSION_DIR && ! -v KIBI_SPEC_SESSION && ! -v OPENCODE_SESSION_ID ]] || return 92
     [[ $PWD == "$HOME" ]] || return 93
-    printf "%s\0" "$@"
+    [[ $# == 2 && $1 == build && $2 == /*/snapshot.md ]] || return 94
+    [[ $SPEC_BUILD_SESSION_FILE == "${{2%/*}}/session-id" && $SPEC_BUILD_SESSION_ID == ses_Original123 ]] || return 95
+    [[ $SPEC_BUILD_SUPERVISED == 1 && $SPEC_BUILD_INVOCATION == build ]] || return 96
+    cat -- "$2"
 }}
 "#)).unwrap();
         let id = Uuid::new_v4().to_string();
@@ -216,22 +220,7 @@ fixture_engine() {{
         )
         .await;
         assert!(output.status.success(), "{output:?}");
-        let args: Vec<_> = output.stdout.split(|b| *b == 0).collect();
-        assert_eq!(
-            args,
-            vec![
-                b"run".as_slice(),
-                b"--dir",
-                remote.directory.as_bytes(),
-                b"--session",
-                b"ses_Original123",
-                b"--agent",
-                b"build",
-                b"--",
-                PROMPT.as_bytes(),
-                b""
-            ]
-        );
+        assert_eq!(output.stdout, PROMPT.as_bytes());
         let run = root.path().join(format!(".spec-runs/run-{id}"));
         assert!(!run.join("snapshot.md").exists());
         assert_eq!(fs::read_to_string(run.join("status")).unwrap(), "0\n");
@@ -256,24 +245,25 @@ fixture_engine() {{
 }
 
 #[tokio::test]
-async fn initial_build_capture_survives_snapshot_cleanup_and_continues_same_session() {
+async fn initial_builder_session_survives_snapshot_cleanup_and_continues_same_session() {
     let root = tempfile::tempdir().unwrap();
     let remote = remote_fixture(root.path(), &root.path().join("unused"));
-    fs::write(root.path().join(".bash_aliases"), r#"
+    fs::write(
+        root.path().join(".bash_aliases"),
+        r#"
 spec() {
-    runtime=$(type -P bun || type -P node)
-    "$runtime" --input-type=module -e '
-const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
-const hook = await (await import(config.plugin.at(-1))).default();
-hook.event({event:{type:"session.created",properties:{info:{id:"ses_InitialRoot"}}}});
-process.stdout.write("Recommended option: continue the implementation.");
-'
+    [[ $# == 2 && $1 == build && $SPEC_BUILD_SUPERVISED == 1 ]] || return 90
+    if [[ -z $SPEC_BUILD_SESSION_ID ]]; then
+        printf 'ses_InitialBuilder\n' > "$SPEC_BUILD_SESSION_FILE"
+        printf 'Recommended option: continue the implementation.'
+    else
+        [[ $SPEC_BUILD_SESSION_ID == ses_InitialBuilder ]] || return 91
+        cat -- "$2"
+    fi
 }
-opencode-source() {
-    [[ $# == 9 && $1 == run && $4 == --session && $5 == ses_InitialRoot && $6 == --agent && $7 == build && $8 == -- ]] || return 90
-    printf '%s' "$9"
-}
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     let id = Uuid::new_v4().to_string();
     let output = launch(remote.command(5, &id, "a.md"), "input").await;
     assert!(output.status.success(), "{output:?}");
@@ -296,7 +286,7 @@ opencode-source() {
         ]
     );
     let session = remote.session_id(&id, "a.md").await.unwrap();
-    assert_eq!(session, "ses_InitialRoot");
+    assert_eq!(session, "ses_InitialBuilder");
     let continuation = launch(
         remote.continuation_command(PROMPT.len(), &Uuid::new_v4().to_string(), "a.md", &session),
         PROMPT,
@@ -321,7 +311,7 @@ fn continuation_merges_completion_instructions_without_capture_and_restores_work
         private_file(root.path().join("session-id"), "ses_Existing123\n");
         fs::write(root.path().join(".bash_aliases"), r#"
 cd /
-alias opencode-source=fixture_engine
+alias spec=fixture_engine
 fixture_engine() {
     runtime=$(type -P bun || type -P node)
     "$runtime" -e '
@@ -345,20 +335,7 @@ process.stdout.write(JSON.stringify({config, instruction, text:fs.readFileSync(i
         assert_eq!(output.status.code(), Some(42), "{output:?}");
         let observed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(observed["cwd"], serde_json::json!(root.path()));
-        assert_eq!(
-            observed["args"],
-            serde_json::json!([
-                "run",
-                "--dir",
-                root.path(),
-                "--session",
-                "ses_Existing123",
-                "--agent",
-                "build",
-                "--",
-                PROMPT
-            ])
-        );
+        assert_eq!(observed["args"], serde_json::json!(["build", snapshot]));
         let mut expected = config;
         let mut instructions = expected["instructions"]
             .as_array()
@@ -408,13 +385,26 @@ process.stdout.write(JSON.stringify({config, instruction, text:fs.readFileSync(i
 }
 
 #[test]
-fn repository_save_does_not_install_capture_plugin() {
+fn repository_save_is_unsupervised_and_clears_inherited_session_scope_without_capture() {
     let root = tempfile::tempdir().unwrap();
     let snapshot = root.path().join("snapshot.md");
     private_file(&snapshot, "context");
+    private_file(
+        root.path().join("session-id"),
+        "invalid saved build ID ignored by save\n",
+    );
     fs::write(
         root.path().join(".bash_aliases"),
-        r#"spec() {
+        r#"cd /
+export SPEC_BUILD_SUPERVISED=1 SPEC_BUILD_INVOCATION=build
+export SPEC_BUILD_SESSION_FILE=/inherited/session-id SPEC_BUILD_SESSION_ID=ses_Inherited
+export OPENCODE_SESSION_ID=ses_Inherited SPEC_SESSION_DIR=/inherited KIBI_SPEC_SESSION=1
+export OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=0 OPENCODE_QUESTION_AUTO_RECOMMEND=0
+spec() {
+    [[ $# == 2 && $1 == build && $PWD == "$HOME" ]] || return 90
+    [[ $SPEC_BUILD_SUPERVISED == 0 && $SPEC_BUILD_INVOCATION == repository-save ]] || return 91
+    [[ ! -v SPEC_BUILD_SESSION_FILE && ! -v SPEC_BUILD_SESSION_ID && ! -v OPENCODE_SESSION_ID && ! -v SPEC_SESSION_DIR && ! -v KIBI_SPEC_SESSION ]] || return 92
+    [[ $OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS == 1 && $OPENCODE_QUESTION_AUTO_RECOMMEND == 1 ]] || return 93
     runtime=$(type -P bun || type -P node)
     "$runtime" -e '
 const fs = require("node:fs");
@@ -430,6 +420,7 @@ process.stdout.write(JSON.stringify({config, text:fs.readFileSync(config.instruc
         .arg(&snapshot)
         .arg(root.path().join("ready"))
         .args(["repository-save", "exit 0"])
+        .current_dir(root.path())
         .env("HOME", root.path())
         .env(
             "OPENCODE_CONFIG_CONTENT",
@@ -446,11 +437,15 @@ process.stdout.write(JSON.stringify({config, text:fs.readFileSync(config.instruc
     assert!(text.contains("Repository-save invocation, not a spec implementation run"));
     assert!(!text.contains("SPEC_BUILD_MEMORY_V1"));
     assert_eq!(fs::read_to_string(snapshot).unwrap(), "context");
-    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 3);
+    assert_eq!(
+        fs::read_to_string(root.path().join("session-id")).unwrap(),
+        "invalid saved build ID ignored by save\n"
+    );
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 4);
 }
 
 #[tokio::test]
-async fn continuation_rejects_invalid_ids_before_creating_a_run_and_reports_missing_engine() {
+async fn continuation_rejects_invalid_ids_before_creating_a_run_and_requires_spec_launcher() {
     let root = tempfile::tempdir().unwrap();
     let remote = remote_fixture(root.path(), &root.path().join("unused"));
     for session in [
@@ -467,7 +462,7 @@ async fn continuation_rejects_invalid_ids_before_creating_a_run_and_reports_miss
         assert_eq!(output.status.code(), Some(125), "{session}: {output:?}");
         assert!(!root.path().join(format!(".spec-runs/run-{id}")).exists());
     }
-    fs::write(root.path().join(".bash_aliases"), "unset -f opencode-source\nunalias opencode-source 2>/dev/null || true\nPATH=/usr/bin:/bin\n").unwrap();
+    fs::write(root.path().join(".bash_aliases"), "unset -f spec\nunalias spec 2>/dev/null || true\nopencode-source() { touch \"$HOME/injected\"; }\nPATH=/usr/bin:/bin\n").unwrap();
     let output = launch(
         remote.continuation_command(0, &Uuid::new_v4().to_string(), "a.md", "ses_Valid"),
         "",
@@ -475,8 +470,7 @@ async fn continuation_rejects_invalid_ids_before_creating_a_run_and_reports_miss
     .await;
     assert_eq!(output.status.code(), Some(127), "{output:?}");
     assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains("opencode-source alias/function/launcher not found")
+        String::from_utf8_lossy(&output.stdout).contains("spec alias/function/launcher not found")
     );
     assert!(!root.path().join("injected").exists());
 }

@@ -25,10 +25,21 @@ export PATH="$HOME/.local/bin:$HOME/.bun/bin:${PATH:-/usr/local/bin:/usr/bin:/bi
 if [[ -f "$HOME/.bash_aliases" ]]; then
     source "$HOME/.bash_aliases" || exit
 fi
-unset SPEC_SESSION_DIR KIBI_SPEC_SESSION
+unset SPEC_SESSION_DIR KIBI_SPEC_SESSION OPENCODE_SESSION_ID SPEC_BUILD_SESSION_FILE SPEC_BUILD_SESSION_ID
 export SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1
-# Request the external engine's unattended approval and recommended answers.
-export OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1 OPENCODE_QUESTION_AUTO_RECOMMEND=1
+export SPEC_BUILD_INVOCATION="$spec_build_mode"
+if [[ $spec_build_mode == build ]]; then
+    export SPEC_BUILD_SUPERVISED=1
+    # The coordinator, not automatic selection, owns build approvals and answers.
+    export OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=0 OPENCODE_QUESTION_AUTO_RECOMMEND=0
+    if [[ -n ${SPEC_EXECUTION_PROFILE:-} ]]; then
+        printf '%s\n' '[remote] Supervised builds require azure/gpt-6-sol and azure/gpt-6-astra. Selected execution profiles cannot guarantee this pair; clear the selected profile and configure both models on the remote host.' >&2
+        exit 125
+    fi
+else
+    export SPEC_BUILD_SUPERVISED=0
+    export OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1 OPENCODE_QUESTION_AUTO_RECOMMEND=1
+fi
 [[ "$1" = /* ]] || { printf '%s\n' '[remote] Snapshot path must be absolute.' >&2; exit 125; }
 spec_build_session_file="${1%/*}/session-id"
 session_id=
@@ -42,12 +53,10 @@ if [[ $spec_build_mode == build && ( -e $spec_build_session_file || -L $spec_bui
         printf '%s\n' '[remote] Invalid saved continuation session ID; refusing to launch.' >&2
         exit 125
     }
-    type opencode-source >/dev/null 2>&1 || {
-        printf '%s\n' '[remote] opencode-source alias/function/launcher not found; install it or export its directory in PATH in ~/.bash_aliases.' >&2
-        exit 127
-    }
-else
-    type spec >/dev/null 2>&1 || { echo '[remote] spec alias/function/launcher not found; configure ~/.bash_aliases' >&2; exit 127; }
+fi
+type spec >/dev/null 2>&1 || { echo '[remote] spec alias/function/launcher not found; configure ~/.bash_aliases' >&2; exit 127; }
+if [[ $spec_build_mode == build ]]; then
+    export SPEC_BUILD_SESSION_FILE="$spec_build_session_file" SPEC_BUILD_SESSION_ID="$session_id"
 fi
 # Merge only this invocation's supplemental system instructions. Bun or Node is
 # required on the remote PATH after aliases are sourced; never replace config.
@@ -56,14 +65,10 @@ spec_build_runtime=$(type -P bun || type -P node) || {
     exit 127
 }
 umask 077
-spec_build_plugin=
 spec_build_instructions=$(mktemp "${1%/*}/spec-build-instructions.XXXXXX.md") || exit 125
-trap 'rm -f -- "$spec_build_instructions" ${spec_build_plugin:+"$spec_build_plugin"}' EXIT
+trap 'rm -f -- "$spec_build_instructions"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-if [[ $spec_build_mode == build && -z $session_id ]]; then
-    spec_build_plugin=$(mktemp "${1%/*}/spec-build-session.XXXXXX.mjs") || exit 125
-fi
 if ! spec_build_config=$(OPENCODE_CONFIG_CONTENT="${OPENCODE_CONFIG_CONTENT-"{}"}" "$spec_build_runtime" -e '
 const fs = require("node:fs");
 try {
@@ -88,24 +93,6 @@ try {
             typeof item !== "string" && !(Array.isArray(item) && item.length === 2 &&
                 typeof item[0] === "string" && object(item[1]))))) {
         throw new Error("OPENCODE_CONFIG_CONTENT plugin must be an array of strings or [string, options object] tuples.");
-    }
-    const pluginPath = process.argv[3];
-    if (pluginPath) {
-        const sessionPath = process.argv[4];
-        // The event hook promise is not awaited upstream: persist synchronously.
-        fs.writeFileSync(pluginPath, `import fs from "node:fs";
-export default async () => ({ event: async ({ event }) => {
-    if (event.type !== "session.created") return;
-    const info = event.properties?.info;
-    if (!info || info.parentID || typeof info.id !== "string" || !/^ses_[A-Za-z0-9]+$/.test(info.id) || info.id.length > 127) return;
-    try {
-        fs.writeFileSync(${JSON.stringify(sessionPath)}, info.id + "\\n", { mode: 0o600, flag: "wx" });
-    } catch (error) {
-        if (error.code !== "EEXIST") throw error;
-    }
-}});
-`, { mode: 0o600 });
-        config.plugin = [...(config.plugin ?? []), require("node:url").pathToFileURL(pluginPath).href];
     }
     if (repositorySave) {
         for (const key of ["agent", "mode"]) {
@@ -196,8 +183,8 @@ complete. Do not include secrets. Keep the JSON on one line, at most 32 KiB tota
 report, separate from the harness status. Missing reports remain explicitly
 unknown; never manufacture a successful report for a stopped or failed sweep.
 
-Execution workspace (JSON path): ${JSON.stringify(process.argv[5])}
-Current run directory to exclude (JSON path): ${JSON.stringify(require("node:path").dirname(process.argv[4]))}
+Execution workspace (JSON path): ${JSON.stringify(process.argv[4])}
+Current run directory to exclude (JSON path): ${JSON.stringify(require("node:path").dirname(process.argv[3]))}
 `);
     config.instructions = [...(config.instructions ?? []), instructionPath];
     process.stdout.write(JSON.stringify(config));
@@ -205,31 +192,23 @@ Current run directory to exclude (JSON path): ${JSON.stringify(require("node:pat
     console.error("[remote] Cannot prepare spec build instructions: " + error.message);
     process.exit(125);
 }
-' "$spec_build_instructions" "$spec_build_mode" "$spec_build_plugin" "$spec_build_session_file" "$spec_build_workspace"); then
+' "$spec_build_instructions" "$spec_build_mode" "$spec_build_session_file" "$spec_build_workspace"); then
     exit 125
 fi
 export OPENCODE_CONFIG_CONTENT="$spec_build_config"
-spec_build_model_args=()
+export SPEC_BUILD_INSTRUCTIONS_FILE="$spec_build_instructions"
 if [[ -n ${SPEC_EXECUTION_PROFILE:-} ]]; then
     spec_build_config=$(bash --noprofile --norc "${SPEC_EXECUTION_PROFILE%/*}/provider-setup.bash" config) || exit 125
     SPEC_EXECUTION_API_KEY=$(bash --noprofile --norc "${SPEC_EXECUTION_PROFILE%/*}/provider-setup.bash" key) || exit 125
     export OPENCODE_CONFIG_CONTENT="$spec_build_config" SPEC_EXECUTION_API_KEY
-    spec_build_model=$(bash --noprofile --norc "${SPEC_EXECUTION_PROFILE%/*}/provider-setup.bash" model) || exit 125
-    spec_build_model_args=(--model "$spec_build_model")
 fi
 if [[ $spec_build_mode == repository-save ]]; then
     [[ -n ${4:-} ]] || exit 125
     cd -- "$spec_build_workspace" || exit 125
     timeout --kill-after=1s 10s bash --noprofile --norc -c "$4" -- "$spec_build_workspace" require-dirty || exit 125
 fi
-if [[ -n $session_id ]]; then
-    cd -- "$spec_build_workspace" || exit 125
-    # A sentinel preserves trailing newlines otherwise stripped by command substitution.
-    spec_build_prompt=$(cat -- "$1" && printf '.') || exit 125
-    opencode-source run --dir "$spec_build_workspace" --session "$session_id" --agent build "${spec_build_model_args[@]}" -- "${spec_build_prompt%.}"
-else
-    spec build "$1"
-fi
+cd -- "$spec_build_workspace" || exit 125
+spec build "$1"
 result=$?
 if [[ "$result" -eq 127 ]]; then
     printf '%s\n' '[remote] Build command not found. Ensure the launcher engine (e.g. opencode-source) is installed on the remote host and export its directory in PATH in ~/.bash_aliases; login profiles are not loaded.' >&2

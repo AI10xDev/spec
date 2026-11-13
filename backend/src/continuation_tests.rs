@@ -4,24 +4,25 @@ use serde_json::{Value, json as body};
 fn fixture(root: &FsPath) -> App {
     let mut state = app(root);
     state.remote = Some(remote_fixture(root, &root.join("unused")));
-    fs::write(root.join(".bash_aliases"), r#"
+    fs::write(
+        root.join(".bash_aliases"),
+        r#"
 spec() {
-    [[ $# == 2 && $1 == build ]] || return 90
-    local runtime=$(type -P bun || type -P node)
-    "$runtime" --input-type=module -e '
-const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
-const hook = await (await import(config.plugin.at(-1))).default();
-await hook.event({event:{type:"session.created",properties:{info:{id:"ses_Router123"}}}});
-console.log("Recommended option: implement the feature.");
-'
-}
-opencode-source() {
-    [[ $# == 9 && $1 == run && $2 == --dir && $3 == "$PWD" && $4 == --session && $5 == ses_Router123 && $6 == --agent && $7 == build && $8 == -- ]] || return 91
+    [[ $# == 2 && $1 == build && $SPEC_BUILD_SUPERVISED == 1 ]] || return 90
+    if [[ -z $SPEC_BUILD_SESSION_ID ]]; then
+        printf 'ses_Router123\n' > "$SPEC_BUILD_SESSION_FILE"
+        printf 'Recommended option: implement the feature.\n'
+        return
+    fi
+    [[ $SPEC_BUILD_SESSION_ID == ses_Router123 ]] || return 91
     printf 'continue\n' >> "$HOME/launches"
-    printf '%s\n' "$9"
+    cat -- "$2"
+    printf '\n'
     if [[ -f "$HOME/wait" ]]; then sleep 60; fi
 }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     fs::write(
         root.join("a.md"),
         "# Completed requirement\nPending requirement\n",
