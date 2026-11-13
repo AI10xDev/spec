@@ -36,7 +36,7 @@ const fixture = (): ReviewOutput => ({
     { id: 1, url: "https://github.com/example/project", title: "Project README", revision: "abc123def", accessed: "2026-11-07T12:00:00Z" },
     { id: 2, url: "https://github.com/example/competitor", title: "Competitor README", revision: "fed987cba", accessed: "2026-11-07T12:01:00Z" },
   ],
-  warnings: ["Comparison based on public documentation."],
+  warnings: ["Comparison based on public documentation.", "Discovery is limited to GitHub search results.", "Selected example/competitor for its documented editing workflow.", "Search URL: https://github.com/search?q=editor&type=repositories"],
   imageDataUrl: null,
 })
 
@@ -72,6 +72,7 @@ describe("feature review Markdown export", () => {
     expect(content).toContain("Sources: [1] [2]")
     expect(content).toContain("| Editing | Integrated | Separate | [1] [2] |")
     expect(content.match(/```mermaid/g)).toHaveLength(2)
+    expect(nodes(content).find(node => node.type === "code")?.value).toBe('flowchart LR\n  W0["Review primary README"]\n  W1["Auto-discover competitors"]\n  W2["Compare pinned READMEs"]\n  W3["Export report"]\n  W0 --> W1 --> W2 --> W3')
     expect(content).toContain("Image not generated")
     expect(nodes(content).filter(node => node.type === "image")).toHaveLength(0)
   })
@@ -134,9 +135,10 @@ describe("feature review Markdown export", () => {
 
 describe("feature review PDF export", () => {
   it("generates a real PDF with all report sections, provenance and vector diagrams", async () => {
-    const content = await pdfText(fixture())
+    const output = fixture()
+    const content = await pdfText(output)
     expect(content.startsWith("%PDF-")).toBe(true)
-    for (const value of ["Repository feature review", "A concise research summary.", "Concise Summary", "Features", "Findings", "Key Strengths", "Comparisons", "Limitations", "Warnings", "Sources", "[1] [2]", "abc123def", "2026-11-07T12:00:00Z", "https://github.com/example/project", "Comparison based on public documentation.", "Image not generated", "Select repositories", "Repository sources", "Cited review"]) expect(content).toContain(value)
+    for (const value of ["Repository feature review", "A concise research summary.", "Concise Summary", "Features", "Findings", "Key Strengths", "Comparisons", "Limitations", "Warnings", "Sources", "[1] [2]", "abc123def", "2026-11-07T12:00:00Z", "https://github.com/example/project", ...output.warnings, "Image not generated", "Review primary README", "Auto-discover competitors", "Compare pinned READMEs", "Export report", "Repository sources", "Cited review"]) expect(content).toContain(value)
     expect(content).not.toContain("PDF font substitution")
     expect(content).toMatch(/\d+(?:\.\d+)? \d+(?:\.\d+)? m\n/)
     const pages = content.match(/\/Type \/Page\b/g)?.length ?? 0

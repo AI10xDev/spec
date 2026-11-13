@@ -12,7 +12,7 @@ export type ReviewOutput = {
   imageDataUrl: string | null
 }
 
-const workflow = ["Select repositories", "Review evidence", "Compare features", "Export report"]
+const workflow = ["Review primary README", "Auto-discover competitors", "Compare pinned READMEs", "Export report"]
 const evidence = ["Repository sources", "Features", "Findings", "Comparisons", "Cited review"]
 const missingImage = "Image not generated. Built-in diagrams remain available."
 const invalidImage = "Image omitted: expected an embedded base64 PNG; external images are never fetched."

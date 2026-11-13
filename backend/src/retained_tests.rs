@@ -638,7 +638,7 @@ async fn retained_actual_run_kinds_keep_optimization_spec_separate_from_optimize
             state.remote.as_mut().unwrap().directory = link.to_str().unwrap().into();
         }
         fs::write(root.path().join(".bash_aliases"),
-            "spec() { printf 'ordinary report'; }\nopencode-source() { printf 'continued report'; }\n").unwrap();
+            "spec() { if [[ -n ${SPEC_BUILD_SESSION_ID:-} ]]; then printf 'continued report'; else printf 'ordinary report'; fi; }\n").unwrap();
         let remote = state.remote.as_ref().unwrap();
         let mut ordinary = Vec::new();
         for kind in ["build", "continue", "repository-save", "optimize"] {

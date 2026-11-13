@@ -560,17 +560,12 @@ fn fixture(root: &FsPath) -> App {
         root.join(".bash_aliases"),
         r#"
 spec() {
-    [[ $# == 2 && $1 == build ]] || return 90
-    local runtime=$(type -P bun || type -P node)
-    "$runtime" --input-type=module -e '
-const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
-const hook = await (await import(config.plugin.at(-1))).default();
-await hook.event({event:{type:"session.created",properties:{info:{id:"ses_Memory123"}}}});
-' || return
-    fixture_output
-}
-opencode-source() {
-    [[ $1 == run && $4 == --session && $5 == ses_Memory123 ]] || return 91
+    [[ $# == 2 && $1 == build && $SPEC_BUILD_SUPERVISED == 1 ]] || return 90
+    if [[ -z $SPEC_BUILD_SESSION_ID ]]; then
+        printf 'ses_Memory123\n' > "$SPEC_BUILD_SESSION_FILE"
+    else
+        [[ $SPEC_BUILD_SESSION_ID == ses_Memory123 ]] || return 91
+    fi
     fixture_output
 }
 fixture_output() {

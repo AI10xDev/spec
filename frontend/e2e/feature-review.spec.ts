@@ -14,7 +14,6 @@ const saved = "Review the documented features without running this spec.\n"
 const retained = "Existing output must remain unchanged.\n"
 const unsaved = "Unsaved editor content must not enter a feature review.\n"
 const repositoryUrl = "https://github.com/example/project"
-const competitorUrls = ["https://github.com/example/competitor", "https://github.com/example/alternative"]
 const image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4XmNQCKj4f+LOh/8AE5cFe63xRWwAAAAASUVORK5CYII="
 const fixture = (illustrated = false): ReviewOutput => ({
   report: {
@@ -30,9 +29,14 @@ const fixture = (illustrated = false): ReviewOutput => ({
   },
   sources: [
     { id: 1, url: `${repositoryUrl}/blob/${"a".repeat(40)}/README.md`, title: "Project README", revision: "a".repeat(40), accessed: "1794052800" },
-    { id: 2, url: `${competitorUrls[0]}/blob/${"b".repeat(40)}/README.md`, title: "Competitor README", revision: "b".repeat(40), accessed: "1794052860" },
+    { id: 2, url: `https://github.com/example/competitor/blob/${"b".repeat(40)}/README.md`, title: "Competitor README", revision: "b".repeat(40), accessed: "1794052860" },
   ],
-  warnings: illustrated ? [] : ["GPT-image is unavailable; the report uses a built-in workflow diagram"],
+  warnings: [
+    "Discovery is limited to GitHub search results",
+    "Selected example/competitor for its documented editing workflow",
+    "Search URL: https://github.com/search?q=editor&type=repositories",
+    ...(illustrated ? [] : ["GPT-image is unavailable; the report uses a built-in workflow diagram"]),
+  ],
   imageDataUrl: illustrated ? image : null,
 })
 
@@ -150,7 +154,7 @@ test("button adjoins Performance output; modal owns focus, blocks run shortcuts 
   await expect(close).toBeFocused()
   await page.getByRole("textbox", { name: "Edit foo.md", exact: true, includeHidden: true }).evaluate((element: HTMLElement) => element.focus())
   await expect(close).toBeFocused()
-  await dialog.getByLabel("Competitor GIT URLs", { exact: false }).fill(competitorUrls[0])
+  await dialog.getByRole("checkbox").focus()
   await page.keyboard.press("Control+Enter")
   await page.keyboard.press("Meta+Enter")
   await expect(dialog).toBeVisible()
@@ -163,51 +167,48 @@ test("button adjoins Performance output; modal owns focus, blocks run shortcuts 
   await state.unchanged()
 })
 
-test("validates inputs, submits exactly once while busy, and preserves inputs for an error retry", async ({ page }) => {
+test("validates the repository, submits only repository and illustration once while busy, and retries discovery errors", async ({ page }) => {
   let release!: () => void
   const held = new Promise<void>((resolve) => { release = resolve })
   let attempts = 0
   const state = await workspace(page, async (route) => {
     if (++attempts === 1) {
       await held
-      await route.fulfill({ status: 502, json: { error: "Research provider temporarily unavailable" } })
+      await route.fulfill({ status: 502, json: { error: "No suitable competitor repositories found. Try a repository with a more descriptive README." } })
     } else await route.fulfill({ json: fixture() })
   })
   const dialog = await open(page)
   const repository = dialog.getByLabel("Repository GIT URL", { exact: true })
-  const competitors = dialog.getByLabel("Competitor GIT URLs", { exact: false })
+  await expect(dialog.getByRole("textbox")).toHaveCount(1)
+  await expect(dialog.getByLabel("Competitor GIT URLs", { exact: false })).toHaveCount(0)
+  await expect(dialog).toContainText("Competitors are discovered automatically")
+  await expect(dialog).toContainText("up to six minutes")
   const illustrate = dialog.getByRole("checkbox")
   const generate = dialog.getByRole("button", { name: "Generate feature report", exact: true })
   await expect(illustrate).toBeChecked()
   await generate.click()
   expect(await repository.evaluate((element: HTMLInputElement) => element.validity.valueMissing)).toBe(true)
   await repository.fill("not-a-url")
-  await competitors.fill(competitorUrls[0])
   await generate.click()
   expect(await repository.evaluate((element: HTMLInputElement) => element.validity.typeMismatch)).toBe(true)
   await repository.fill(repositoryUrl)
-  for (const value of [" \n ", [...competitorUrls, "https://github.com/example/third", "https://github.com/example/fourth"].join("\n")]) {
-    await competitors.fill(value)
-    await generate.click()
-    await expect(dialog.getByRole("alert")).toHaveText("Provide one to three competitor repository URLs, one per line.")
-  }
   expect(state.mutations).toEqual([])
-  await competitors.fill(`  ${competitorUrls[0]}  \n\n ${competitorUrls[1]} \n`)
   await illustrate.uncheck()
   try {
     await generate.click()
     await expect.poll(() => attempts).toBe(1)
     await expect(dialog.locator("form")).toHaveAttribute("aria-busy", "true")
-    for (const control of [repository, competitors, illustrate, dialog.getByRole("button", { name: "Researching and generating report...", exact: true })]) await expect(control).toBeDisabled()
+    for (const control of [repository, illustrate, dialog.getByRole("button", { name: "Discovering competitors and generating report...", exact: true })]) await expect(control).toBeDisabled()
+    await expect(dialog.getByRole("status").filter({ hasText: "Review in progress" })).toContainText("automatically discovering competitors")
     // Exercise the in-flight guard even if another submit event arrives after disabling the button.
     await dialog.locator("form").evaluate((form: HTMLFormElement) => { form.requestSubmit(); form.requestSubmit() })
     await page.keyboard.press("Control+Enter")
     expect(attempts).toBe(1)
   } finally { release() }
-  await expect(dialog.getByRole("alert")).toHaveText("Research provider temporarily unavailable")
+  await expect(dialog.getByRole("alert")).toHaveText("No suitable competitor repositories found. Try a repository with a more descriptive README.")
   await expect(dialog.locator("form")).toHaveAttribute("aria-busy", "false")
   await expect(repository).toHaveValue(repositoryUrl)
-  await expect(competitors).toHaveValue(`  ${competitorUrls[0]}  \n\n ${competitorUrls[1]} \n`)
+  await expect(dialog.getByRole("textbox")).toHaveCount(1)
   await expect(illustrate).not.toBeChecked()
   await expect(generate).toBeEnabled()
   await generate.click()
@@ -215,7 +216,7 @@ test("validates inputs, submits exactly once while busy, and preserves inputs fo
   await expect(result.getByRole("heading", { name: fixture().report.title, exact: true })).toBeFocused()
   await expect(result.getByRole("alert")).toHaveCount(0)
   expect(attempts).toBe(2)
-  expect(state.mutations).toEqual(Array.from({ length: 2 }, () => ({ path: "/api/feature-review", method: "POST", body: { repositoryUrl, competitorUrls, illustrate: false } })))
+  expect(state.mutations).toEqual(Array.from({ length: 2 }, () => ({ path: "/api/feature-review", method: "POST", body: { repositoryUrl, illustrate: false } })))
   await page.keyboard.press("Escape")
   await state.unchanged()
 })
@@ -227,7 +228,6 @@ for (const illustrated of [false, true]) {
     const dialog = await open(page)
     await expect(dialog.getByRole("status")).toContainText(illustrated ? "Azure image configuration is present" : "GPT-image is not configured")
     await dialog.getByLabel("Repository GIT URL", { exact: true }).fill(repositoryUrl)
-    await dialog.getByLabel("Competitor GIT URLs", { exact: false }).fill(competitorUrls[0])
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 844 })
       expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
@@ -239,10 +239,11 @@ for (const illustrated of [false, true]) {
     for (const name of ["Feature summary", "Key strengths", "Findings", "Competitor comparison", "Feature review workflow", "Limitations", "Sources"]) {
       await expect(result.getByRole("heading", { name, exact: true })).toBeVisible()
     }
-    for (const value of [output.report.summary, "Evidence tied to commits", "Runtime behavior was not tested", ...output.report.limitations]) await expect(result).toContainText(value)
+    for (const value of [output.report.summary, "Evidence tied to commits", "Runtime behavior was not tested", ...output.report.limitations, ...output.warnings]) await expect(result).toContainText(value)
     await expect(result.getByRole("table", { name: "Documented features" })).toContainText("Documented editing workflow")
     await expect(result.getByRole("table", { name: "Documentation comparison, not a benchmark" }).getByRole("cell")).toHaveText(["Integrated", "Separate [1][2]"])
     await expect(result.getByRole("list", { name: "Built-in review workflow flowchart" }).getByRole("listitem")).toHaveCount(5)
+    await expect(result.getByRole("list", { name: "Built-in review workflow flowchart" })).toContainText("Automatically discover competitors on GitHub")
     for (const source of output.sources) {
       const citation = result.getByRole("link", { name: `Source ${source.id}`, exact: true }).first()
       await expect(citation).toHaveAttribute("href", `#review-source-${source.id}`)
@@ -263,7 +264,6 @@ for (const illustrated of [false, true]) {
       await expect.poll(() => illustration.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth === 2 && element.naturalHeight === 1)).toBe(true)
       await expect(result).toContainText("AI-generated illustration, not evidence")
     } else {
-      await expect(result).toContainText(output.warnings[0])
       await expect(result).toContainText("No GPT-image illustration was generated")
       await expect(illustration).toHaveCount(0)
     }
@@ -294,6 +294,8 @@ for (const illustrated of [false, true]) {
         expect(content).toContain(format === "md" ? `## ${section}` : `(${section})`)
       }
       for (const value of [output.report.title, output.report.summary, "Documented editing workflow", "Evidence tied to commits", "Runtime behavior was not tested", "Integrated", "Separate", "Documentation review only", "[1] [2]", ...output.sources.flatMap((source) => [source.title, source.revision, source.accessed])]) expect(content).toContain(value)
+      for (const value of ["Discovery is limited to GitHub search results", "Selected example/competitor for its documented editing workflow", "Review primary README", "Auto-discover competitors", "Compare pinned READMEs", "Export report"]) expect(content).toContain(value)
+      expect(content).toContain(format === "md" ? "Search URL&#58; https&#58;//github\\.com/search?q=editor&amp;type=repositories" : "Search URL: https://github.com/search?q=editor&type=repositories")
       if (!illustrated) expect(content).toContain(format === "md" ? "GPT\\-image is unavailable" : "GPT-image is unavailable")
       if (format === "md") {
         for (const source of output.sources) expect(content).toContain(source.url)
@@ -304,13 +306,12 @@ for (const illustrated of [false, true]) {
         const pages = content.match(/\/Type \/Page\b/g)?.length ?? 0
         expect(pages).toBeGreaterThan(0)
         for (let number = 1; number <= pages; number++) expect(content).toContain(`Page ${number} of ${pages}`)
-        expect(content).toContain("Select repositories")
         expect(content).toContain("Repository sources")
         expect(content).toContain(illustrated ? "/Subtype /Image" : "Image not generated")
       }
       await expect(result.getByRole("alert")).toHaveCount(0)
     }
-    expect(state.mutations).toEqual([{ path: "/api/feature-review", method: "POST", body: { repositoryUrl, competitorUrls: [competitorUrls[0]], illustrate: true } }])
+    expect(state.mutations).toEqual([{ path: "/api/feature-review", method: "POST", body: { repositoryUrl, illustrate: true } }])
     await result.getByRole("button", { name: "Review another repository", exact: true }).click()
     await expect(page.getByRole("dialog").getByLabel("Repository GIT URL", { exact: true })).toHaveValue(repositoryUrl)
     await page.keyboard.press("Escape")

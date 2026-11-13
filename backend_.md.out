@@ -223,3 +223,5 @@ Open the printed localhost URL, including its token, in your local browser. **Sa
 
 **Blocked here:** the SSH key file is still unavailable, so I could not execute or validate on the remote host. The documentation’s shell examples passed syntax checks.
 
+[spec-session] The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch(); reconnecting (live output may have a gap)
+[spec-session] Error: OpenCode server exited (137); it will not be restarted

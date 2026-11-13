@@ -889,7 +889,7 @@ async fn performance_remote_detaches_then_cancels_only_its_supervised_group() {
 }
 
 #[tokio::test]
-async fn selected_profiles_use_private_stdin_and_override_build_models_without_leaking() {
+async fn selected_profiles_reject_supervised_builds_and_preserve_other_modes_without_leaking() {
     for provider in ["azure", "openai", "claude", "openrouter", "huggingface"] {
         let model = if provider == "openrouter" {
             "anthropic/claude-sonnet-4.5"
@@ -905,6 +905,8 @@ async fn selected_profiles_use_private_stdin_and_override_build_models_without_l
                 format!(
                     r#"#!/usr/bin/env python3
 import json,os,sys
+from pathlib import Path
+Path(os.environ['HOME'], 'launched').touch()
 c=json.loads(os.environ['OPENCODE_CONFIG_CONTENT'])
 assert c['model']=='spec-execution/{model}'
 assert c['agent']['build']['model']=='spec-execution/{model}'
@@ -920,8 +922,6 @@ if '{provider}'=='openrouter':
     assert p['options']['baseURL']=='https://openrouter.ai/api/v1'
     assert p['options']['apiKey']=='{{env:SPEC_EXECUTION_API_KEY}}'
     assert 'api-key' not in p['options'].get('headers', {{}})
-if '{mode}'=='continue':
-    assert sys.argv[sys.argv.index('--model')+1]=='spec-execution/{model}'
 print('selected', flush=True)
 print(os.environ['SPEC_EXECUTION_API_KEY'], flush=True)
 "#
@@ -991,10 +991,22 @@ print(os.environ['SPEC_EXECUTION_API_KEY'], flush=True)
                 .unwrap()
                 .unwrap();
             drop(stdin);
-            assert!(output.status.success(), "{provider} {mode}: {output:?}");
             let text = String::from_utf8(output.stdout).unwrap();
-            assert!(text.contains("selected"), "{text}");
-            assert!(text.contains("[REDACTED]"), "{text}");
+            if mode == "build" || mode == "continue" {
+                assert_eq!(output.status.code(), Some(125), "{provider} {mode}: {text}");
+                assert!(
+                    text.contains(
+                        "Supervised builds require azure/gpt-6-sol and azure/gpt-6-astra"
+                    ),
+                    "{text}"
+                );
+                assert!(text.contains("clear the selected profile"), "{text}");
+                assert!(!root.path().join("launched").exists());
+            } else {
+                assert!(output.status.success(), "{provider} {mode}: {text}");
+                assert!(text.contains("selected"), "{text}");
+                assert!(text.contains("[REDACTED]"), "{text}");
+            }
             assert!(!text.contains("private-secret"));
             let directory = root.path().join(format!(".spec-runs/run-{id}"));
             assert!(!directory.join("execution-profile.json").exists());
@@ -1042,10 +1054,18 @@ async fn incomplete_selected_profile_never_launches_and_is_removed() {
 }
 
 #[tokio::test]
-async fn admission_captures_settings_once_and_cancel_cleans_private_profile() {
+async fn repository_save_admission_captures_settings_once_and_cancel_cleans_private_profile() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&workspace)
+            .status()
+            .unwrap()
+            .success()
+    );
     let runner = workspace.join("runner");
     let mut app = tests::app(&workspace);
     app.remote = Some(tests::remote_fixture(&workspace, &runner));
@@ -1063,7 +1083,7 @@ async fn admission_captures_settings_once_and_cancel_cleans_private_profile() {
     let response = tests::request(
         app.clone(),
         "POST",
-        "/api/runs",
+        "/api/repository/save",
         serde_json::json!({"name":"test.md", "revision":revision}),
     )
     .await;
@@ -1519,7 +1539,7 @@ async fn remote_engine_path_and_auto_settings_reach_children_without_login_profi
                 format!(
                     r#"#!/bin/bash
 [[ $SPEC_BUILD_FOREGROUND == 1 && $SPEC_BUILD_AUTO == 1 ]] || exit 92
-[[ $OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS == 1 && $OPENCODE_QUESTION_AUTO_RECOMMEND == 1 ]] || exit 93
+[[ $OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS == 0 && $OPENCODE_QUESTION_AUTO_RECOMMEND == 0 ]] || exit 93
 [[ ! -v SPEC_SESSION_DIR && ! -v KIBI_SPEC_SESSION ]] || exit 94
 cat -- "$1"
 exit {status}
@@ -1536,7 +1556,7 @@ exit {status}
         if install == ".local/bin" {
             definition.push_str("unset SPEC_BUILD_FOREGROUND SPEC_BUILD_AUTO OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS OPENCODE_QUESTION_AUTO_RECOMMEND\n");
         } else {
-            definition.push_str("export SPEC_BUILD_FOREGROUND=0 SPEC_BUILD_AUTO=0 OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=0 OPENCODE_QUESTION_AUTO_RECOMMEND=0\n");
+            definition.push_str("export SPEC_BUILD_FOREGROUND=0 SPEC_BUILD_AUTO=0 OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1 OPENCODE_QUESTION_AUTO_RECOMMEND=1\n");
         }
         definition.push_str("export SPEC_SESSION_DIR=/unused/session KIBI_SPEC_SESSION=1\n");
         if install == "custom engine/bin" {
@@ -1815,6 +1835,23 @@ async fn performance_final_metrics_survive_build_cap_with_and_without_redaction(
             let runner = root.path().join("runner");
             let mut remote = tests::remote_fixture(root.path(), &runner);
             remote.performance = performance;
+            // Selected profiles are rejected for supervised builds. Repository-save
+            // still exercises the same capped logger with profile redaction.
+            let mode = if performance {
+                "performance"
+            } else if selected {
+                assert!(
+                    std::process::Command::new("git")
+                        .args(["init", "-q"])
+                        .current_dir(root.path())
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                "repository-save"
+            } else {
+                "build"
+            };
             fs::write(&runner, r#"#!/usr/bin/python3
 import json, os
 def event(text):
@@ -1851,7 +1888,7 @@ event('final RL validation_accuracy=0.875 ' + key)
                     payload.len(),
                     &id,
                     "metrics.md",
-                    if performance { "performance" } else { "build" },
+                    mode,
                     "",
                     request.len(),
                     profile.len(),
@@ -2857,10 +2894,8 @@ fixture_build() {{
 const fs = require("node:fs");
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
 const path = config.instructions[config.instructions.length - 1];
-const plugin = require("node:url").fileURLToPath(config.plugin[config.plugin.length - 1]);
 process.stdout.write(JSON.stringify({{
-    args: process.argv.slice(1), config, path, plugin,
-    pluginMode: fs.statSync(plugin).mode & 0o777,
+    args: process.argv.slice(1), config, path,
     instructions: fs.readFileSync(path, "utf8"),
     mode: fs.statSync(path).mode & 0o777,
     snapshot: fs.readFileSync(process.argv[2], "utf8"),
@@ -2918,11 +2953,6 @@ process.stdout.write(JSON.stringify({{
             assert!(path.is_absolute());
             assert_eq!(path.parent().unwrap(), run);
             assert!(!path.exists());
-            let plugin = PathBuf::from(observed["plugin"].as_str().unwrap());
-            assert_eq!(observed["pluginMode"], 0o600);
-            assert!(plugin.is_absolute());
-            assert_eq!(plugin.parent().unwrap(), run);
-            assert!(!plugin.exists(), "capture plugin leaked after build");
             let mut expected: serde_json::Value =
                 serde_json::from_str(content.unwrap_or("{}")).unwrap();
             let mut instructions = expected["instructions"]
@@ -2931,16 +2961,6 @@ process.stdout.write(JSON.stringify({{
                 .unwrap_or_default();
             instructions.push(serde_json::json!(path));
             expected["instructions"] = serde_json::json!(instructions);
-            let mut plugins = expected["plugin"].as_array().cloned().unwrap_or_default();
-            plugins.push(
-                observed["config"]["plugin"]
-                    .as_array()
-                    .unwrap()
-                    .last()
-                    .unwrap()
-                    .clone(),
-            );
-            expected["plugin"] = serde_json::json!(plugins);
             assert_eq!(observed["config"], expected);
             let text = observed["instructions"].as_str().unwrap();
             for rule in [

@@ -1,10 +1,18 @@
 # Feature Review Reports
 
 Choose **Feature review** beside **Performance output**. Enter the public GitHub
-repository URL and one to three competitor repository URLs, then choose
-**Generate feature report**. The configured text provider in Settings (or the
-server's text-provider environment) writes the review. This can incur provider
-charges. It does not launch, save, cancel, or continue a build or Performance run.
+repository URL, optionally request an illustration, then choose **Generate feature
+report**. Competitors are discovered automatically; there is no manual competitor
+entry. The configured completion provider in Settings (or the server's
+text-provider environment) explores competitors and writes the review. This can
+incur text and image provider charges and take up to six minutes, including
+discovery and request overhead. It does not launch, save, cancel, or continue a
+build or Performance run.
+
+Configure the completion provider before generating a report. The authenticated
+`POST /api/feature-review` request accepts exactly `{repositoryUrl, illustrate}`:
+a public GitHub repository URL and an illustration boolean. Image configuration
+is separate and optional; no manually supplied competitor URLs are accepted.
 
 The dialog presents a concise feature summary, findings, supported strengths,
 competitor comparison tables, limitations, source citations and a workflow.
@@ -21,13 +29,23 @@ work or charges. Failed requests can be retried; there is no automatic paid retr
   hosts, private repositories, credential-bearing URLs, subpaths, query strings,
   fragments and redirects are rejected.
 - Fetches current public repository metadata, resolves the default branch through
-  a lightweight Git ref, and reads the README at that commit. It does not crawl
-  linked documentation, execute code, clone repositories or run their tests.
+  a lightweight Git ref, and reads the primary README at that commit. The configured
+  completion provider's explorer forms up to two GitHub search queries from this
+  evidence, fetches up to five results per query, and selects one to three relevant
+  repositories from those results. The primary repository, forks, archived
+  repositories, invalid candidates and duplicates are excluded. Selected
+  competitors' READMEs are fetched at pinned commits before report generation.
+  It does not crawl linked documentation, execute code, clone repositories or run
+  their tests.
 - Each README must be at most 128 KiB; the first 24 KiB is sent to the model.
   Truncation is disclosed. Metadata is current at fetch time, not historical
   commit metadata. GitHub rate limits or unavailable evidence fail the request
   rather than inventing sources.
-- Competitors are chosen by the user, not discovered or ranked automatically.
+- Discovery is bounded, not an exhaustive market survey. Report warnings include
+  discovery limitations, selection reasons and search URLs. If no suitable
+  candidates are found, the request fails with an actionable error rather than
+  inventing competitors or asking for manual entry. Follow the error guidance
+  before retrying; a more descriptive public repository README may help discovery.
   All comparisons are documentation-based, not independent benchmarks. Unknown
   evidence is not proof that a feature is absent. Review AI-generated claims
   against the cited sources before relying on them.
@@ -72,11 +90,16 @@ deployment or agent was created, and no keys were retrieved. No GPT-image agent
 configuration or image-generation success was established by this discovery.
 An authorized GPT-image deployment and its server configuration remain required
 for live illustrations; deployment provisioning is a separate operator action.
+A repeat Azure CLI deployment-list check during the automatic-discovery update
+again found no GPT-image deployments in either account. Live image generation
+remains unavailable with these resources.
 
 If image configuration is missing or generation fails, the report remains
 downloadable and explicitly says no AI image was generated. Fixed vector/Mermaid
 workflow and evidence diagrams remain available. These are not represented as
 GPT-image output. Generated illustrations are illustrative, not evidence.
+The fixed workflow explicitly shows primary evidence review, automatic competitor
+discovery, pinned README comparison and report export.
 
 ## Export Notes
 
@@ -94,12 +117,22 @@ Frontend tests cover exports, escaping, large PNGs, pagination, modal behavior,
 responsive layouts, actual downloads and image rendering under the server CSP.
 These use fixtures: they do not establish live GitHub/provider end-to-end success
 or GPT-image deployment availability.
+The automatic-discovery update passed 306 backend tests (including 14 feature
+review tests), 210 frontend unit tests, and four feature-review browser tests.
+Typecheck, production frontend build, backend build and Clippy also passed.
+Mocked explorer integration covers search planning, selection from fetched IDs,
+pinned README retrieval, empty searches, invalid selections, missing READMEs and
+provider failures. Browser tests cover the two-field request, error retry,
+desktop/mobile layouts and actual PDF/Markdown downloads. A live public GitHub
+search smoke check returned valid results; full live AI report generation was
+not tested, and the running service was not restarted.
 
 ```sh
 # From backend/
 cargo test feature_review
 # From frontend/
 bun run test:unit
+bun run typecheck
 bun run build
 bun run test:e2e e2e/feature-review.spec.ts
 ```

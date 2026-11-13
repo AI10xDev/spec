@@ -140,3 +140,4 @@ Styling commit `500e9df` is confirmed on `origin/dev`. No additional source chan
 
 Start the rebuilt stack with `./run.sh`. No existing server was restarted.
 
+[spec-session] Error: OpenCode server exited (137); it will not be restarted

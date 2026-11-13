@@ -572,3 +572,5 @@ Verify the SSH host key beforehand. The remote alias must support foreground bui
 
 **Validation:** 16 backend tests, 5 frontend tests, and 8 browser tests passed, plus formatting, Clippy, typechecking, and builds. No live SSH/model execution was tested. Unrelated scratch files were left untouched.
 
+[spec-session] The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch(); reconnecting (live output may have a gap)
+[spec-session] Error: OpenCode server exited (137); it will not be restarted
