@@ -26,7 +26,76 @@ async function workspace(page: Page, available = true) {
   return page.getByRole("checkbox", { name: "Trailing completions" })
 }
 
-const gradient = "linear-gradient(rgb(198, 40, 40), rgb(27, 78, 245))"
+// Inspect rendered pixels rather than trusting computed gradients on an invisible input.
+for (const width of [1440, 390]) {
+  for (const forcedColors of ["none", "active"] as const) {
+    for (const available of [true, false]) {
+      test(`checkbox has a visible outline (${width}, ${forcedColors}, available=${available})`, async ({ page }, testInfo) => {
+        await page.setViewportSize({ width, height: 900 })
+        await page.emulateMedia({ forcedColors })
+        const checkbox = await workspace(page, available)
+        if (available) await expect(checkbox).toBeEnabled()
+        else await expect(checkbox).toBeDisabled()
+        for (const checked of available ? [false, true] : [false]) {
+          if (available) await checkbox.setChecked(checked)
+          await page.getByRole("textbox", { name: "Edit draft.md" }).focus()
+          await checkbox.scrollIntoViewIfNeeded()
+          const box = (await checkbox.boundingBox())!
+          expect(box.width).toBeGreaterThanOrEqual(16)
+          expect(box.height).toBeGreaterThanOrEqual(16)
+          expect(box.x).toBeGreaterThanOrEqual(0)
+          expect(box.x + box.width).toBeLessThanOrEqual(width)
+          expect(box.y).toBeGreaterThanOrEqual(0)
+          expect(box.y + box.height).toBeLessThanOrEqual(900)
+          const image = await page.screenshot({
+            path: testInfo.outputPath(`checkbox-${checked}.png`),
+            clip: { x: Math.floor(box.x) - 2, y: Math.floor(box.y) - 2, width: Math.ceil(box.width) + 4, height: Math.ceil(box.height) + 4 },
+            scale: "css",
+          })
+          const edges = await page.evaluate(async (base64) => {
+            const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0))
+            const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }))
+            const canvas = document.createElement("canvas")
+            canvas.width = bitmap.width
+            canvas.height = bitmap.height
+            const context = canvas.getContext("2d")!
+            context.drawImage(bitmap, 0, 0)
+            bitmap.close()
+            const { data, width, height } = context.getImageData(0, 0, canvas.width, canvas.height)
+            function luminance(x: number, y: number) {
+              const offset = (y * width + x) * 4
+              const rgb = [data[offset], data[offset + 1], data[offset + 2]].map((value) => {
+                const s = value / 255
+                return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
+              })
+              return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722
+            }
+            const background = luminance(0, 0)
+            const counts = { top: 0, bottom: 0, left: 0, right: 0 }
+            for (let y = 2; y < height - 2; y++) {
+              for (let x = 2; x < width - 2; x++) {
+                const pixel = luminance(x, y)
+                const contrast = (Math.max(pixel, background) + 0.05) / (Math.min(pixel, background) + 0.05)
+                if (contrast < 3) continue
+                if (y < 5) counts.top++
+                if (y >= height - 5) counts.bottom++
+                if (x < 5) counts.left++
+                if (x >= width - 5) counts.right++
+              }
+            }
+            return counts
+          }, image.toString("base64"))
+          // Every edge needs visible pixels, even when disabled or in high contrast.
+          for (const [edge, pixels] of Object.entries(edges)) {
+            expect(pixels, `${edge} outline pixels at >= 3:1 contrast, checked=${checked}`).toBeGreaterThanOrEqual(4)
+          }
+        }
+      })
+    }
+  }
+}
+
+const gradient = "linear-gradient(rgb(255, 112, 112), rgb(112, 157, 255))"
 
 for (const forcedColors of ["none", "active"] as const) {
   test(`editor checkbox preserves label, keyboard, focus and state (${forcedColors})`, async ({ page }, testInfo) => {
@@ -68,7 +137,7 @@ for (const forcedColors of ["none", "active"] as const) {
     await expect(checkbox).toBeDisabled()
     await expect(checkbox).not.toBeChecked()
     await expect(checkbox).toHaveCSS("cursor", "not-allowed")
-    await expect(checkbox).toHaveCSS("opacity", forcedColors === "active" ? "1" : "0.45")
+    await expect(checkbox).toHaveCSS("opacity", forcedColors === "active" ? "1" : "0.75")
     // Attempt a real pointer click even though Playwright knows the control is disabled.
     await page.locator(".completion-controls label").click({ force: true })
     await expect(checkbox).not.toBeChecked()

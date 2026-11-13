@@ -173,24 +173,25 @@ h2 { margin: 8px 0 0; font-size: 17px; font-weight: 500; overflow-wrap: anywhere
   padding: 0;
   border: 2px solid transparent;
   border-radius: 3px;
-  background: linear-gradient(var(--surface-deep), var(--surface-deep)) padding-box, linear-gradient(to bottom, #c62828, #1b4ef5) border-box;
+  background: linear-gradient(var(--surface-deep), var(--surface-deep)) padding-box, linear-gradient(to bottom, #ff7070, #709dff) border-box;
   display: grid;
   place-content: center;
   cursor: pointer;
 }
-.completion-controls input[type=checkbox]:checked { background: linear-gradient(to bottom, #c62828, #1b4ef5) border-box; }
+.completion-controls input[type=checkbox]:checked { background: linear-gradient(to bottom, #ff7070, #709dff) border-box; }
 .completion-controls input[type=checkbox]::before {
   content: "";
   width: 4px;
   height: 8px;
-  border: solid #fff;
+  border: solid var(--surface-deep);
   border-width: 0 2px 2px 0;
   transform: translateY(-1px) rotate(45deg);
   visibility: hidden;
 }
 .completion-controls input[type=checkbox]:checked::before { visibility: visible; }
 .completion-controls input[type=checkbox]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.completion-controls input[type=checkbox]:disabled { opacity: .45; cursor: not-allowed; }
+/* Keep the outline discernible on the dark editor even without an AI provider. */
+.completion-controls input[type=checkbox]:disabled { opacity: .75; cursor: not-allowed; }
 @media (forced-colors: active) {
   .completion-controls input[type=checkbox] { appearance: auto; background: none; border: revert; }
   .completion-controls input[type=checkbox]::before { content: none; }
