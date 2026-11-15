@@ -379,7 +379,11 @@ input::placeholder { color: var(--subtle); opacity: 1; }
 .build-progress-track.indeterminate .build-progress-fill { animation: build-activity 1.8s ease-in-out infinite alternate; }
 .build-progress p { margin: 9px 0 4px; color: var(--muted); line-height: 1.5; }
 .build-progress small { color: var(--muted); overflow-wrap: anywhere; }
-.build-checklist { list-style: none; margin: 12px 0; padding: 0; max-height: 210px; overflow-y: auto; }
+.build-checklists { max-height: 290px; overflow-y: auto; }
+.build-checklist-heading { display: flex; justify-content: space-between; gap: 12px; margin: 12px 0 4px; }
+.build-checklist-heading strong { font-weight: 500; }
+.build-checklist-heading span { color: var(--muted); }
+.build-checklist { list-style: none; margin: 4px 0 12px; padding: 0; }
 .build-checklist li { display: flex; align-items: flex-start; gap: 9px; padding: 8px 2px; border-bottom: 1px solid var(--border); line-height: 1.5; }
 .task-checkbox { position: relative; flex: 0 0 20px; height: 20px; border: 2px solid transparent; border-radius: 6px; background: linear-gradient(var(--surface), var(--surface)) padding-box, var(--rainbow) border-box; }
 .task-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }

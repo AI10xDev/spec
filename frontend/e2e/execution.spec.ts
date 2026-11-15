@@ -60,13 +60,17 @@ fs.appendFileSync(${JSON.stringify(path.join(directory, "launches"))}, "launch\\
     child.on("exit", (code) => process.exit(code ?? 1))
   } else if (content.startsWith("PROGRESS\\n")) {
     let previous = "0"
+    process.stdout.write("# Todos (Integrator)\\n\\n# Todos (Supervisor)\\n\\n")
     setInterval(() => {
       const phase = fs.readFileSync(${JSON.stringify(path.join(directory, "progress-phase"))}, "utf8")
       if (phase === previous) return
       previous = phase
-      if (phase === "3") process.exit(0)
+      if (phase === "3") {
+        process.stdout.write("# Todos (Supervisor)\\n[\\u2713] Review plan\\n[\\u2713] Review integration\\n\\n")
+        process.exit(0)
+      }
       const rows = phase === "1" ? ["[\\u2713] Implement", "[\\u2022] Verify", "[ ] Document"] : ["[\\u2713] Implement", "[\\u2713] Verify", "[\\u2713] Document"]
-      process.stdout.write("\\x1b[0m# \\x1b[0mTodos\\n" + rows.join("\\n") + "\\n\\n")
+      process.stdout.write("\\x1b[0m# \\x1b[0mTodos (Integrator)\\n" + rows.join("\\n") + "\\n\\n# Todos (Supervisor)\\n[\\u2713] Review plan\\n[ ] Review integration\\n\\n")
     }, 50)
     setTimeout(() => process.exit(2), 60_000)
   } else if (content.startsWith("WAIT\\n")) {
@@ -172,31 +176,38 @@ test("rainbow completion follows live task reports and resets across runs and ta
   await expect(page.getByLabel("Run output")).toContainText("fixture stdout")
 
   await writeFile(path.join(directory, "progress-phase"), "1")
-  await expect(bar).toHaveAttribute("aria-valuenow", "33")
-  await expect(section).toContainText("1 of 3 tasks reported complete")
+  await expect(bar).toHaveAttribute("aria-valuenow", "40")
+  await expect(section).toContainText("2 of 5 tasks reported complete")
+  await expect(section.getByRole("group", { name: "Integrator checklist", exact: true })).toContainText("1 of 3 complete")
+  const supervisor = section.getByRole("group", { name: "Supervisor checklist", exact: true })
+  await expect(supervisor).toContainText("1 of 2 complete")
+  await expect(supervisor.getByRole("checkbox", { name: "Review plan: Completed", exact: true })).toBeChecked()
+  await expect(supervisor.getByRole("checkbox", { name: "Review integration: Pending", exact: true })).not.toBeChecked()
   await expect(section.getByRole("checkbox", { name: "Implement: Completed", exact: true })).toBeChecked()
   await expect(section.getByRole("checkbox", { name: "Verify: In progress", exact: true })).not.toBeChecked()
   await expect(section.getByRole("checkbox", { name: "Document: Pending", exact: true })).not.toBeChecked()
   expect(await bar.locator("div").evaluate((element) => getComputedStyle(element).backgroundImage)).toContain("linear-gradient")
-  await page.screenshot({ path: testInfo.outputPath("build-progress-33-desktop.png"), fullPage: true })
+  await page.screenshot({ path: testInfo.outputPath("build-progress-40-desktop.png"), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
   await editor.fill("Unsaved edits do not change measured progress.")
-  await expect(bar).toHaveAttribute("aria-valuenow", "33")
+  await expect(bar).toHaveAttribute("aria-valuenow", "40")
 
   await page.getByRole("textbox", { name: "New filename" }).fill("other-progress.md")
   await page.getByRole("button", { name: "Create file" }).click()
   await expect(page.getByRole("progressbar")).toHaveCount(0)
   await page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button", { name: /^progress\.md/ }).click()
-  await expect(bar).toHaveAttribute("aria-valuenow", "33")
+  await expect(bar).toHaveAttribute("aria-valuenow", "40")
 
   await writeFile(path.join(directory, "progress-phase"), "2")
-  await expect(bar).toHaveAttribute("aria-valuenow", "100")
-  await expect(section.getByRole("checkbox", { checked: true })).toHaveCount(3)
+  await expect(bar).toHaveAttribute("aria-valuenow", "80")
+  await expect(section.getByRole("checkbox", { checked: true })).toHaveCount(4)
+  await expect(supervisor.getByRole("checkbox", { name: "Review integration: Pending", exact: true })).not.toBeChecked()
   await expect(section).toContainText("Build in progress")
   await writeFile(path.join(directory, "progress-phase"), "3")
   await expect(section).toContainText("Build run completed")
   await expect(bar).toHaveAttribute("aria-valuenow", "100")
+  await expect(section.getByRole("checkbox", { checked: true })).toHaveCount(5)
   await expect(run).toBeEnabled()
   await page.screenshot({ path: testInfo.outputPath("build-progress-100-mobile.png"), fullPage: true })
 

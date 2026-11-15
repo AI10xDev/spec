@@ -187,6 +187,47 @@ test("session PDF exports retained and Performance output rather than the associ
   expect(errors).toEqual([])
 })
 
+test("integrator and supervisor checklists stay separate through partial updates and clearing", async ({ page }) => {
+  const integrator = "# Todos (Integrator)\n[\u2713] Implement\n[\u2022] Verify\n[ ] Document\n\n"
+  const supervisor = "# Todos (Supervisor)\n[\u2713] Review plan\n[ ] Review integration\n\n"
+  let current = { ...running, output: integrator + supervisor }
+  const { writes, errors } = await workspace(page, current)
+  await page.route("**/api/runs/prior-harness", route => route.fulfill({ json: current }))
+  const section = page.getByRole("region", { name: "Build progress for first.md", exact: true })
+  const bar = section.getByRole("progressbar")
+  const implementation = section.getByRole("group", { name: "Integrator checklist", exact: true })
+  const review = section.getByRole("group", { name: "Supervisor checklist", exact: true })
+  await expect(bar).toHaveAttribute("aria-valuenow", "40")
+  await expect(implementation.getByRole("checkbox")).toHaveCount(3)
+  await expect(review.getByRole("checkbox")).toHaveCount(2)
+
+  current = { ...current, output: current.output + integrator.replace("[\u2022]", "[\u2713]").replace("[ ]", "[\u2713]") }
+  await expect(bar).toHaveAttribute("aria-valuenow", "80")
+  await expect(implementation.getByRole("checkbox", { checked: true })).toHaveCount(3)
+  await expect(review.getByRole("checkbox", { checked: true })).toHaveCount(1)
+  const finalReview = supervisor.replace("[ ]", "[\u2713]")
+  current = { ...current, output: current.output + finalReview.slice(0, -1) }
+  await expect(bar).not.toHaveAttribute("aria-valuenow")
+  await expect(implementation.getByRole("checkbox", { checked: true })).toHaveCount(3)
+  await expect(review.getByRole("checkbox")).toHaveCount(0)
+  await expect(review).toContainText("Waiting for a complete supervisor task report")
+
+  current = { ...current, output: current.output + "\n" }
+  await expect(bar).toHaveAttribute("aria-valuenow", "100")
+  await expect(section).toContainText("Build in progress.")
+  current = { ...current, output: current.output + "# Todos (Supervisor)\n\n" }
+  await expect(bar).not.toHaveAttribute("aria-valuenow")
+  await expect(implementation.getByRole("checkbox", { checked: true })).toHaveCount(3)
+  await expect(review.getByRole("checkbox")).toHaveCount(0)
+  current = { ...current, output: current.output + finalReview, status: "completed", recoverable: false }
+  await expect(bar).toHaveAttribute("aria-valuenow", "100")
+  await expect(section).toContainText("Build run completed.")
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  expect(writes).toEqual([])
+  expect(errors).toEqual([])
+})
+
 test("live checklist follows snapshots, tab selection and standalone output without assuming completion", async ({ page }) => {
   test.setTimeout(60_000)
   const firstTasks = "# Todos\n[\u2713] Implement\n[\u2022] Verify\n[ ] Document\n\n"

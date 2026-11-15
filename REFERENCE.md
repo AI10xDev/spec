@@ -164,16 +164,20 @@ For responsiveness, files over 256 Ki characters or 5,000 lines use a labeled pl
 
 The rainbow bar and read-only step checklist appear above the associated build
 output and in the selected build's Active runs detail. They update with the
-existing live poll (normally every 650 ms). The bar counts completed tasks in the
-latest complete OpenCode CLI `# Todos` block, ignoring ANSI styling and fenced
-examples. The supervised runner forwards the builder's structured `todo.updated`
-snapshots into this format; supervisor tasks are not included. Cancelled
+existing live poll (normally every 650 ms). The bar counts completed tasks across
+the latest complete `# Todos (Integrator)` and `# Todos (Supervisor)` snapshots,
+displaying each role's checklist separately. The supervised runner forwards both
+agents' structured `todo.updated` events; it resets both lists for every sweep.
+Legacy unlabeled `# Todos` snapshots are treated as integrator reports. ANSI
+styling and fenced examples are ignored. Cancelled
 tasks stay in the total but do not count as completed. A revised task list can
 lower the percentage; these are agent-reported tasks, not independently verified
 requirements, elapsed-time estimates, or progress inferred from editor `# ` markers.
 
 Before task counts arrive, unsupported log formats and partially streamed lists
-show indeterminate activity while the build runs. Truncated output also has no
+show indeterminate activity while the build runs. A partial, cleared or invalid
+role snapshot hides the combined percentage without erasing the other role's
+checklist. Truncated output also has no
 percentage because the complete task-list context is unavailable. Activity stops
 on terminal or unavailable states; unavailable states label any last reported
 counts as potentially stale. A successful CLI exit alone never fills the bar.
