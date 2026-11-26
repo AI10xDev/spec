@@ -50,6 +50,7 @@ const running = { ...completed, status: "running", recoverable: true }
 const second = { ...completed, id: "other-harness", name: "second.md", output: "Independent second-file logs" }
 const buttonName = "Use recommended & continue"
 const savedBuild = { parent_id: running.id, name: "first.md", revision: "acknowledged-snapshot", status: "waiting" }
+const builder = { ...completed, stage: "builder" as const, approvable: true, report: "Validated builder plan\nImplement <safely> and verify end-to-end.", truncated: true }
 
 async function workspace(page: Page, output: (Output & { continuable?: boolean }) | null = completed, execution = true) {
   const writes: { path: string; method: string; body: unknown }[] = []
@@ -83,6 +84,271 @@ async function workspace(page: Page, output: (Output & { continuable?: boolean }
   if (output) await expect(page.getByLabel("Run output")).toHaveText(output.output)
   return { writes, dialogs, errors }
 }
+
+for (const width of [1440, 390]) {
+  test(`staged approval requires confirmation and starts a fresh integrator at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 })
+    const { writes, dialogs, errors } = await workspace(page, builder)
+    const approve = page.getByRole("button", { name: "Approve & implement", exact: true })
+    const report = page.getByRole("region", { name: "Builder report", exact: true })
+    await expect(report).toContainText(builder.report)
+    await expect(page.getByLabel("Run output", { exact: true })).not.toContainText(builder.report)
+    await expect(page.getByText("Older output was truncated; showing the latest 256 KiB.")).toBeVisible()
+    await expect(approve).toBeEnabled()
+    await approve.click()
+    expect(writes).toEqual([])
+    expect(dialogs[0]).toContain("end-to-end")
+    expect(dialogs[0]).toContain("Tools are automatically approved once per correlated request, with no persistent grants.")
+    expect(dialogs[0]).toContain("SPEC_BUILD_AUTO=1 is not authorization.")
+    expect(dialogs[0]).toContain("Runtime questions require user input.")
+    expect(dialogs[0]).not.toContain("recommended answers")
+    expect(dialogs[0]).toContain("fresh integrator")
+    page.removeAllListeners("dialog")
+    page.on("dialog", async dialog => { dialogs.push(dialog.message()); await dialog.accept() })
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    await page.route("**/api/runs/prior-harness/approve", async route => { await held; await route.fulfill({ json: { id: "fresh-integrator" } }) })
+    let releasePoll!: () => void
+    const heldPoll = new Promise<void>(resolve => { releasePoll = resolve })
+    const integrator = { ...completed, id: "fresh-integrator", stage: "integrator", approvable: false, report: "Implementation and verification report", output: "Integrator finished" }
+    await page.route("**/api/runs/fresh-integrator", async route => { await heldPoll; await route.fulfill({ json: integrator }) })
+    await approve.evaluate((button: HTMLButtonElement) => { button.click(); button.click() })
+    await expect(approve).toBeDisabled()
+    await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled()
+    await expect(page.getByRole("button", { name: "Use recommended & revise builder", exact: true })).toBeDisabled()
+    await expect.poll(() => writes).toEqual([{ path: "/api/runs/prior-harness/approve", method: "POST", body: {} }])
+    await page.getByRole("tabpanel").getByRole("button", { name: /second\.md/ }).click()
+    await expect(page.getByLabel("Run output", { exact: true })).toHaveText(second.output)
+    release()
+    await expect(page.getByRole("status")).toContainText("A fresh integrator")
+    await expect(page.getByLabel("Run output", { exact: true })).toHaveText(second.output)
+    await page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button", { name: /^first\.md/ }).click()
+    await expect(page.getByLabel("Run output", { exact: true })).toHaveText("Starting integrator...")
+    await expect(page.getByText("Integrator progress", { exact: true })).toBeVisible()
+    await expect(report).toHaveCount(0)
+    await expect(approve).toHaveCount(0)
+    releasePoll()
+    await expect(page.getByRole("region", { name: "Integrator report", exact: true })).toContainText(integrator.report)
+    await expect(page.getByRole("button", { name: buttonName, exact: true })).toBeEnabled()
+    await page.route("**/api/runs/fresh-integrator/continue", route => route.fulfill({ json: { id: "integrator-revision" } }))
+    await page.route("**/api/runs/integrator-revision", route => route.fulfill({ json: { ...integrator, id: "integrator-revision", output: "Integrator follow-up" } }))
+    await page.getByLabel("Feedback to build session").fill("Also verify mobile")
+    await page.getByRole("button", { name: "Send & continue", exact: true }).click()
+    await expect(page.getByLabel("Run output", { exact: true })).toHaveText("Integrator follow-up")
+    expect(writes).toEqual([
+      { path: "/api/runs/prior-harness/approve", method: "POST", body: {} },
+      { path: "/api/runs/fresh-integrator/continue", method: "POST", body: { message: "Also verify mobile" } },
+    ])
+    expect(dialogs).toHaveLength(2)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    expect(errors).toEqual([])
+  })
+}
+
+for (const queued of [false, true]) {
+  test(`staged ${queued ? "queued" : "immediate"} feedback revises builder and never approves`, async ({ page }) => {
+    let current = { ...builder, ...(queued ? { status: "running", recoverable: true, approvable: false, report: null } : {}) }
+    const { writes, dialogs, errors } = await workspace(page, current)
+    await page.route("**/api/runs/prior-harness", route => route.fulfill({ json: current }))
+    const approve = page.getByRole("button", { name: "Approve & implement", exact: true })
+    await page.getByLabel("Feedback to build session").fill("Revise the plan, do not implement")
+    await expect(approve).toBeDisabled()
+    await page.route("**/api/runs/prior-harness/continue", route => route.fulfill({ json: { id: "revised-builder" } }))
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    await page.route("**/api/runs/revised-builder", async route => { await held; await route.fulfill({ json: { ...builder, id: "revised-builder", report: "Revised validated plan", output: "Builder revision complete" } }) })
+    await page.getByRole("button", { name: queued ? "Queue follow-up" : "Send & revise builder", exact: true }).click()
+    if (queued) {
+      await expect(page.getByRole("region", { name: "Queued follow-ups" })).toContainText("never approve integration")
+      expect(writes).toEqual([])
+      current = builder
+    }
+    await expect(page.getByLabel("Run output", { exact: true })).toHaveText("Starting...")
+    await expect(page.getByText("Builder progress", { exact: true })).toBeVisible()
+    await expect(page.getByRole("region", { name: "Builder report", exact: true })).toHaveCount(0)
+    await expect(approve).toBeDisabled()
+    release()
+    await expect(page.getByRole("region", { name: "Builder report", exact: true })).toContainText("Revised validated plan")
+    await expect(approve).toBeEnabled()
+    expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: { message: "Revise the plan, do not implement" } }])
+    expect(dialogs).toEqual([])
+    expect(errors).toEqual([])
+  })
+}
+
+test("staged stale saved specs remain unapprovable after reload without local edit history", async ({ page }) => {
+  const { writes, dialogs, errors } = await workspace(page, builder)
+  const approve = page.getByRole("button", { name: "Approve & implement", exact: true })
+  await expect(approve).toBeEnabled()
+  await page.route("**/api/files/first.md", route => route.fulfill({ json: { name: "first.md", content: "Changed saved spec", revision: "revision-2" } }))
+  await page.getByRole("textbox", { name: "Edit first.md", exact: true }).fill("Changed saved spec")
+  await expect(page.getByRole("region", { name: "Builder approval" })).toContainText("Editor changes are not covered by this report")
+  await expect(page.getByRole("region", { name: "Spec editing pane" }).getByText("Saved", { exact: true })).toBeVisible()
+  await expect(approve).toBeDisabled()
+  // The backend compares the saved document with the original builder snapshot.
+  await page.route("**/api/files/first.md/run{,/log}", route => route.fulfill({ json: { ...builder, approvable: false } }))
+  await page.reload()
+  await expect(page.getByRole("textbox", { name: "Edit first.md", exact: true })).toHaveValue("Changed saved spec")
+  await expect(page.getByRole("region", { name: "Spec editing pane" }).getByText("Saved", { exact: true })).toBeVisible()
+  await expect(page.getByRole("region", { name: "Builder report", exact: true })).toContainText(builder.report)
+  await expect(page.getByRole("region", { name: "Builder approval" })).not.toContainText("Editor changes are not covered by this report")
+  await expect(approve).toBeDisabled()
+  await page.getByRole("button", { name: "Load nohup output", exact: true }).click()
+  await expect(page.getByRole("status")).toHaveText("Loaded first.md.out")
+  await expect(approve).toBeDisabled()
+  expect(writes).toEqual([{ path: "/api/files/first.md", method: "PUT", body: { content: "Changed saved spec", revision: "revision-1" } }])
+  expect(dialogs).toEqual([])
+  expect(errors).toEqual([])
+})
+
+test("staged local edits stay unapprovable after autosave until a new builder uses them", async ({ page }) => {
+  const { writes, errors } = await workspace(page, builder)
+  const approve = page.getByRole("button", { name: "Approve & implement", exact: true })
+  await expect(approve).toBeEnabled()
+  await page.route("**/api/files/first.md", route => route.fulfill({ json: { name: "first.md", content: "Edited spec", revision: "revision-2" } }))
+  await page.getByRole("textbox", { name: "Edit first.md", exact: true }).fill("Edited spec")
+  await expect(approve).toBeDisabled()
+  await expect.poll(() => writes.some(write => write.method === "PUT")).toBe(true)
+  await expect(page.getByRole("region", { name: "Spec editing pane" }).getByText("Saved", { exact: true })).toBeVisible()
+  await expect(approve).toBeDisabled()
+  await expect(page.getByRole("region", { name: "Builder approval" })).toContainText("even if those edits were autosaved")
+  await page.getByRole("button", { name: "Load nohup output", exact: true }).click()
+  await expect(approve).toBeDisabled()
+  page.removeAllListeners("dialog")
+  page.on("dialog", dialog => dialog.accept())
+  await page.route("**/api/runs", route => route.fulfill({ json: { id: "new-builder" } }))
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route("**/api/runs/new-builder", async route => { await held; await route.fulfill({ json: { ...builder, id: "new-builder", report: "Plan for edited spec", output: "New builder finished" } }) })
+  await page.getByRole("button", { name: "Save & run" }).click()
+  await expect(page.getByText("Builder progress", { exact: true })).toBeVisible()
+  await expect(page.getByRole("region", { name: "Builder report", exact: true })).toHaveCount(0)
+  await expect(approve).toBeDisabled()
+  release()
+  await expect(page.getByRole("region", { name: "Builder report", exact: true })).toContainText("Plan for edited spec")
+  await expect(approve).toBeEnabled()
+  expect(writes.filter(write => write.path.startsWith("/api/runs"))).toEqual([{ path: "/api/runs", method: "POST", body: { name: "first.md", revision: "revision-2" } }])
+  expect(errors).toEqual([])
+})
+
+for (const scenario of [
+  { name: "missing eligibility", output: { ...builder, approvable: undefined } },
+  { name: "ineligible", output: { ...builder, approvable: false } },
+  { name: "missing report", output: { ...builder, report: null } },
+  { name: "failed", output: { ...builder, status: "failed (7)" } },
+  { name: "unresolved", output: { ...builder, recoverable: true } },
+  { name: "stale transport", output: { ...builder, transportUnavailable: true } },
+  { name: "execution disabled", output: builder, execution: false },
+]) {
+  test(`staged approval is disabled for ${scenario.name}`, async ({ page }) => {
+    const { writes } = await workspace(page, scenario.output, scenario.execution)
+    await expect(page.getByRole("button", { name: "Approve & implement", exact: true })).toBeDisabled()
+    expect(writes).toEqual([])
+  })
+}
+
+test("staged approval is absent for legacy, retained and integrator output", async ({ page }) => {
+  const { writes } = await workspace(page)
+  const approve = page.getByRole("button", { name: "Approve & implement", exact: true })
+  await expect(approve).toHaveCount(0)
+  await page.route("**/api/files/first.md/retained-runs", route => route.fulfill({ json: { runs: [{ id: builder.id, modified: 1 }], truncated: false } }))
+  await page.route("**/api/files/first.md/retained-runs/prior-harness/log", route => route.fulfill({ json: builder }))
+  await page.getByRole("button", { name: "Browse retained runs", exact: true }).click()
+  await page.getByLabel("Retained runs for first.md (log updated)").selectOption(builder.id)
+  await expect(page.getByRole("region", { name: "Builder report", exact: true })).toBeVisible()
+  await expect(approve).toHaveCount(0)
+  await page.getByRole("button", { name: "Return to associated output", exact: true }).click()
+  await page.route("**/api/files/first.md/run/log", route => route.fulfill({ json: { ...builder, stage: "integrator" } }))
+  await page.getByRole("button", { name: "Load nohup output", exact: true }).click()
+  await expect(page.getByRole("region", { name: "Integrator report", exact: true })).toBeVisible()
+  await expect(approve).toHaveCount(0)
+  expect(writes).toEqual([])
+})
+
+test("staged approval errors keep the report and require explicit recovery before retry", async ({ page }) => {
+  const { writes } = await workspace(page, builder)
+  page.removeAllListeners("dialog")
+  page.on("dialog", dialog => dialog.accept())
+  const approve = page.getByRole("button", { name: "Approve & implement", exact: true })
+  await page.route("**/api/runs/prior-harness/approve", route => route.fulfill({ status: 409, json: { error: "Builder is no longer the latest successful run" } }))
+  await approve.click()
+  await expect(page.getByRole("alert")).toContainText("Builder is no longer the latest successful run")
+  await expect(page.getByRole("region", { name: "Builder report", exact: true })).toContainText(builder.report)
+  await expect(approve).toBeDisabled()
+  await expect(page.getByRole("status")).toContainText("Load nohup output")
+  await page.route("**/api/files/first.md/run/log", route => route.fulfill({ status: 502, json: { error: "SSH unavailable" } }))
+  await page.getByRole("button", { name: "Load nohup output", exact: true }).click()
+  await expect(page.getByRole("alert")).toContainText("SSH unavailable")
+  await expect(approve).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Use recommended & revise builder", exact: true })).toBeDisabled()
+  await page.route("**/api/files/first.md/run/log", route => route.fulfill({ json: builder }))
+  await page.getByRole("button", { name: "Load nohup output", exact: true }).click()
+  await expect(approve).toBeEnabled()
+  expect(writes).toEqual([{ path: "/api/runs/prior-harness/approve", method: "POST", body: {} }])
+})
+
+test("staged recommendation preserves an unsent draft and cannot imply approval", async ({ page }) => {
+  const { writes, dialogs } = await workspace(page, builder)
+  const approve = page.getByRole("button", { name: "Approve & implement", exact: true })
+  const feedback = page.getByLabel("Feedback to build session")
+  await feedback.fill("Unsent revision request")
+  await expect(approve).toBeDisabled()
+  await page.route("**/api/runs/prior-harness/continue", route => route.fulfill({ json: { id: "recommendation-builder" } }))
+  await page.route("**/api/runs/recommendation-builder", route => route.fulfill({ json: { ...builder, id: "recommendation-builder", report: "Recommended plan revision", output: "Recommended revision done" } }))
+  await page.getByRole("button", { name: "Use recommended & revise builder", exact: true }).click()
+  await expect(page.getByRole("region", { name: "Builder report", exact: true })).toContainText("Recommended plan revision")
+  await expect(feedback).toHaveValue("Unsent revision request")
+  await expect(approve).toBeDisabled()
+  await feedback.fill("")
+  await expect(approve).toBeEnabled()
+  expect(writes).toEqual([{ path: "/api/runs/prior-harness/continue", method: "POST", body: {} }])
+  expect(dialogs).toEqual([])
+})
+
+test("staged late approval response cannot overwrite a newer associated run", async ({ page }) => {
+  const { writes } = await workspace(page, builder)
+  page.removeAllListeners("dialog")
+  page.on("dialog", dialog => dialog.accept())
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route("**/api/runs/prior-harness/approve", async route => { await held; await route.fulfill({ json: { id: "older-integrator" } }) })
+  await page.getByRole("button", { name: "Approve & implement", exact: true }).click()
+  await expect.poll(() => writes.length).toBe(1)
+  await page.route("**/api/files/first.md/run/log", route => route.fulfill({ json: { ...builder, id: "newest-run", stage: "integrator", approvable: false, report: "Newest implementation report", output: "Newest associated output" } }))
+  await page.getByRole("button", { name: "Load nohup output", exact: true }).click()
+  await expect(page.getByLabel("Run output", { exact: true })).toHaveText("Newest associated output")
+  release()
+  await expect(page.getByRole("button", { name: buttonName, exact: true })).toBeEnabled()
+  await expect(page.getByLabel("Run output", { exact: true })).toHaveText("Newest associated output")
+  await expect(page.getByRole("region", { name: "Integrator report", exact: true })).toContainText("Newest implementation report")
+  expect(writes).toEqual([{ path: "/api/runs/prior-harness/approve", method: "POST", body: {} }])
+})
+
+test("staged saved editor queue blocks approval and its new builder still needs explicit approval", async ({ page }) => {
+  const { writes, dialogs } = await workspace(page, { ...builder, status: "running", recoverable: true, approvable: false, report: null })
+  page.removeAllListeners("dialog")
+  page.on("dialog", async dialog => { dialogs.push(dialog.message()); await dialog.accept() })
+  await page.route("**/api/files/first.md", route => route.fulfill({ json: { name: "first.md", content: "Queued edited spec", revision: savedBuild.revision } }))
+  let queue: (typeof savedBuild & { id?: string })[] = []
+  await page.route("**/api/runs/prior-harness/queued-build", route => { queue = [savedBuild]; return route.fulfill({ json: savedBuild }) })
+  await page.route("**/api/queued-builds", route => route.fulfill({ json: queue }))
+  await page.getByRole("textbox", { name: "Edit first.md", exact: true }).fill("Queued edited spec")
+  await page.getByRole("button", { name: "Save & run" }).click()
+  await expect(page.getByRole("region", { name: "Saved build queue" })).toContainText(savedBuild.revision.slice(0, 12))
+  await page.route("**/api/runs/prior-harness", route => route.fulfill({ json: builder }))
+  const approve = page.getByRole("button", { name: "Approve & implement", exact: true })
+  await expect(page.getByRole("region", { name: "Builder report", exact: true })).toContainText(builder.report)
+  await expect(approve).toBeDisabled()
+  const child = { ...builder, id: "queued-builder", report: "Plan for queued edited spec", output: "Queued builder complete" }
+  await page.route("**/api/files/first.md/run", route => route.fulfill({ json: child }))
+  queue = [{ ...savedBuild, status: "started", id: child.id }]
+  await page.getByRole("button", { name: "Refresh saved build queue", exact: true }).click()
+  await expect(page.getByRole("region", { name: "Builder report", exact: true })).toContainText(child.report)
+  await expect(approve).toBeEnabled()
+  expect(writes.filter(write => write.method === "POST")).toEqual([{ path: "/api/runs/prior-harness/queued-build", method: "POST", body: { name: "first.md", revision: savedBuild.revision } }])
+  expect(dialogs).toHaveLength(1)
+  expect(dialogs[0]).toContain("fresh builder run")
+})
 
 test("session PDF downloads selected logs in the workspace and standalone mobile window", async ({ page }) => {
   const { writes, errors } = await workspace(page, running)
@@ -187,7 +453,7 @@ test("session PDF exports retained and Performance output rather than the associ
   expect(errors).toEqual([])
 })
 
-test("integrator and supervisor checklists stay separate through partial updates and clearing", async ({ page }) => {
+test("integrator progress excludes advisory supervisor updates and clearing", async ({ page }) => {
   const integrator = "# Todos (Integrator)\n[\u2713] Implement\n[\u2022] Verify\n[ ] Document\n\n"
   const supervisor = "# Todos (Supervisor)\n[\u2713] Review plan\n[ ] Review integration\n\n"
   let current = { ...running, output: integrator + supervisor }
@@ -197,17 +463,17 @@ test("integrator and supervisor checklists stay separate through partial updates
   const bar = section.getByRole("progressbar")
   const implementation = section.getByRole("group", { name: "Integrator checklist", exact: true })
   const review = section.getByRole("group", { name: "Supervisor checklist", exact: true })
-  await expect(bar).toHaveAttribute("aria-valuenow", "40")
+  await expect(bar).toHaveAttribute("aria-valuenow", "33")
   await expect(implementation.getByRole("checkbox")).toHaveCount(3)
   await expect(review.getByRole("checkbox")).toHaveCount(2)
 
   current = { ...current, output: current.output + integrator.replace("[\u2022]", "[\u2713]").replace("[ ]", "[\u2713]") }
-  await expect(bar).toHaveAttribute("aria-valuenow", "80")
+  await expect(bar).toHaveAttribute("aria-valuenow", "100")
   await expect(implementation.getByRole("checkbox", { checked: true })).toHaveCount(3)
   await expect(review.getByRole("checkbox", { checked: true })).toHaveCount(1)
   const finalReview = supervisor.replace("[ ]", "[\u2713]")
   current = { ...current, output: current.output + finalReview.slice(0, -1) }
-  await expect(bar).not.toHaveAttribute("aria-valuenow")
+  await expect(bar).toHaveAttribute("aria-valuenow", "100")
   await expect(implementation.getByRole("checkbox", { checked: true })).toHaveCount(3)
   await expect(review.getByRole("checkbox")).toHaveCount(0)
   await expect(review).toContainText("Waiting for a complete supervisor task report")
@@ -216,7 +482,7 @@ test("integrator and supervisor checklists stay separate through partial updates
   await expect(bar).toHaveAttribute("aria-valuenow", "100")
   await expect(section).toContainText("Build in progress.")
   current = { ...current, output: current.output + "# Todos (Supervisor)\n\n" }
-  await expect(bar).not.toHaveAttribute("aria-valuenow")
+  await expect(bar).toHaveAttribute("aria-valuenow", "100")
   await expect(implementation.getByRole("checkbox", { checked: true })).toHaveCount(3)
   await expect(review.getByRole("checkbox")).toHaveCount(0)
   current = { ...current, output: current.output + finalReview, status: "completed", recoverable: false }
@@ -419,7 +685,7 @@ test("continuation submits only the prior ID, locks competing writes, and polls 
   await page.getByLabel("Follow output").uncheck()
   const button = page.getByRole("button", { name: buttonName })
   await expect(button).toBeEnabled()
-  await expect(button).toHaveAttribute("title", /same build session.*automatic tool approval.*provider costs.*Does not save or upload/)
+  await expect(button).toHaveAttribute("title", /same stage and session.*Automatic tool approval.*provider costs.*Does not save or upload/)
   await expect(page.getByRole("button", { name: "Save repo changes" })).toBeEnabled()
   let release!: () => void
   const held = new Promise<void>((resolve) => { release = resolve })
@@ -1176,6 +1442,10 @@ test.describe("saved editor queue", () => {
       expect(message).toContain("survives page closure and server restart")
       expect(message).toContain("Later saves do not replace this snapshot")
       expect(message).toContain("provider costs")
+      expect(message).toContain("Tools are automatically approved once per correlated request, with no persistent grants.")
+      expect(message).toContain("SPEC_BUILD_AUTO=1 is not authorization.")
+      expect(message).toContain("Runtime questions require user input.")
+      expect(message).not.toContain("recommended answers")
     }
     await expect(editor).toHaveValue("Unapproved snapshot")
     await expect(page.getByLabel("Run output")).toHaveText(running.output)

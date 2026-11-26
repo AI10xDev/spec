@@ -372,6 +372,9 @@ input::placeholder { color: var(--subtle); opacity: 1; }
 }
 
 .build-progress { padding: 14px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; font-size: 12px; }
+.run-report { padding: 14px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; min-width: 0; font-size: 12px; }
+.run-report p { color: var(--muted); line-height: 1.5; }
+.run-report pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow-y: auto; line-height: 1.6; }
 .build-progress-label { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
 .build-progress-label strong { font-weight: 500; }
 .build-progress-track { height: 8px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); }

@@ -33,7 +33,8 @@ async fn analytics_local_full_report_and_missing_are_read_only_snapshots() {
         output["report"],
         json!({
             "id": "local", "name": "a.md", "status": "snapshot", "output": contents,
-            "truncated": false, "recoverable": false, "continuable": false
+            "truncated": false, "recoverable": false, "continuable": false,
+            "stage": null, "report": null, "approvable": false
         })
     );
     assert_eq!(output["runs"], json!([]));
@@ -177,7 +178,8 @@ async fn analytics_retained_requires_selection_and_reads_full_exact_named_report
         selected,
         json!({"report": {
         "id": id, "name": "a.md", "status": "completed", "output": contents,
-        "truncated": false, "recoverable": false, "continuable": false
+        "truncated": false, "recoverable": false, "continuable": false,
+        "stage": null, "report": null, "approvable": false
     }, "runs": [], "warnings": []})
     );
     for id in [unrelated, Uuid::new_v4().to_string()] {

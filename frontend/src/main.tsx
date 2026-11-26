@@ -8,6 +8,7 @@ import { LogOutput } from "./highlighting"
 import { Analytics } from "./analytics"
 import { FeatureReview } from "./feature-review"
 import { BuildProgress } from "./progress"
+import { RunReport } from "./run-report"
 import { Settings } from "./settings"
 import { ProjectPicker } from "./project-picker"
 import { ActiveRuns } from "./active-runs"
@@ -66,6 +67,9 @@ function App() {
   const [saving, setSaving] = useState<{ name: string; automatic: boolean } | null>(null)
   const submitting = useRef(false)
   const edited = useRef(new Set<string>())
+  const editVersions = useRef(new Map<string, number>())
+  const [builderVersions, setBuilderVersions] = useState<Record<string, number>>({})
+  const queuedVersions = useRef(new Map<string, number>())
   const autosaveBlocked = useRef(new Set<string>())
   const [windowFocused, setWindowFocused] = useState(() => document.hasFocus() && !document.hidden)
   const [repository, setRepository] = useState<Repository | null>(null)
@@ -132,8 +136,8 @@ function App() {
   const output = outputView === "optimization" ? optimization : historical ?? fileOutput
   const actionBusy = busy && !saving?.automatic
   const queuedEditorForFile = queuedBuilds?.some((item) => item.name === active && item.status !== "started") ?? false
-  const canContinue = !!output && !historical && outputView === "file" && execution && !busy && !queuedEditorForFile && !queuedFeedback[output.id] && output.status === "completed" && !output.recoverable && output.continuable === true
-  const canQueueFeedback = !!output && !historical && outputView === "file" && execution && !actionBusy && !queuedEditorForFile && !queuedFeedback[output.id] && !stoppedIds.current.has(output.id) && output.continuable === true && (output.status === "running" || (output.status === "completed" && !output.recoverable))
+  const canContinue = !!output && !historical && outputView === "file" && execution && !busy && !queuedEditorForFile && !queuedFeedback[output.id] && !output.transportUnavailable && output.status === "completed" && !output.recoverable && output.continuable === true
+  const canQueueFeedback = !!output && !historical && outputView === "file" && execution && !actionBusy && !queuedEditorForFile && !queuedFeedback[output.id] && !output.transportUnavailable && !stoppedIds.current.has(output.id) && output.continuable === true && (output.status === "running" || (output.status === "completed" && !output.recoverable))
   const message = output ? feedback[output.id] ?? "" : ""
   const blockingRuns = Object.values(outputs).filter((item) => item.recoverable)
   const pendingRuns = blockingRuns.map((item) => item.id).join(",")
@@ -141,6 +145,9 @@ function App() {
   const performanceBlocked = !performanceRecovered || performanceRuns === null || !!performanceListError || !!performanceBlockers.length
   const queuedForFile = queuedEditorForFile || Object.values(queuedFeedback).some((item) => item.name === active)
   const canQueueBuild = !!queuedBuilds && !queueError && !!fileOutput?.recoverable && fileOutput.continuable && !stoppedIds.current.has(fileOutput.id)
+  // Autosaving an edit must not make an older builder report locally approvable again.
+  const builderEdited = !!output && !!tab && (dirty(tab) || (editVersions.current.get(tab.name) ?? 0) !== (builderVersions[output.id] ?? 0))
+  const canApprove = !!output && !!tab && output.name === tab.name && fileOutput?.id === output.id && !historical && outputView === "file" && execution && !busy && !settings && !analytics && !loadingOutput && !retainedView?.loading && !!queuedBuilds && !queueError && !queuedForFile && !message && !builderEdited && !stoppedIds.current.has(output.id) && !output.transportUnavailable && output.status === "completed" && !output.recoverable && output.stage === "builder" && output.approvable === true && !!output.report?.trim()
 
   async function api<T>(path: string, body?: unknown, method = "POST", signal?: AbortSignal): Promise<T> {
     // Every cancellation surface must revoke queued execution before any network I/O.
@@ -337,6 +344,11 @@ function App() {
 
   const associateQueuedBuilds = useEffectEvent(async (items: QueuedBuild[], signal: AbortSignal) => {
     for (const item of items) {
+      const version = queuedVersions.current.get(`${item.parent_id}:${item.revision}`)
+      if (item.status === "started" && item.id && version !== undefined) {
+        const id = item.id
+        setBuilderVersions((previous) => previous[id] === version ? previous : { ...previous, [id]: version })
+      }
       if (item.status !== "started" || !item.id || outputs[item.name]?.id !== item.parent_id) continue
       // Read the latest association, not a stale queued child from an earlier build.
       const latest = await api<Output | null>(`/files/${encodeURIComponent(item.name)}/run`, undefined, "GET", signal)
@@ -430,11 +442,13 @@ function App() {
           : latest
         setOutputs((items) => items[name] === previous ? { ...items, [name]: next } : items)
       }
+      if (!latest && previous) setOutputs((items) => items[name]?.id === previous.id ? { ...items, [name]: { ...items[name], approvable: false } } : items)
       if (fromLog) {
         if (latest?.status.startsWith("unavailable")) fail(`Remote output for ${name} is ${latest.status}. Showing cached output, which may be incomplete. Browse retained runs to look for other logs without rerunning the spec.`)
         else setNotice(latest ? `Loaded ${name}.out` : `No saved run output for ${name}. Save & run to create one.`)
       }
     } catch (error) {
+      if (previous) setOutputs((items) => items[name]?.id === previous.id ? { ...items, [name]: { ...items[name], transportUnavailable: true } } : items)
       fail(`Could not recover output for ${name}: ${error instanceof Error ? error.message : String(error)}.`)
     } finally {
       if (fromLog) setLoadingOutput(null)
@@ -590,6 +604,7 @@ function App() {
     if (settings || analytics || !tab || busy || submitting.current || (!shared && mode !== "file" && queuedForFile)) return
     if (shared && (!computeruseAvailable || !computeruse?.configured || (mode === "computeruse" && computeruseBlocked))) return
     const parent = mode === "queue" ? fileOutput : null
+    const editVersion = editVersions.current.get(tab.name) ?? 0
     if (mode === "queue" && (!parent || !canQueueBuild)) return
     submitting.current = true
     setBusy(true)
@@ -618,12 +633,14 @@ function App() {
       if (mode === "file") return
       if (parent) {
         const item = await api<QueuedBuild>(`/runs/${parent.id}/queued-build`, { name: document.name, revision: document.revision })
+        queuedVersions.current.set(`${item.parent_id}:${item.revision}`, editVersion)
         setQueuedBuilds((items) => [...(items ?? []).filter((queued) => queued.parent_id !== item.parent_id), item])
         setNotice(`Saved and queued ${document.name}. This snapshot runs after confirmed successful finalization, even if this page closes. Later edits are not included.`)
         return
       }
       const job = await api<{ id: string }>(mode === "repository" ? "/repository/save" : "/runs", { name: document.name, revision: document.revision })
-      setOutputs((items) => ({ ...items, [document.name]: { ...job, name: document.name, output: "Starting…", status: "running", truncated: false, recoverable: true, continuable: mode !== "repository" } }))
+      setBuilderVersions((items) => ({ ...items, [job.id]: editVersion }))
+      setOutputs((items) => ({ ...items, [document.name]: { ...job, name: document.name, output: "Starting…", status: "running", truncated: false, recoverable: true, continuable: mode !== "repository", stage: mode === "repository" ? null : "builder", report: null, approvable: false } }))
       setOutputView("file")
       if (mode === "repository") setNotice(`Repository save submitted to ${repository?.model ?? "azure/gpt-6-sol"}. Check Output & logs for the result.`)
     } catch (error) {
@@ -644,8 +661,8 @@ function App() {
     }
     if (settings || analytics || !tab || busy || submitting.current || !execution || queuedForFile || (fileOutput?.recoverable && !canQueueBuild)) return
     const queue = !!fileOutput?.recoverable
-    const action = queue ? "Save and queue this editor snapshot for a fresh spec build after the current build finishes successfully? The queue survives page closure and server restart. Later saves do not replace this snapshot. Failure or Stop pauses the queue." : "Send this saved spec over SSH and run remote spec build?"
-    if (window.confirm(`${action} Automatic tool approval is requested (SPEC_BUILD_AUTO=1), along with recommended answers to runtime questions. It can modify remote files, execute tools, access the network, and incur provider costs. The web server and editor files stay local.`)) void save(queue ? "queue" : "build")
+    const action = queue ? "Save and queue this editor snapshot for a fresh builder run after the current build finishes successfully? The queue survives page closure and server restart. Later saves do not replace this snapshot. Failure or Stop pauses the queue." : "Send this saved spec over SSH and run the builder stage?"
+    if (window.confirm(`${action} Builder reports require explicit Approve & implement before a fresh integrator can implement end-to-end. Editing, feedback and queued work never grant that approval. Tools are automatically approved once per correlated request, with no persistent grants. SPEC_BUILD_AUTO=1 is not authorization. Runtime questions require user input. Tools can modify remote files, execute commands, access the network, and incur provider costs. The web server and editor files stay local.`)) void save(queue ? "queue" : "build")
   }
 
   async function toggleComputeruse() {
@@ -674,6 +691,7 @@ function App() {
     setError("")
     try {
       const document = await api<Document>("/computeruse/pull", { name: tab.name, revision: tab.revision })
+      if (document.content !== tab.content) editVersions.current.set(tab.name, (editVersions.current.get(tab.name) ?? 0) + 1)
       // A remote read must not discard text typed while the request was in flight.
       setTabs((items) => savedTab(items, document).map((item) => item.name === tab.name && item.content === tab.content ? { ...item, content: document.content } : item))
       setSharedRevision(document.revision)
@@ -742,7 +760,7 @@ function App() {
     const target = queuedOutput ?? output
     if ((!queuedOutput && !canContinue) || submitting.current || !target || busy || !execution) return
     if (queuedOutput && (!queuedIds.current.has(target.id) || stoppedIds.current.has(target.id))) return
-    if (target.status !== "completed" || target.recoverable || !target.continuable || outputs[target.name]?.id !== target.id) return
+    if (target.status !== "completed" || target.recoverable || target.transportUnavailable || !target.continuable || outputs[target.name]?.id !== target.id) return
     if (message !== undefined && (!message.trim() || message.includes("\0") || new TextEncoder().encode(message).length > 16 * 1024)) {
       setError("Feedback must be nonempty, without NUL bytes, and at most 16 KiB.")
       return
@@ -759,18 +777,40 @@ function App() {
         return previous === undefined ? items : { ...items, [id]: previous, [job.id]: previous }
       })
       if (queuedOutput) removeQueuedFeedback(id)
-      setOutputs((items) => ({ ...items, [name]: { ...job, name, output: "Starting...", status: "running", truncated: false, recoverable: true, continuable: true } }))
-      if (message !== undefined) setFeedback((items) => {
+      setBuilderVersions((items) => ({ ...items, [job.id]: items[id] ?? 0 }))
+      setOutputs((items) => items[name]?.id === id ? { ...items, [name]: { ...job, name, output: "Starting...", status: "running", truncated: false, recoverable: true, continuable: true, stage: target.stage ?? null, report: null, approvable: false } } : items)
+      setFeedback((items) => {
         const next = { ...items }
         if (items[id] && (queuedOutput || items[id] !== message)) next[job.id] = items[id]
         delete next[id]
         return next
       })
       setFollow(true)
-      setNotice(`${message === undefined ? "Recommended choice" : "Feedback"} submitted to the same session for ${name}. Check Output & logs for the result.`)
+      setNotice(`${message === undefined ? "Recommended choice" : "Feedback"} submitted to the same ${target.stage ? `${target.stage} ` : ""}session for ${name}.${target.stage === "builder" ? " This revises the builder, not approval to implement." : ""} Check Output & logs for the result.`)
     } catch (error) {
       if (queuedOutput) setQueuedFeedback((items) => ({ ...items, [id]: { name, message: message!, paused: "Delivery failed or is unconfirmed. Check the associated run before resubmitting; automatic retry is disabled." } }))
       setNotice("")
+      fail(error)
+    } finally { submitting.current = false; setBusy(false) }
+  }
+
+  async function approveRun() {
+    if (!canApprove || !output || submitting.current) return
+    if (!window.confirm(`Approve the validated builder report for ${output.name} (${output.id}) and start a fresh integrator to implement it end-to-end? Tools are automatically approved once per correlated request, with no persistent grants. SPEC_BUILD_AUTO=1 is not authorization. Runtime questions require user input. Tools can modify remote files, execute commands, access the network, and incur provider costs. No editor changes or feedback drafts are sent.`)) return
+    const target = output
+    submitting.current = true
+    setBusy(true)
+    setError("")
+    setNotice(`Approving builder report for ${target.name}...`)
+    try {
+      const job = await api<{ id: string }>(`/runs/${target.id}/approve`, {})
+      setOutputs((items) => items[target.name]?.id === target.id ? { ...items, [target.name]: { ...job, name: target.name, output: "Starting integrator...", status: "running", truncated: false, recoverable: true, continuable: true, stage: "integrator", report: null, approvable: false } } : items)
+      setFollow(true)
+      setNotice(`Approved ${target.name}. A fresh integrator is implementing the report end-to-end. Check Output & logs for the result.`)
+    } catch (error) {
+      // Delivery may have succeeded even if the response was lost. Require recovery, not a blind retry.
+      setOutputs((items) => items[target.name]?.id === target.id ? { ...items, [target.name]: { ...items[target.name], approvable: false } } : items)
+      setNotice("Approval failed or is unconfirmed. Load nohup output to check the latest associated run before retrying.")
       fail(error)
     } finally { submitting.current = false; setBusy(false) }
   }
@@ -802,7 +842,7 @@ function App() {
       if (runs.length) throw new Error("Performance is blocked by its own active or unresolved sessions. Load their output before launching another session.")
       const job = await api<{ id: string }>("/performance", { project: project.trim(), spec })
       performanceRecovery.current++
-      setOptimization({ ...job, name: "Performance", output: "Starting Gemma RL (built)...", status: "running", truncated: false, recoverable: true, continuable: false })
+      setOptimization({ ...job, name: "Performance", output: "Starting Gemma RL (built)...", status: "running", truncated: false, recoverable: true, continuable: false, stage: null, report: null, approvable: false })
       setOutputView("optimization")
       setFollow(true)
       setPerformance(false)
@@ -969,7 +1009,10 @@ function App() {
           <section className="editor-pane" aria-label="Spec editing pane">
             <div className="pane-heading"><div><span className="eyebrow">01 / SPEC</span><h2>{tab?.name ?? "Your next idea"}</h2></div><span className="badge">{tab ? dirty(tab) ? "Unsaved" : "Saved" : "Editor"}</span></div>
             {tabs.map((editor) => <Editor key={editor.name} active={!settings && editor.name === active} name={editor.name} value={editor.content} token={token} available={completion} enabled={complete} onEnabled={setComplete} onSave={() => void save()} onChange={(content) => {
-              if (content !== editor.content) edited.current.add(editor.name)
+              if (content !== editor.content) {
+                edited.current.add(editor.name)
+                editVersions.current.set(editor.name, (editVersions.current.get(editor.name) ?? 0) + 1)
+              }
               setTabs((items) => items.map((item) => item.name === editor.name ? { ...item, content } : item))
             }} />)}
             {!tab && <div className="empty-editor"><span aria-hidden="true">✳</span><h2>Start with a spec.</h2><p>Create a file on the left, describe your idea,<br />then save it when you're ready.</p></div>}
@@ -984,6 +1027,7 @@ function App() {
               {computeruse?.run && <><p aria-live="polite">Local callback / {computeruse.run.name} / {computeruse.run.status}</p>{computeruse.run.status === "running" && <button onClick={() => void stopComputeruse()}>Stop computeruse</button>}{computeruse.run.truncated && <p>Older callback output was truncated.</p>}<pre aria-label="Computeruse output"><LogOutput value={computeruse.run.output} /></pre></>}
             </section>}
             {!sharing && fileOutput?.recoverable && <p className="hint">Save &amp; run queues the saved editor snapshot until this build finishes successfully. Save and autosave never schedule execution.</p>}
+            {!sharing && execution && <p className="hint">New runs start with Builder. Review its report, revise as needed, then explicitly Approve &amp; implement to start a fresh Integrator. Saving or sending feedback is not approval.</p>}
             {(!!queuedBuilds?.length || !!queueError) && <section className="build-feedback chat-composer" aria-label="Saved build queue">
               <strong>Saved build queue</strong>
               <span>Snapshots are stored on the server and survive closing this page. One per parent run. Later saves do not change them.</span>
@@ -1004,7 +1048,7 @@ function App() {
             </div>}
           </section>
           <OutputWindow>{(windowControl, detached) => <section className="output-pane" aria-label="Output and logs pane">
-            <div className="pane-heading"><div><span className="eyebrow">02 / OUTPUT</span><h2>Output & logs</h2></div><div className="output-window-actions"><span className="badge">{output?.transportUnavailable ? `${output.status} (connection unavailable)` : output?.status ?? "Idle"}</span>{windowControl}</div></div>
+            <div className="pane-heading"><div><span className="eyebrow">02 / OUTPUT</span><h2>Output & logs</h2></div><div className="output-window-actions"><span className="badge">{output?.stage === "builder" ? "Builder / " : output?.stage === "integrator" ? "Integrator / " : ""}{output?.transportUnavailable ? `${output.status} (connection unavailable)` : output?.status ?? "Idle"}</span>{windowControl}</div></div>
             {detached && <>
               <p className="hint">Keep the workspace open for live output and queued follow-ups. This window follows the selected file. Close this window to restore the panel.</p>
               {error && <div role="alert" className="error">{error}<button aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
@@ -1017,12 +1061,12 @@ function App() {
             }}>Performance output</button><button onClick={(event) => { featureReviewOpener.current = event.currentTarget; window.focus(); setFeatureReview(true) }}>Feature review</button></div>
             {outputView === "optimization" && <div className="output-controls"><button disabled={performanceBusy} onClick={() => { void recoverOptimization(); setPerformanceRefresh((value) => value + 1) }}>Recover latest Performance</button></div>}
             {tab && outputView === "file" && <div className="chat-launch"><button onClick={openChat}>Open session chat</button><span>{historical ? "Chat uses the associated run, not this retained log" : "Spec + current nohup output in a separate window"}</span></div>}
-            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <><button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button><button disabled={!!loadingOutput || !!retainedView?.loading || busy || !execution} onClick={() => void browseRetained(tab.name)}>Browse retained runs</button></>}{!historical && output?.recoverable && execution && <button disabled={outputView === "optimization" && performanceBusy} onClick={() => outputView === "optimization" ? void stopPerformance() : void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={!canContinue} title="Submits the recommended choice to the same build session immediately, with automatic tool approval. Can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>Use recommended &amp; continue</button>}</div>
+            <div className="output-controls"><label><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} /> Follow output</label>{outputView === "file" && tab?.revision && <><button disabled={!!loadingOutput || !execution} title={`Read ${tab.name}.out from the latest remote background run`} onClick={() => void recoverOutput(tab.name, true)}>{loadingOutput ? "Loading output..." : "Load nohup output"}</button><button disabled={!!loadingOutput || !!retainedView?.loading || busy || !execution} onClick={() => void browseRetained(tab.name)}>Browse retained runs</button></>}{!historical && output?.recoverable && execution && <button disabled={outputView === "optimization" && performanceBusy} onClick={() => outputView === "optimization" ? void stopPerformance() : void api(`/runs/${output.id}/cancel`, {}).catch(fail)}>Stop run</button>}{output && outputView === "file" && <button disabled={!canContinue} title="Submits the recommended choice to the same stage and session, never approval to start integration. Automatic tool approval can modify files, execute tools, access the network, and incur provider costs. Does not save or upload editor changes." onClick={() => void continueRun()}>{output.stage === "builder" ? "Use recommended & revise builder" : "Use recommended & continue"}</button>}</div>
             <OutputDownload output={output} />
             {!!Object.keys(queuedFeedback).length && <section className="build-feedback chat-composer" aria-label="Queued follow-ups">
               <strong>Queued follow-ups</strong>
               {(settings || analytics) && <span role="status">Delivery is paused while Settings or Analytics is open in the workspace. Close it to resume queued follow-ups.</span>}
-              <span>Keep this page open. One follow-up per run; sent after confirmed completion, not as live input. Cancel to replace.</span>
+              <span>Keep this page open. One follow-up per run; sent after confirmed completion, not as live input. Follow-ups stay in the same stage and never approve integration. Cancel to replace.</span>
               {Object.entries(queuedFeedback).map(([id, queued]) => <div key={id}>
                 <strong>{queued.name}</strong>
                 <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{queued.message}</pre>
@@ -1042,11 +1086,18 @@ function App() {
               <button onClick={() => { retainedRequest.current++; setRetained(null) }}>Return to associated output</button>
             </div>}
             {!historical && outputView === "file" && output?.continuable && <BuildProgress key={output.id} output={output} />}
+            {output && <RunReport output={output} />}
+            {!historical && outputView === "file" && output?.stage === "builder" && <section className="build-feedback chat-composer" aria-label="Builder approval">
+              <strong>Review before implementation</strong>
+              <span>{builderEdited ? "Editor changes are not covered by this report. Save & run a new builder before approval, even if those edits were autosaved." : message ? "Send your feedback to revise the builder, or clear the feedback draft before approval." : queuedForFile ? "Resolve queued revisions before approval. Queued work never approves integration." : "Only the latest successful builder with a validated report can be approved. Review the report above; a fresh integrator starts only after explicit approval."}</span>
+              <button className="primary" disabled={!canApprove} onClick={() => void approveRun()}>Approve &amp; implement</button>
+            </section>}
             {output && <RecoveryNotice output={output} />}
             {output?.truncated && <p className="hint">Older output was truncated; showing the latest 256 KiB.</p>}
             <pre ref={log} className="output" aria-label="Run output">{output ? <LogOutput value={output.output} /> : (outputView === "optimization" ? "No Performance output loaded. Select Recover latest Performance to retry recovery. To run Gemma RL (built) through its own fresh builder session, click Performance and enter a project folder relative to the remote workspace or an absolute remote path. No editor tab is needed. Optional editor content is builder instructions, not necessarily JSON, and is sent without saving locally. No automatic rebuild, model or dataset download, or data fabrication. Performance runs and cancellation are independent of spec runs." : execution ? "Remote spec build is ready.\n\nSave & run sends the saved snapshot over SSH. The web server stays local. Remote output and logs appear here.\n\nEach file has its own output view." : "Remote execution is disabled.\n\nSet SPEC_SSH_TARGET (user@host) and SPEC_SSH_WORKSPACE (absolute remote build directory) on the local Rust server, then restart it. Optionally set SPEC_SSH_KEY to a local private-key path. The remote shell must define spec in ~/.bash_aliases or PATH.\n\nEditing and saving work without a model or credentials.")}</pre>
             {!historical && output && outputView === "file" && output.continuable === true && <form className="chat-composer build-feedback" onSubmit={(event) => { event.preventDefault(); submitFeedback() }}>
               <label htmlFor="build-feedback">Feedback to build session</label>
+              {output.stage && <span>{output.stage === "builder" ? "Revise Builder only. Feedback is not approval to implement." : "Continue Integrator in the same implementation session."}</span>}
               <textarea id="build-feedback" aria-describedby="feedback-help feedback-limit feedback-shortcuts" placeholder="Answer the agent or explain what to change..." value={message} disabled={actionBusy} onChange={(event) => setFeedback((items) => ({ ...items, [output.id]: event.target.value }))} onKeyDown={(event) => {
                 if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing || event.keyCode === 229) return
                 if (event.key === "ArrowUp" && !event.repeat && !event.currentTarget.value && previousFeedback[output.id]) {
@@ -1060,7 +1111,7 @@ function App() {
               }} />
               <span id="feedback-shortcuts">Enter to send. Shift+Enter for a new line. Up Arrow in an empty input recalls the previous follow-up.</span>
               <span id="feedback-limit">{new TextEncoder().encode(message).length.toLocaleString()} / 16,384 bytes</span>
-              <div><span id="feedback-help">{queuedFeedback[output.id] ? "A follow-up is already queued for this run. Cancel it to submit a replacement." : canContinue ? "Continues the same session with automatic tool approval. Can modify files and incur provider costs. Editor changes are not sent." : canQueueFeedback ? "Queues for the same session after confirmed completion. Keep this page open. Automatic tool approval can modify files and incur provider costs. Editor changes are not sent." : "Waiting for a supported run. Stopped, failed and unconfirmed runs cannot be continued."}</span><button className="primary" disabled={(!canContinue && !canQueueFeedback) || !message.trim() || message.includes("\0") || new TextEncoder().encode(message).length > 16 * 1024}>{output.status === "running" ? "Queue follow-up" : "Send & continue"}</button></div>
+              <div><span id="feedback-help">{queuedFeedback[output.id] ? "A follow-up is already queued for this run. Cancel it to submit a replacement." : canContinue ? "Continues the same session with automatic tool approval. Can modify files and incur provider costs. Editor changes are not sent." : canQueueFeedback ? "Queues for the same session after confirmed completion. Keep this page open. Automatic tool approval can modify files and incur provider costs. Editor changes are not sent." : "Waiting for a supported run. Stopped, failed and unconfirmed runs cannot be continued."}</span><button className="primary" disabled={(!canContinue && !canQueueFeedback) || !message.trim() || message.includes("\0") || new TextEncoder().encode(message).length > 16 * 1024}>{output.status === "running" ? "Queue follow-up" : output.stage === "builder" ? "Send & revise builder" : "Send & continue"}</button></div>
             </form>}
             <footer className="output-footer">{output && <span>Harness: {output.status}{output.recoverable ? " (completion not confirmed)" : ""}. CLI success alone does not verify saved changes.<br /></span>}Available output only. No hidden model reasoning is requested.</footer>
           </section>}</OutputWindow>

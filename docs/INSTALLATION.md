@@ -3,7 +3,8 @@
 Spec is a single-user, local-first web workspace. The Rust server serves the
 React UI and saves specifications on your computer. Optional builds run on a
 separate SSH host. Installing this web app does **not** install or replace the
-original `spec build` shell command or an AI execution engine.
+external OpenCode engine, its staged runner, or its runtime policy. Staged web
+builds require a direct trusted runner, not the original `spec build` wrapper.
 
 ## Requirements
 
@@ -11,7 +12,7 @@ original `spec build` shell command or an AI execution engine.
 | --- | --- |
 | Local computer | Linux, Bash, Git, Rust/Cargo 1.98 (tested), a native linker/toolchain, and Bun or Node.js 22.12+ with npm |
 | Browser | A current browser; Chromium is used for automated desktop/mobile-layout checks |
-| SSH execution host, optional | Linux, Bash, OpenSSH access, `setsid`, `flock`, GNU coreutils including `stdbuf`, findutils, a compatible `spec build` launcher, and its configured engine/provider |
+| SSH execution host, optional | Linux, Git, Bash, OpenSSH access, `setsid`, `flock`, GNU coreutils including `stdbuf`, findutils, Python 3.7+, Bun, and the external staged OpenCode checkout with a rebuilt compatible engine, configured Astra and trusted host policy |
 
 Bun is recommended because `frontend/bun.lock` is the committed frontend lockfile.
 The npm fallback works but does not use it. The project has been tested with Rust
@@ -28,6 +29,10 @@ an older minimum toolchain has not been established by this release's checks.
 No model account, API key, GPU, or SSH host is required for basic editing.
 Source builds download dependencies; `--local` means no remote builds, not an
 offline mode or a network sandbox.
+
+The staged workflow below requires the current staged Spec implementation and
+the separately installed host runner. The older release-tag examples in this
+guide are for installing that release, not a guarantee it contains staged builds.
 
 ## Guided Setup
 
@@ -112,6 +117,10 @@ also clears obsolete `SPEC_COMMAND` and custom SSH/UI binary/path overrides.
 No provider connectivity, model availability, or remote engine is verified during
 setup. Configured cloud features can send unsaved text/audio and incur costs when
 used. Remote tools can change files; read the remote prerequisites below.
+The wizard's AI profile is not the remote staged model configuration. Staged
+builds reject a selected execution profile: use **Reset to environment** before
+building and configure required Astra on the execution host instead. Sol is
+optional read-only advisory. The wizard does not install or probe that runner.
 
 Existing setup directories are never overwritten. To make a different setup,
 choose a **new private directory outside the spec workspace, frontend source/assets,
@@ -194,21 +203,140 @@ Keep these locations distinct:
 | `SPEC_WORKSPACE` | Local specifications and private run associations |
 | `SPEC_SSH_WORKSPACE` | Absolute execution-host directory containing the project to modify |
 | `SPEC_SSH_KEY` | Private key on the local server computer, not on the execution host |
+| `SPEC_WORKFLOW_RUNNER` | Absolute executable `script/run-spec.sh` in a separate OpenCode checkout on the execution host; exported in its trusted `~/.bash_aliases` |
 
-1. Prepare a trusted remote checkout yourself, including its dependencies and
-   tests. Spec uploads the saved specification only: it does not sync your local
-   project or bring generated code back automatically.
-2. Install/configure a compatible execution launcher on that host, for example
-   the [Specific project](https://github.com/AI10xDev/specific), and its engine.
-   Arrange for remote `~/.bash_aliases` to define/source `spec` outside interactive
-   shell guards and export the engine's executable `PATH`. It must support
-   `spec build <snapshot-file>`, stay in the foreground, propagate exit status,
-   and honor supplemental OpenCode configuration. Do not point it to this web
-   server's Rust binary, which also happens to be named `spec`.
-3. Connect interactively once and verify the SSH host fingerprint through a
-   trusted channel. Use an SSH agent for an encrypted key if needed. Runtime
-   connections are batch-mode with strict host-key checks and cannot prompt.
-4. Start the web app **locally** with explicit SSH settings:
+Prepare a trusted remote project checkout, including dependencies and tests.
+Keep the execution engine checkout separate from the project the agent will edit.
+Spec uploads the saved specification only; it does not sync local project files
+or bring generated code back automatically.
+
+### Install The External Runner
+
+The host owner must explicitly install
+[`AI10x/opencode-fork`](https://github.com/AI10x/opencode-fork) from `main` commit
+`e60a017d878486eb6b143e55cb9b9f320091d46d`, or an equivalent staged implementation.
+This is a **different repository from Spec**. Neither this Rust binary nor a
+generic Specific/`spec build` wrapper provides the required runner contract.
+
+For a new installation, run the following **on the execution host**, as the user
+that will run SSH builds. Use a fresh directory; do not overwrite an existing
+engine installation or discard local changes. Install Bun and the checkout's
+build prerequisites first (the referenced checkout uses Bun 1.3.14).
+
+```sh
+mkdir -p "$HOME/.local/share"
+git clone --branch main https://github.com/AI10x/opencode-fork.git "$HOME/.local/share/opencode-staged"
+cd "$HOME/.local/share/opencode-staged"
+git switch --detach e60a017d878486eb6b143e55cb9b9f320091d46d
+bun install --frozen-lockfile
+bun run packages/opencode/script/build.ts --single --skip-embed-web-ui
+chmod u+x script/run-spec.sh
+```
+
+These are installation instructions, not commands executed by Spec. Installation
+downloads dependencies and builds the host engine, without an embedded web UI.
+Keep the complete checkout and dependencies: `run-spec.sh` invokes
+`script/spec-supervisor.ts`, so copying only the shell file is insufficient.
+The native build is at
+`packages/opencode/dist/opencode-linux-<arch>/bin/opencode`, where `<arch>` is
+`x64` or `arm64`, not `x86_64` or `aarch64`. For older x64 CPUs, consult the
+checkout's baseline-build instructions and explicitly select that binary.
+
+Add the following exports to the **trusted execution user's `~/.bash_aliases`**,
+outside any interactive-shell guard. The example uses the checkout above on
+Linux x64; for arm64 change the engine path accordingly:
+
+```sh
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+export SPEC_WORKFLOW_RUNNER="$HOME/.local/share/opencode-staged/script/run-spec.sh"
+export SPEC_OPENCODE="$HOME/.local/share/opencode-staged/packages/opencode/dist/opencode-linux-x64/bin/opencode"
+```
+
+`$HOME` expands to an absolute path in these exports. For another location, use
+its actual absolute paths. `SPEC_OPENCODE` pins the compatible engine explicitly;
+if omitted, the runner prefers its checkout's native compiled binary, then an
+executable `opencode-source` on PATH. Do not substitute a shell alias for an engine
+executable. The adapter prepends `~/.local/bin` and `~/.bun/bin` before sourcing
+aliases, but does not load interactive `.bashrc` or login profiles.
+
+### Configure Models And Policy
+
+Configure **`azure/gpt-6-astra`** and its actual Azure deployment/access for the
+execution user in that OpenCode installation. It must be enabled and tool-capable;
+there is no executing-model fallback. The runner preserves the host's provider
+configuration from `OPENCODE_CONFIG_DIR`, otherwise
+`${XDG_CONFIG_HOME:-$HOME/.config}/opencode`. Follow the installed checkout's
+provider configuration instructions; keep credentials in its private configuration
+or trusted host environment, never task text or versioned docs. If provider
+configuration references environment variables, ensure the noninteractive runner
+receives them, not only an interactive login shell.
+
+`azure/gpt-6-sol` is optional read-only, nonblocking advisory. Its absence, errors,
+timeout or block/fix verdict cannot veto Astra execution. Clear any saved Spec
+execution profile with **Settings > Reset to environment**: selected profiles
+are rejected for staged builds, even an Azure profile, rather than substituted
+for the required host Astra model. Resetting Spec settings does not configure
+remote Astra or revoke credentials.
+
+The host owner must also install/review the runtime `~/projects/Agent.md`, or set
+an absolute `SPEC_AGENT_POLICY` in trusted remote `~/.bash_aliases`. It must be
+owned by the execution user, regular, nonsymlink, not writable by group/others,
+and contain exactly one valid `spec-build-policy` JSON block. Do not overwrite an
+existing host policy with the repository's versioned [Agent.md](../Agent.md): that
+is a snapshot with existing task-specific external targets, not an installer.
+For a new host, the external checkout supplies a complete schema/example; inspect
+it from that checkout before creating a policy appropriate to your own targets:
+
+```sh
+bun -e 'import { POLICY_EXAMPLE } from "./script/spec-supervisor.ts"; console.log(POLICY_EXAMPLE)'
+```
+
+Create the policy in a trusted directory owned by the execution user (create
+`~/projects/` if absent), using the example's single fenced block as a starting
+point only for a new host. Use mode `0600` for the policy file. Replace example
+account/region/rules values deliberately and keep credentials out; retain and
+review an existing policy rather than replacing its external targets.
+Rules and CLI/account/region/infrastructure lists are advisory guidance, not an
+OS sandbox or model-mediated authorization. `reviewTimeoutMs` bounds optional
+advice; `runTimeoutMs` limits execution. Numeric `maxTokens` budgets the executing
+actor's reported tokens per sweep, excluding Sol; `null` disables that cap.
+See [runtime policy](SUPERVISED_BUILDS.md#runtime-policy) and the external
+checkout's `script/spec-supervisor.md` for the complete contract and recovery rules.
+
+### Check The Host Contract
+
+From the external checkout on the host, load the trusted exports and check the
+installation without starting a build or calling a model:
+
+```sh
+source "$HOME/.bash_aliases"
+test -x "$SPEC_WORKFLOW_RUNNER"
+test -x "$SPEC_OPENCODE"
+"$SPEC_OPENCODE" --version
+"$SPEC_WORKFLOW_RUNNER" --workflow-version
+bun -e 'import { loadPolicy } from "./script/spec-supervisor.ts"; await loadPolicy(); console.log("Host policy valid")'
+```
+
+Stop and fix any failed check. The runner probe must exit 0 and print **exactly
+`spec-workflow-v1` plus one newline**, with no extra stdout. It is side-effect-free:
+it does not load policy, start the engine or call a provider. A successful probe
+does not verify model access, policy validity or end-to-end correctness; the other
+checks above check the binary and policy separately, not provider connectivity.
+
+For every web build, approval and continuation, the adapter sources trusted
+`~/.bash_aliases`, probes this absolute executable with a short timeout, then
+invokes **the same runner directly** with the snapshot path. Missing, nonexecutable
+or incompatible runners fail before provider work. There is **no generic
+`spec build` wrapper fallback**. Repository-save, Optimize, Performance and the
+legacy batch helper retain their separate launch paths; this does not migrate them.
+
+### Start The Local Web App
+
+Connect interactively over SSH once and verify the host fingerprint through a
+trusted channel. Use an SSH agent for an encrypted key if needed. Runtime
+connections are batch-mode with strict host-key checks and cannot prompt.
+Use the current staged Spec source, rebuild/restart the actual SSH-launching
+backend, then start the app **locally**, not from the external engine checkout:
 
 ```sh
 unset SPEC_COMMAND
@@ -226,28 +354,45 @@ identities/ssh-agent; omitting it selects the launcher's machine-specific defaul
 `~/ip` and uses user `opencode`. These defaults are not universal installation
 requirements. The launcher checks SSH and creates the remote workspace if absent.
 
-Remote build instruction merging also needs Bun or Node. Saved AI profiles need
-Python 3 remotely; retained-run discovery needs Python 3.7+. Continuation requires
-compatible remote `opencode-source` and captured session metadata. Performance
-and legacy Optimization have additional prerequisites in their linked guides.
+The host needs Python for result recovery/retained-run discovery and Bun for the
+runner (Node alone is not sufficient). Performance and legacy Optimization have
+additional prerequisites in their linked guides. Spec does not install or deploy
+the host checkout, engine, provider configuration or policy. No live host deployment
+or provider validation was performed for this documentation update.
 
-**Save & run** asks for confirmation, saves locally, then starts a remote build.
-Tools may modify remote files, use the network, access that user's credentials,
-and incur costs. Automatic tool approval is requested. Use a least-privilege
-account or isolated environment; the UI is not a sandbox. Read the full
-[remote execution contract](../REFERENCE.md#remote-shell-requirements).
+**Save & run** confirms and saves a snapshot, then starts a **Builder** exploration
+and planning sweep. Preliminary unit/smoke-test edits and experiments are allowed,
+but end-to-end implementation must wait for **Approve & implement**. Review the
+separate Builder report and actual remote changes. Approval posts `{}` to
+`/api/runs/{id}/approve` and starts a fresh **Integrator** using the original
+snapshot and approved handoff. The server requires the latest successful Builder,
+a durable validated report, matching remote configuration, unchanged saved spec
+content and no pending saved-build queue entry for that Builder. Changed saved
+requirements need a new Builder; saving, feedback and queues never autoapprove.
+
+Feedback resumes the same stage/session, and Integrator follow-ups retain the
+original approved handoff. The runner allows read/edit, denies `task`,
+`external_directory`, `glob` and `grep`, and autoapproves other permitted tool
+requests **once per request**, not globally always. Runtime questions are not
+autoanswered, even recommended options; the agent reports questions/blockers for
+later user feedback. Tools may still change files, use credentials/network access
+and incur costs. Use a least-privilege account or isolated environment; the UI and
+advisory policy are not a sandbox. See [staged builds](SUPERVISED_BUILDS.md).
 
 ## Optional AI Features
 
 Open **Settings** to configure Azure OpenAI, OpenAI, Claude, OpenRouter, or a local
 Hugging Face model served through a loopback OpenAI-compatible API. This enables
 session chat and trailing completions and selects the profile for future agent
-runs. Saving settings validates their shape, not provider reachability or model
-tool capability. Voice has separate credentials/configuration.
+workflows that support profiles, such as repository-save and prose optimization.
+It does not select the staged executing model: builds/approval/continuation reject
+selected profiles and require remote Astra. Saving settings validates their shape,
+not provider reachability or model tool capability. Voice has separate credentials.
 
 Settings does not install a local model runtime or download weights. A loopback
-URL refers to the Rust host for chat/completions and the execution host for remote
-runs. If those are different hosts, arrange a service on each as needed.
+URL refers to the Rust host for chat/completions and the execution host for
+supported profile-based workflows, not staged Astra builds. If those are different
+hosts, arrange a service on each as needed.
 
 Keys are stored privately on the server, not encrypted at rest. Remote execution
 transfers its selected profile over SSH into a private temporary file. Never put
@@ -293,6 +438,13 @@ upgrade does not redeploy remote engines, migrate model runtimes, or upgrade
 already-running supervisors. Releases use Git tags; package manifests still say
 `0.1.0`. Use `git describe --tags --always` to identify a source checkout.
 
+For staged builds, upgrading to an older tag above is not sufficient. Install the
+current staged Spec source and separately perform the [external runner setup](#install-the-external-runner)
+on every execution host, then rebuild/restart the local backend. Legacy runs
+without durable stage metadata/reports cannot be approved or continued as staged
+runs; inspect/recover them and start a new Builder. Do not delete recovery records
+to bypass unresolved-run guards.
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -303,8 +455,11 @@ already-running supervisors. Releases use Git tags; package manifests still say
 | Address already in use | Stop the old local server or select `SPEC_PORT=4781`; follow the newly printed URL. |
 | Unauthorized after restart | Reconnect using the new token, not a bookmark containing an old token. |
 | Autosave paused / stale revision | Preserve the draft using Download, reopen the disk version, and reconcile; repeated Save cannot resolve a stale revision. |
-| `opencode-source: command not found` | Install the engine on the execution host and export its executable path from remote `~/.bash_aliases`. |
+| Missing/unsupported `SPEC_WORKFLOW_RUNNER` | Install the external OpenCode checkout, export its absolute executable `script/run-spec.sh` in trusted remote `~/.bash_aliases`, and check the exact `spec-workflow-v1` probe. A generic `spec` wrapper is not supported. |
+| `opencode-source: command not found` | Build the compatible engine on the execution host; set `SPEC_OPENCODE` to its executable or provide the runner's native compiled binary. A local install or interactive alias is insufficient. |
+| Selected execution profile rejected | Clear it with **Reset to environment** and configure `azure/gpt-6-astra` in the execution user's OpenCode configuration. Sol is optional. |
+| Approval disabled/rejected after a save or queue | The saved spec must match the original snapshot and that Builder must have no pending saved-build queue entry. Resolve queued work and run a new Builder for changed requirements. |
 | SSH exit 255 or missing run directory | Recover/check status before retrying. Missing logs are not proof of completion. See [recovery](../REFERENCE.md#sessions-and-cancellation). |
-| Model requests fail | Check the selected profile, model access/tool support, and the host making the request; saving settings is not a connectivity test. |
+| Model requests fail | For staged builds, check required remote Astra deployment/access and host provider configuration; for chat or separate profile-based workflows, check the selected profile. Neither saving settings nor the runner probe verifies provider connectivity. |
 
 For developer builds and automated checks, see [Validation](../REFERENCE.md#validation).

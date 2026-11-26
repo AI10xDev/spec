@@ -31,6 +31,29 @@ pub(super) fn retained(root: &FsPath, id: &str, name: &str) -> PathBuf {
     directory
 }
 
+fn staged_runner(root: &FsPath) {
+    let runner = root.join("workflow-runner");
+    fs::write(&runner, r#"#!/bin/bash
+if [[ ${1:-} == --workflow-version ]]; then printf 'spec-workflow-v1\n'; exit 0; fi
+spec build "$1" || exit
+exec python3 -I -c '
+import json, os
+with open(os.environ["SPEC_BUILD_RESULT_FILE"], "x") as output:
+    json.dump(dict(version=1, stage=os.environ["SPEC_BUILD_STAGE"], report="structured stage report"), output)
+'
+"#).unwrap();
+    fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+    let aliases = root.join(".bash_aliases");
+    fs::write(
+        &aliases,
+        format!(
+            "{}\nexport -f spec\nexport SPEC_WORKFLOW_RUNNER=\"$HOME/workflow-runner\"\n",
+            fs::read_to_string(&aliases).unwrap()
+        ),
+    )
+    .unwrap();
+}
+
 async fn get(state: &App, path: &str) -> Value {
     let response = request(state.clone(), "GET", path, Value::Null).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -66,7 +89,8 @@ async fn retained_without_metadata_uses_exact_name_mtime_and_read_only_output() 
         get(&state, &format!("{LIST}/{first}/log")).await,
         json!({
             "id": first, "name": "a.md", "status": "completed", "output": "retained output",
-            "truncated": false, "recoverable": false, "continuable": false
+            "truncated": false, "recoverable": false, "continuable": false,
+            "stage": null, "report": null, "approvable": false
         })
     );
     assert_eq!(get(&state, "/api/files/a.md/run/log").await, Value::Null);
@@ -470,6 +494,7 @@ async fn retained_optimization_requires_private_exact_initial_build_invocation()
             "spec() { cat -- \"$2\"; }\n",
         )
         .unwrap();
+        staged_runner(root.path());
         let good = Uuid::new_v4().to_string();
         // Use the actual launcher to prove its ordinary initial-build metadata qualifies.
         let mut child = remote
@@ -489,16 +514,15 @@ async fn retained_optimization_requires_private_exact_initial_build_invocation()
         drop(stdin);
         assert!(output.status.success(), "{output:?}");
         let endpoint = "/api/files/optimization/retained-runs";
-        assert_eq!(
-            get(&state, &format!("{endpoint}/{good}/log")).await["output"],
-            "hello"
-        );
+        let staged = get(&state, &format!("{endpoint}/{good}/log")).await;
+        assert_eq!(staged["output"], "hello");
+        assert_eq!(staged["stage"], "builder");
+        assert_eq!(staged["report"], "structured stage report");
+        assert_eq!(staged["approvable"], false);
         // Shipped initial builds have only invocation, not the new provenance file.
-        fs::remove_file(
-            root.path()
-                .join(format!(".spec-runs/run-{good}/provenance")),
-        )
-        .unwrap();
+        for file in ["provenance", "stage", "result.json"] {
+            fs::remove_file(root.path().join(format!(".spec-runs/run-{good}/{file}"))).unwrap();
+        }
         assert_eq!(
             get(&state, &format!("{endpoint}/{good}/log")).await["output"],
             "hello"
@@ -639,6 +663,7 @@ async fn retained_actual_run_kinds_keep_optimization_spec_separate_from_optimize
         }
         fs::write(root.path().join(".bash_aliases"),
             "spec() { if [[ -n ${SPEC_BUILD_SESSION_ID:-} ]]; then printf 'continued report'; else printf 'ordinary report'; fi; }\n").unwrap();
+        staged_runner(root.path());
         let remote = state.remote.as_ref().unwrap();
         let mut ordinary = Vec::new();
         for kind in ["build", "continue", "repository-save", "optimize"] {

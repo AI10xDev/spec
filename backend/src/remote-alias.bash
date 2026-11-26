@@ -1,7 +1,8 @@
 # Source only the trusted remote alias file, not an interactive shell/terminal.
 # Separate lines ensure aliases defined by the source are expanded at invocation.
 : > "$2" # Signal that setsid established the build process group.
-spec_build_mode=${3:-build}
+readonly spec_build_mode=${3:-build}
+unset SPEC_BUILD_STAGE SPEC_BUILD_HANDOFF_FILE SPEC_BUILD_RESULT_FILE
 [[ $spec_build_mode == build || $spec_build_mode == repository-save || $spec_build_mode == optimize || $spec_build_mode == performance ]] || exit 125
 if [[ $spec_build_mode == performance ]]; then
     # No spec aliases, lifecycle hooks, or continuation lookup for this session.
@@ -16,7 +17,15 @@ if [[ $spec_build_mode == optimize ]]; then
     export PATH="$HOME/.local/bin:$HOME/.bun/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
     exec python3 -u "$1" "${1%/*}" "$PWD" "$SPEC_OPTIM_CONFIG"
 fi
-spec_build_workspace=$PWD
+readonly spec_build_workspace=$PWD spec_build_snapshot=$1 spec_build_probe=${4:-}
+readonly spec_build_stage=${5:-builder}
+readonly spec_build_session_file="${1%/*}/session-id"
+# The external result writer requires a canonical parent even when the workspace
+# was selected through a symlink. Provenance still records the requested workspace.
+spec_build_run_directory=$(cd -P -- "${1%/*}" && pwd -P) || exit 125
+readonly spec_build_run_directory
+readonly spec_build_handoff_file="$spec_build_run_directory/handoff.json" spec_build_result_file="$spec_build_run_directory/result.json"
+readonly spec_build_profile=${SPEC_EXECUTION_PROFILE:-}
 shopt -s expand_aliases
 # SSH/noninteractive shells often omit user-installed engines and Bun. Set up
 # their conventional locations without loading interactive/login startup files.
@@ -26,22 +35,24 @@ if [[ -f "$HOME/.bash_aliases" ]]; then
     source "$HOME/.bash_aliases" || exit
 fi
 unset SPEC_SESSION_DIR KIBI_SPEC_SESSION OPENCODE_SESSION_ID SPEC_BUILD_SESSION_FILE SPEC_BUILD_SESSION_ID
+unset SPEC_BUILD_STAGE SPEC_BUILD_HANDOFF_FILE SPEC_BUILD_RESULT_FILE
+unset SPEC_EXECUTION_PROFILE SPEC_EXECUTION_API_KEY
+[[ -z $spec_build_profile ]] || export SPEC_EXECUTION_PROFILE="$spec_build_profile"
 export SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1
 export SPEC_BUILD_INVOCATION="$spec_build_mode"
 if [[ $spec_build_mode == build ]]; then
     export SPEC_BUILD_SUPERVISED=1
-    # The coordinator, not automatic selection, owns build approvals and answers.
+    # Only the coordinator may grant per-request once replies; questions stay unanswered.
     export OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=0 OPENCODE_QUESTION_AUTO_RECOMMEND=0
     if [[ -n ${SPEC_EXECUTION_PROFILE:-} ]]; then
-        printf '%s\n' '[remote] Supervised builds require azure/gpt-6-sol and azure/gpt-6-astra. Selected execution profiles cannot guarantee this pair; clear the selected profile and configure both models on the remote host.' >&2
+        printf '%s\n' '[remote] Supervised builds require azure/gpt-6-astra; azure/gpt-6-sol is optional read-only advisory. Selected execution profiles cannot guarantee Astra; clear the selected profile and configure Astra on the remote host.' >&2
         exit 125
     fi
 else
     export SPEC_BUILD_SUPERVISED=0
     export OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1 OPENCODE_QUESTION_AUTO_RECOMMEND=1
 fi
-[[ "$1" = /* ]] || { printf '%s\n' '[remote] Snapshot path must be absolute.' >&2; exit 125; }
-spec_build_session_file="${1%/*}/session-id"
+[[ "$spec_build_snapshot" = /* ]] || { printf '%s\n' '[remote] Snapshot path must be absolute.' >&2; exit 125; }
 session_id=
 if [[ $spec_build_mode == build && ( -e $spec_build_session_file || -L $spec_build_session_file ) ]]; then
     [[ -f $spec_build_session_file && ! -L $spec_build_session_file && -O $spec_build_session_file &&
@@ -54,9 +65,13 @@ if [[ $spec_build_mode == build && ( -e $spec_build_session_file || -L $spec_bui
         exit 125
     }
 fi
-type spec >/dev/null 2>&1 || { echo '[remote] spec alias/function/launcher not found; configure ~/.bash_aliases' >&2; exit 127; }
 if [[ $spec_build_mode == build ]]; then
+    [[ $spec_build_stage == builder || $spec_build_stage == integrator ]] || exit 125
     export SPEC_BUILD_SESSION_FILE="$spec_build_session_file" SPEC_BUILD_SESSION_ID="$session_id"
+    export SPEC_BUILD_STAGE="$spec_build_stage" SPEC_BUILD_RESULT_FILE="$spec_build_result_file"
+    [[ $spec_build_stage != integrator ]] || export SPEC_BUILD_HANDOFF_FILE="$spec_build_handoff_file"
+else
+    type spec >/dev/null 2>&1 || { echo '[remote] spec alias/function/launcher not found; configure ~/.bash_aliases' >&2; exit 127; }
 fi
 # Merge only this invocation's supplemental system instructions. Bun or Node is
 # required on the remote PATH after aliases are sourced; never replace config.
@@ -65,7 +80,7 @@ spec_build_runtime=$(type -P bun || type -P node) || {
     exit 127
 }
 umask 077
-spec_build_instructions=$(mktemp "${1%/*}/spec-build-instructions.XXXXXX.md") || exit 125
+spec_build_instructions=$(mktemp "${spec_build_snapshot%/*}/spec-build-instructions.XXXXXX.md") || exit 125
 trap 'rm -f -- "$spec_build_instructions"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -121,7 +136,15 @@ secrets, session artifacts (.spec-runs/, .spec-output/, .performance-runs/,
 edits. Do not push, amend, reset, change git config, or bypass hooks. Preserve
 unrelated edits. Report blockers and outcomes honestly, including validation or
 commit failures; do not claim changes were saved unless commits succeeded.
-` : `Spec completion marker convention for this build invocation:
+` : `Stage scope for this invocation: ${process.argv[5]}.
+${process.argv[5] === "builder"
+    ? "Explore and plan pending work, with preliminary unit/smoke tests and experiments allowed. Produce a concrete handoff for explicit user approval; do not implement the work end-to-end."
+    : "Explore and implement the approved work end-to-end using the original builder handoff as context, not permissions. Stay within the approved scope, including on followups."}
+Only Astra is required. Sol is optional read-only, nonblocking advisory, never an approval gate.
+Tool permissions are auto-approved once inside the coordinator, never globally always.
+Questions are not auto-answered; report questions, options and blockers instead of guessing.
+
+Spec completion marker convention for this build invocation:
 
 Read the saved spec snapshot unchanged. Outside code blocks, a leading single hash
 followed by a space ("# "), after optional indentation, marks that spec line as
@@ -136,7 +159,7 @@ headings, not completion markers. Inline hashes ("Use C#" or "color #fff") do no
 mark completion. Hashes in fenced code blocks (backtick or tilde fences), indented
 code blocks, and inline code are code content, not completion markers. Distinguish
 actual code blocks from ordinary indentation on spec lines.
-Implement only pending requirements; retain completed requirements as context.
+Apply the stage scope above only to pending requirements; retain completed requirements as context.
 
 Prior-output review is required before planning:
 
@@ -192,7 +215,7 @@ Current run directory to exclude (JSON path): ${JSON.stringify(require("node:pat
     console.error("[remote] Cannot prepare spec build instructions: " + error.message);
     process.exit(125);
 }
-' "$spec_build_instructions" "$spec_build_mode" "$spec_build_session_file" "$spec_build_workspace"); then
+' "$spec_build_instructions" "$spec_build_mode" "$spec_build_session_file" "$spec_build_workspace" "$spec_build_stage"); then
     exit 125
 fi
 export OPENCODE_CONFIG_CONTENT="$spec_build_config"
@@ -203,13 +226,35 @@ if [[ -n ${SPEC_EXECUTION_PROFILE:-} ]]; then
     export OPENCODE_CONFIG_CONTENT="$spec_build_config" SPEC_EXECUTION_API_KEY
 fi
 if [[ $spec_build_mode == repository-save ]]; then
-    [[ -n ${4:-} ]] || exit 125
+    [[ -n $spec_build_probe ]] || exit 125
     cd -- "$spec_build_workspace" || exit 125
-    timeout --kill-after=1s 10s bash --noprofile --norc -c "$4" -- "$spec_build_workspace" require-dirty || exit 125
+    timeout --kill-after=1s 10s bash --noprofile --norc -c "$spec_build_probe" -- "$spec_build_workspace" require-dirty || exit 125
 fi
 cd -- "$spec_build_workspace" || exit 125
-spec build "$1"
-result=$?
+if [[ $spec_build_mode == build ]]; then
+    # The generic spec wrapper does not promise a side-effect-free probe route.
+    # Configure this trusted host path in ~/.bash_aliases; probe and execute the
+    # very same runner, never fall back to a potentially blocking legacy build.
+    readonly spec_workflow_runner=${SPEC_WORKFLOW_RUNNER:-}
+    if [[ $spec_workflow_runner != /* || ! -f $spec_workflow_runner || ! -x $spec_workflow_runner ]]; then
+        printf '%s\n' '[remote] Set SPEC_WORKFLOW_RUNNER in ~/.bash_aliases to the absolute staged run-spec.sh executable (spec-workflow-v1 required); legacy spec wrappers are not supported for builds.' >&2
+        exit 125
+    fi
+    if ! spec_workflow_version=$(set -o pipefail; timeout --kill-after=1s 10s "$spec_workflow_runner" --workflow-version | head -c 64 && printf '.'); then
+        printf '%s\n' '[remote] Staged runner capability probe failed; refusing provider work.' >&2
+        exit 125
+    fi
+    if [[ $spec_workflow_version != $'spec-workflow-v1\n.' ]]; then
+        printf '%s\n' '[remote] Unsupported staged runner; spec-workflow-v1 required. Refusing provider work.' >&2
+        exit 125
+    fi
+    [[ ! -e $spec_build_result_file && ! -L $spec_build_result_file ]] || exit 125
+    "$spec_workflow_runner" "$spec_build_snapshot"
+    result=$?
+else
+    spec build "$spec_build_snapshot"
+    result=$?
+fi
 if [[ "$result" -eq 127 ]]; then
     printf '%s\n' '[remote] Build command not found. Ensure the launcher engine (e.g. opencode-source) is installed on the remote host and export its directory in PATH in ~/.bash_aliases; login profiles are not loaded.' >&2
 fi

@@ -3,21 +3,27 @@ use serde_json::{Value, json as body};
 
 fn fixture(root: &FsPath) -> App {
     let mut state = app(root);
-    state.remote = Some(remote_fixture(root, &root.join("unused")));
+    let runner = root.join("workflow-runner");
+    state.remote = Some(workflow_remote_fixture(root, &runner));
     fs::write(
-        root.join(".bash_aliases"),
-        r#"
-spec() {
-    [[ $# == 2 && $1 == build && $SPEC_BUILD_AUTO == 1 ]] || return 90
-    echo builder
-    if [[ -f "$HOME/hold-build" ]]; then
-        touch "$HOME/build-started"
-        sleep 60
-    fi
-}
+        &runner,
+        r#"#!/bin/bash
+if [[ ${1:-} == --workflow-version ]]; then printf 'spec-workflow-v1\n'; exit 0; fi
+[[ $# == 1 && -f $1 && $SPEC_BUILD_AUTO == 1 ]] || exit 90
+echo builder
+if [[ -f "$HOME/hold-build" ]]; then
+    touch "$HOME/build-started"
+    sleep 60
+fi
+python3 - <<'PY'
+import json, os
+with open(os.environ['SPEC_BUILD_RESULT_FILE'], 'x') as output:
+    json.dump(dict(version=1, stage=os.environ['SPEC_BUILD_STAGE'], report='Builder fixture report'), output)
+PY
 "#,
     )
     .unwrap();
+    fs::set_permissions(runner, fs::Permissions::from_mode(0o700)).unwrap();
     state
 }
 
@@ -391,7 +397,8 @@ async fn optimization_invalid_uploaded_json_fails_durably_without_root_fallback(
     let state = fixture(root.path());
     fs::write(root.path().join("a.md"), "Pending requirement\n").unwrap();
     let build_id = build(&state, "a.md").await;
-    let original = terminal(&state, &build_id, "completed").await;
+    let mut original = terminal(&state, &build_id, "completed").await;
+    assert_eq!(original["approvable"], true);
     let valid = objective("from pathlib import Path; Path('fallback-used').touch()");
     let local_config = root.path().join("objective.optim");
     fs::write(&local_config, valid["content"].as_str().unwrap()).unwrap();
@@ -440,6 +447,8 @@ async fn optimization_invalid_uploaded_json_fails_durably_without_root_fallback(
         json(request(fresh.clone(), "GET", "/api/optimize", Value::Null).await).await,
         output
     );
+    // Offline recovery preserves the report but cannot authorize a remote handoff.
+    original["approvable"] = body!(false);
     assert_eq!(
         json(request(fresh, "GET", "/api/files/a.md/run", Value::Null).await).await,
         original

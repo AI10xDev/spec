@@ -117,6 +117,9 @@ pub(super) async fn report(
                 truncated,
                 recoverable: false,
                 continuable: false,
+                stage: None,
+                report: None,
+                approvable: false,
             });
             result.warnings.push("Local workspace .out snapshot; not associated with a verified remote session or terminal status.".into());
         }

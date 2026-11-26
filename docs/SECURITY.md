@@ -32,21 +32,108 @@ The authenticated completion endpoint accepts at most 16 KiB of prefix text. It 
 
 ## Execution boundary
 
-Execution is disabled unless the local server operator configures `SPEC_SSH_TARGET` and `SPEC_SSH_WORKSPACE`. Partial/invalid configuration fails startup; legacy `SPEC_COMMAND` is rejected. The browser cannot select an executable, SSH target/key, remote directory, or arbitrary command. Authenticated routes can request a saved-revision build, repository-save workflow, fixed-prompt continuation, or optimization. The web backend and editor filesystem remain local; snapshots and fixed execution helpers are sent over SSH, not the local project tree.
+Staged web builds are disabled unless the local server operator configures `SPEC_SSH_TARGET` and `SPEC_SSH_WORKSPACE`. Partial/invalid configuration fails startup; legacy `SPEC_COMMAND` is rejected. Build requests cannot select an executable, SSH target/key or remote workspace. Authenticated routes can request a saved-revision Builder, explicit approval, same-stage feedback continuation, repository-save workflow, or separate optimization. The web backend and editor filesystem remain local; snapshots and fixed execution helpers are sent over SSH, not the local project tree. Task text and feedback are untrusted model input, not shell command syntax, but can still instruct powerful tools.
 
-The adapter invokes a trusted local SSH binary with batch mode, strict host-key checking, no TTY, no agent/X11/port forwarding, and connection keepalives. Operator SSH configuration, proxy commands, the selected binary, the remote account, `~/.bash_aliases`, and the remote build directory are trusted. SSH credentials stay local and build-engine provider credentials stay remote; optional editor-completion credentials are configured locally as described above. The web app does not collect private keys through its API. Establish and verify host trust separately; never disable host-key checks to resolve connection failures.
+The adapter invokes a trusted local SSH binary with batch mode, strict host-key checking, no TTY, no agent/X11/port forwarding, and connection keepalives. Operator SSH configuration, proxy commands, the selected binary, the remote account, `~/.bash_aliases`, the external runner/engine checkout, and the remote build directory are trusted. SSH private keys stay local; staged models use execution-host provider configuration. Saved profiles for other remote workflows may be transferred over SSH into private temporary files; staged builds reject selected profiles rather than using them. Optional editor-provider credentials are configured locally. The web app does not collect SSH private keys through its API. Establish and verify host trust separately; never disable host-key checks to resolve connection failures.
 
-SSH executes a fixed Bash supervisor with shell-quoted operator arguments. Snapshot content is byte-counted stdin data, not command text. A complete upload is required before the build starts. Remote snapshots use `0600` files in `0700` temporary directories and are removed after process cleanup. Build input is capped at 120 KiB because some remote launchers forward the prompt as a single Linux argument; it may then be visible to same-user process inspection. The remote launcher must use an end-of-options separator for prompt arguments; launchers using Bash substitution may strip trailing newlines.
+SSH executes a fixed Bash supervisor with shell-quoted operator arguments. Snapshot content is byte-counted stdin data, not command text. A complete upload is required before the build starts. Remote snapshots use `0600` files in `0700` run directories and are removed after process cleanup; the original staged snapshot persists in private local run records. Build input remains capped at 120 KiB. The staged runner receives a snapshot path, not task text interpolated into a command. Same-user tools can still read private snapshots, credentials and reports; file permissions are not isolation from those tools.
 
-The remote child prepends the remote user's trusted `~/.local/bin` and `~/.bun/bin` to `PATH`. Builds and repository saves source trusted `~/.bash_aliases` with alias expansion enabled and invoke `spec build <snapshot>`. Continuation uses `opencode-source` with a captured session ID and fixed prompt. Optimization runs the supplied Python optimizer without sourcing aliases. Login profiles and interactive `.bashrc` are not loaded. Both `SPEC_BUILD_FOREGROUND=1` and `SPEC_BUILD_AUTO=1` are set for the build launcher. The installed alias must support foreground execution and determines the actual approval policy. Assume automatic tool approval and the remote user's full filesystem/network authority. Fixed entry points are **not** a sandbox: agents and objective commands can execute arbitrary tools. UI confirmation is disclosure, not a separate tool authorization boundary. Build modifications stay remote.
+### Trusted Runner And Policy
 
-The adapter also exports `OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1 OPENCODE_QUESTION_AUTO_RECOMMEND=1` after sourcing aliases. Compatible harnesses automatically select recommended answers instead of interrupting for routine questions. Actual behavior depends on the remote engine; no browser answer channel or blind-answer fallback exists. Review the spec before the single launch confirmation.
+The remote child prepends trusted `~/.local/bin` and `~/.bun/bin` to PATH and
+sources **`~/.bash_aliases`** in noninteractive Bash. That file must export
+`SPEC_WORKFLOW_RUNNER` as the absolute executable `script/run-spec.sh` from the
+separately installed `AI10x/opencode-fork` checkout. The required implementation
+is `main` commit `e60a017d878486eb6b143e55cb9b9f320091d46d` or equivalent, including
+its dependencies and rebuilt compatible engine. See the
+[host installation steps](INSTALLATION.md#install-the-external-runner).
+
+The adapter probes that executable with `--workflow-version`, requiring exit 0
+and exactly `spec-workflow-v1` plus a newline, then invokes the **same path directly**
+for builds, approval and continuation. There is no generic `spec build` wrapper
+fallback. The probe is a compatibility check, not authentication or a security
+audit of a host-controlled executable. Interactive `.bashrc` and login profiles
+are not loaded. Repository-save retains its existing `spec build` path; Optimize
+and Performance remain separate and do not source the build alias file.
+
+Both stages require executing model `azure/gpt-6-astra`. Sol (`azure/gpt-6-sol`)
+is optional read-only advisory, with only read and own-session todo bookkeeping.
+Its absence, errors, timeout or block/fix verdict never gates execution. There is
+no model-mediated approval gate or forced repair loop.
+
+The runtime policy is trusted host `~/projects/Agent.md`, or an absolute
+`SPEC_AGENT_POLICY` override. Missing/invalid policy blocks startup; each invocation
+reloads it. The versioned [Agent.md](../Agent.md) is a snapshot, not the deployed
+file, and its existing external targets remain unchanged. Editor saves do not
+install policy. Policy rules and CLI/account/region/infrastructure lists are
+advisory prompt constraints, not shell allowlists, IAM or a sandbox. The older
+snapshot's Sol-review language does not override the current runner semantics.
+
+The adapter supplies `SPEC_BUILD_SUPERVISED=1` and
+`SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1`, but explicitly sets
+`OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=0 OPENCODE_QUESTION_AUTO_RECOMMEND=0`.
+The runner allows executing-actor read/edit and denies `task`,
+`external_directory`, `glob` and `grep`. Glob/grep lack canonical workspace
+confinement in the current V2 implementation. Other permitted tool requests get
+automatic **once-per-request** replies only after owned-session/source correlation;
+there are no global `always` grants. Todo contents authorize no future actions.
+These tool rules do not confine shell effects: one approved command can modify
+files, contact services, access credentials and incur costs with the OS user's
+authority. Use OS/container/VM restrictions and IAM for hard boundaries.
+
+Runtime questions are **not autoanswered**, including recommended options. They
+are rejected with guidance to report the question, options and blocker for later
+user feedback; rejection is not approval. There is no live browser runtime-answer
+channel. Explicit recommended-choice feedback is a separate same-stage action.
+
+### Stage Approval And Reports
+
+Builder explores/plans and may edit preliminary unit/smoke tests and run experiments;
+it is not read-only, but is instructed not to implement end-to-end. Explicit
+authenticated `POST /api/runs/{id}/approve` with `{}` starts a fresh Integrator
+using the original snapshot and approved Builder report. The server requires the
+latest successful Builder, matching remote configuration, durable validated report,
+unchanged saved spec content and no pending saved-build queue entry for that
+Builder. These checks are enforced on the server, not just by disabling a button.
+Unsaved drafts are additionally guarded in the UI and are never sent by approval.
+
+Feedback resumes the same stage/session. Integrator follow-ups keep the original
+approved handoff as context, not new permissions. Browser feedback queues stay in
+the same stage; durable editor queues start fresh Builders. Saving, editing,
+feedback and queues never autoapprove integration. Legacy runs without staged
+metadata cannot acquire approval from a successful exit or an old log.
+
+The stage transition is a backend workflow boundary, not an OS sandbox or proof
+that a model obeyed its stage instructions. Anyone with the bearer token can
+request approval if eligible. A trusted host user can invoke the runner separately
+with stage/handoff variables; the runner does not cryptographically verify a human
+approval. Protect the token, host identity and engine/configuration accordingly.
+
+The separate private remote `result.json` must match the successful run's stage
+and provenance and pass envelope/file validation. Its report is bounded to
+120 KiB UTF-8 and comes from the executing actor, not Sol's advice. It is retrieved
+separately from truncated logs and persisted with stage, original snapshot and
+approved handoff in local `.spec-output/` records. Missing/invalid results block
+staged success/approval; transport failure remains unresolved for recovery.
+Validation checks structure/origin, not correctness or truth of the model's claims.
+
+### Lifecycle And Retention
 
 At most 16 unresolved builds are admitted at once, one per filename, including detached and recovered sessions. Optimization and repository saving additionally exclude conflicting execution across the repository. **Stop run** sends an explicit cancellation request and waits briefly for remote process-group cleanup confirmation. EOF, SSH disconnect, and normal server shutdown detach instead of cancelling. A separate-session supervisor ignores HUP; builds (including continuations), repository saves, and optimization have no overall supervisor runtime limit or UI attachment deadline. Normal process exit and explicit cancellation still end runs. Disconnects never fall back to local execution, but remote work may continue incurring costs indefinitely. Immediate termination cannot be guaranteed through a network outage. Children that create another group, a killed supervisor, disk failure, or host failure can escape ordinary build cleanup or leave stale snapshots. Closing the browser does not cancel execution.
+
+The inner staged runner still enforces host `runTimeoutMs` and numeric `maxTokens`
+for the executing actor's reported per-sweep usage, excluding Sol; `null` disables
+the token cap. `reviewTimeoutMs` bounds optional advice, never an execution veto.
+Reported usage limits are not hard billing caps: in-flight work, hidden retries
+or unreported usage can exceed them. Use provider quotas for hard spending limits.
 
 Every 60 seconds while the child remains alive, the supervisor appends a message such as `[remote] keep-alive: build still running (60s elapsed); no execution timeout.` The mode varies (`build`, `repository-save`, or `optimize`) and elapsed seconds increase. This is process liveness, not evidence of model progress. The 10-second startup-readiness check, cleanup safety timers, SSH network keepalives, and individual provider/tool timeouts remain unchanged. Exit code `124` can still indicate a child timeout or a watchdog timeout from an older supervisor.
 
 The backend embeds the supervisor script: rebuild and restart the actual SSH-launching backend to deploy this behavior. Updating only the execution VM does not update another machine's backend, and already-running supervisors retain their original behavior.
+
+Spec does not deploy the external runner, engine, provider configuration or host
+policy. No live host deployment or provider validation was performed for this
+documentation update.
 
 Remote session directories under `SPEC_SSH_WORKSPACE/.spec-runs/` are owned/private (`0700`, no parent symlink); snapshots, merged output logs, and atomic exit status files use `0600`. Ordinary builds and repository saves retain the first 8 MiB of agent stdout/stderr and drain/discard excess agent output. Supervisor keep-alives bypass that cap, so total logs can exceed 8 MiB and slowly grow indefinitely; optimization output remains uncapped. Recovery reads only a bounded latest-256-KiB tail in all modes. Logs may contain sensitive data after disconnect. Finished ordinary build directories older than seven days are removed on subsequent launches; optimization reports are exempt. There is no background retention service or strict aggregate quota, and abnormal supervisor termination can leave artifacts requiring manual cleanup. Local run records and associations persist in owned/private `.spec-output/` storage (`0700` directory, `0600` files), with no automatic disk pruning. Reopening a spec retrieves its saved output and may contact the configured SSH host to refresh an unfinished run, but never launches another build. Changed remote identity prevents that refresh. Protect local records from version control and artifact uploads too. See the [technical reference](../REFERENCE.md#sessions-and-cancellation) for log/status recovery and explicit cancellation of detached sessions.
 
@@ -56,7 +143,12 @@ Optimization discovers the latest initial build, which may target a project outs
 
 Optimization has no overall iteration/runtime limit, no 8 MiB progress cap, and no automatic pruning of report-bearing directories. Per-command Linux subreapers clean up detached descendants before measurement or lock release on normal completion, failure, timeout, or handled cancellation. Forced process death, hostile/privileged tools, and work delegated to existing services are outside that guarantee. Locks are advisory. Inspect remote state after crashes or unconfirmed cancellation and budget storage/provider costs.
 
-Repository saving uses the existing build engine with `azure/gpt-6-sol` and instructions to validate and commit focused changes, not push, amend, reset, or bypass hooks. These are model instructions, not a Git permission boundary. Check the resulting diff, commit, and logs. Continuation can execute tools immediately in the original engine session; it is not read-only output recovery.
+Repository saving retains its existing launcher/provider behavior (saved profile,
+or `azure/gpt-6-sol` fallback) and instructions to validate and commit focused
+changes, not push, amend, reset, or bypass hooks. It is a separately confirmed
+operation, not staged approval. These are model instructions, not a Git permission
+boundary. Check the resulting diff, commit, and logs. Build continuation can execute
+tools immediately in the same stage/session; it is not read-only output recovery.
 
 ## Chat and voice boundary
 

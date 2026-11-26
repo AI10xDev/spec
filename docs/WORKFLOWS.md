@@ -5,6 +5,12 @@ checkout, inspect evidence, and decide what happens next. It is not an autonomou
 release gate. A green CLI exit, full progress bar, or confident agent summary
 does not establish correctness.
 
+Ordinary builds use two stages: Builder exploration/planning, then a fresh
+Integrator only after explicit **Approve & implement**. Builder is not read-only:
+preliminary unit/smoke-test edits and experiments are allowed, but end-to-end
+implementation must wait for approval. See [staged builds](SUPERVISED_BUILDS.md)
+for the execution-host setup, model requirements and policy boundaries.
+
 ## Write An Executable Spec
 
 Use one file per coherent change. Include the target repository, current behavior,
@@ -32,8 +38,10 @@ Do not commit, push, deploy, or call production services.
 
 ## Validation
 Find the repository's documented test commands before editing.
-Add a regression test that fails for the current bug, then make it pass.
-Run the relevant suite and typecheck; report exact commands and results.
+Builder: explore, plan, and add/run preliminary unit or smoke tests and experiments.
+Report evidence and blockers; do not implement the feature end-to-end yet.
+After explicit approval, Integrator: implement the fix and make the regression pass.
+Run the relevant suite and typecheck; report exact commands and results for each stage.
 If a check cannot run, state the blocker rather than claiming it passed.
 
 ## Handoff
@@ -69,11 +77,13 @@ logs are evidence, not authoritative implementation state.
 | Goal | Action and effect |
 | --- | --- |
 | Preserve the current spec | **Save** or Ctrl/Cmd+S; active edited sheets also autosave. No build starts. |
-| Run newly written requirements | **Save & run** or Ctrl/Cmd+Enter; confirms, saves, and uploads a new immutable snapshot. |
+| Explore newly written requirements | **Save & run** or Ctrl/Cmd+Enter; confirms, saves, and uploads a new immutable snapshot for a Builder. |
 | Ask a read-only question | **Session chat**; separate AI conversation with spec/output context, no tools, not the build engine session. |
-| Act on a completed build's recommendation | **Use recommended & continue**; immediately resumes that engine session with the fixed recommended-choice prompt. |
-| Give that build a specific next action | **Send & continue** after confirmed success; uses your feedback, not editor changes. |
-| Schedule one next action while a build runs | **Queue follow-up**; waits for confirmed success. Keep the browser page open for delivery. |
+| Revise a successful Builder's plan | **Send & revise builder** or **Use recommended & revise builder**; resumes that Builder session, never approves integration. |
+| Authorize end-to-end implementation | **Approve & implement**; submits `POST /api/runs/{id}/approve` with `{}` for the latest successful Builder's validated report and starts a fresh Integrator. |
+| Give a successful Integrator a next action | **Send & continue** or **Use recommended & continue**; resumes that Integrator within approved scope, not editor changes. |
+| Schedule same-stage feedback while a build runs | **Queue follow-up**; waits for confirmed success, never approves integration. Keep the browser page open for delivery. |
+| Queue revised editor requirements | **Save & run** during an eligible active build; persists a fixed snapshot for a fresh Builder after confirmed success, never autoapproves it. |
 | Inspect a disconnected run | **Load nohup output** or **Active runs**; reads status/output, does not relaunch. |
 | Create focused commits | **Save repo changes**, when available; explicitly confirms an agent-driven commit workflow, not a push or deployment. |
 
@@ -81,11 +91,33 @@ Feedback uses Enter to submit and Shift+Enter for a newline. One queued message
 per run lives only in browser memory; it is not live stdin and cannot immediately
 steer a running agent. Failure, cancellation, replacement, or ambiguous delivery
 can pause it. Review the run before resubmitting to avoid duplicate work.
+The saved-editor queue is separate: it survives browser/server restarts and later
+autosaves do not change its snapshot. Neither queue can transition a Builder to
+Integrator.
 
-Continuation requires the latest confirmed successful build, captured engine
-session metadata, and the same remote configuration. Editor edits are **never
+Continuation requires the latest confirmed successful staged build, a durable
+validated report, captured engine session metadata, and the same remote
+configuration. It stays in the same stage/session. Editor edits are **never
 included automatically** in continuation. Use a new Save & run after resolving
 the previous run if the edited spec itself must become the new input.
+
+The original snapshot, stage, validated report and approved handoff are persisted
+in private run records. The **Builder report** or **Integrator report** is displayed
+separately from the truncated runtime log. Report validation does not verify its
+claims. Approval uses the original snapshot and the selected Builder handoff, not
+unsent feedback or autosaved editor changes; Integrator follow-ups keep that same
+approved handoff. The server rejects approval when saved spec content differs
+from the original snapshot or that Builder has a pending saved-build queue entry.
+These are backend checks, not just UI restrictions. Resolve drafts/queued revisions
+before approval and obtain a new Builder report for changed requirements. Legacy
+runs without staged metadata need a new Builder.
+
+Both stages require Astra; Sol is optional read-only, nonblocking advice. The
+runner automatically approves permitted tool requests once, not globally always.
+Read/edit are allowed; `task`, `external_directory`, `glob` and `grep` are denied.
+Runtime questions, even recommended options, are not autoanswered: the agent must
+report questions/options/blockers for a later user feedback sweep. Host policy
+lists guide the models, not enforce a sandbox or a model-mediated approval gate.
 
 ## Daily Feature Or Bug-Fix Loop
 
@@ -93,20 +125,27 @@ the previous run if the edited spec itself must become the new input.
    its starting `git status`; do not let an agent overwrite someone else's work.
 2. Write a small spec with the failing case, acceptance criteria, and tests. Save
    it, then use Save & run after reading the execution warning.
-3. Watch output for decisions and evidence. The task bar counts agent-reported
-   todos, not independently tested requirements; keep-alives mean process liveness.
-4. Inspect the actual remote diff and run the project's tests. For UI changes,
-   check both desktop and mobile layouts and key failure states.
-5. Ask a focused follow-up for a missing test or repair. Once verified, mark only
-   the satisfied requirements complete and retain unresolved work as pending.
-6. Commit/review using your normal Git workflow. Save repo changes can make focused
+3. Inspect the Builder report and preliminary remote diff/checks. Revise its plan
+   or answer reported questions with same-stage feedback as needed. The task bar
+   counts the executing actor's todos, not verified requirements; optional Sol
+   advice does not affect that percentage. Keep-alives mean process liveness.
+4. Explicitly **Approve & implement** the latest successful Builder report to
+   start a fresh Integrator. Saving, feedback and queued work are not approval.
+5. Inspect the Integrator report and actual remote diff, and run the project's
+   tests. For UI changes, check desktop/mobile layouts and key failure states.
+6. Ask a focused Integrator follow-up for a missing test or repair. Once verified,
+   mark only the satisfied requirements complete and retain unresolved work as pending.
+7. Commit/review using your normal Git workflow. Save repo changes can make focused
    commits with the spec as context; it is not authorized to push, amend, reset,
    or bypass hooks. Review the resulting commit before opening a PR or deploying.
 
 For unfamiliar code, start with a **read-only investigation spec**: explicitly
 request no edits, the relevant source paths, a reproduction, and a proposed fix.
-Review that result before authorizing implementation in a later run/follow-up.
-This is a workflow convention, not a separate enforced plan-mode sandbox.
+If implementation is later wanted, write those requirements and obtain a new
+Builder report before **Approve & implement**. A no-edits request is a workflow
+instruction, not a read-only sandbox; the Builder normally permits
+preliminary test edits and experiments. The backend's explicit stage transition
+does not sandbox the tools within either stage.
 
 ## Teams And Parallel Work
 

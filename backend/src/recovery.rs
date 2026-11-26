@@ -1,7 +1,9 @@
 use super::*;
 use std::{collections::HashMap, os::unix::fs::MetadataExt};
 
-const MAX_RECORD: usize = MAX_OUTPUT * 4 + 192 * 1024;
+// VecDeque bytes use up to four JSON bytes each; snapshot, result and handoff
+// strings can each expand sixfold through JSON escaping.
+const MAX_RECORD: usize = MAX_OUTPUT * 4 + 192 * 1024 + MAX_BUILD_SPEC * 6 * 3;
 
 #[derive(Default)]
 pub(super) struct RunGates(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
@@ -185,6 +187,11 @@ pub(super) fn load(app: &App, id: &str) -> Result<Job> {
     {
         return Err(invalid("Invalid run record"));
     }
+    workflow::validate(&job)?;
+    // Never trust staged completion without the durable private result.
+    if job.stage.is_some() && job.status == "completed" && job.build_result.is_none() {
+        job.recover = true;
+    }
     if job.recover {
         job.status = "detached (backend restarted)".into();
     }
@@ -288,7 +295,7 @@ pub(super) async fn refresh_locked(app: &App, id: &str, cancel: bool) -> Result<
     if retry {
         checkpoint(app, id);
     }
-    let (identity, name) = {
+    let (identity, name, stage) = {
         let mut jobs = app.jobs.lock().unwrap();
         let Some(job) = jobs.iter_mut().find(|job| job.id == id) else {
             // A resolved run may have been evicted while this refresh was queued.
@@ -322,15 +329,24 @@ pub(super) async fn refresh_locked(app: &App, id: &str, cancel: bool) -> Result<
         if job.attached || !job.recover {
             return Ok(());
         }
-        (job.remote_identity.clone(), job.name.clone())
+        (
+            job.remote_identity.clone(),
+            job.name.clone(),
+            job.stage.clone(),
+        )
     };
-    let snapshot = match &app.remote {
+    let mut snapshot = match &app.remote {
         Some(remote) if remote.identity() == identity => remote.snapshot(id, cancel, &name).await,
         _ => Err("remote configuration does not match the saved run".into()),
     };
     if cancel && let Err(error) = &snapshot {
         return Err(Error(StatusCode::BAD_GATEWAY, error.clone()));
     }
+    let result = if let (Some(remote), Ok((status, _, _))) = (&app.remote, &mut snapshot) {
+        workflow::result(remote, id, &name, stage.as_deref(), status).await
+    } else {
+        None
+    };
     // Session metadata is optional: an absent capture must not obscure verified
     // terminal status or prevent recovery of builds from older launchers.
     let observed_at = memory::now();
@@ -371,6 +387,10 @@ pub(super) async fn refresh_locked(app: &App, id: &str, cancel: bool) -> Result<
     );
     match snapshot {
         Ok((status, bytes, truncated)) => {
+            if let Some(result) = result {
+                job.build_result = Some(result);
+                job.dirty = true;
+            }
             if !app.performance {
                 memory::capture(job, &bytes, truncated);
             }

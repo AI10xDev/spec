@@ -11,6 +11,31 @@ fn git(root: &FsPath, args: &[&str]) {
     assert!(output.status.success(), "{output:?}");
 }
 
+// Batch builds and repository-save still call spec build; staged builds use the runner.
+fn workflow_runner(home: &FsPath) {
+    let runner = home.join("workflow-runner");
+    fs::write(&runner, r#"#!/bin/bash
+if [[ ${1:-} == --workflow-version ]]; then printf 'spec-workflow-v1\n'; exit 0; fi
+[[ $# == 1 && -f $1 && $SPEC_BUILD_AUTO == 1 ]] || exit 90
+spec build "$1" || exit
+python3 - <<'PY'
+import json, os
+with open(os.environ['SPEC_BUILD_RESULT_FILE'], 'x') as output:
+    json.dump(dict(version=1, stage=os.environ['SPEC_BUILD_STAGE'], report='Repository fixture report'), output)
+PY
+"#).unwrap();
+    fs::set_permissions(runner, fs::Permissions::from_mode(0o700)).unwrap();
+    let aliases = home.join(".bash_aliases");
+    fs::write(
+        &aliases,
+        format!(
+            "{}\nexport -f spec\nexport SPEC_WORKFLOW_RUNNER=\"$HOME/workflow-runner\"\n",
+            fs::read_to_string(&aliases).unwrap()
+        ),
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn repository_api_disabled_and_live_status_are_authenticated_and_nonlaunching() {
     let root = tempfile::tempdir().unwrap();
@@ -586,6 +611,7 @@ spec() {
 "#,
         )
         .unwrap();
+        workflow_runner(home.path());
         let id = Uuid::new_v4().to_string();
         let mut command = if saving {
             remote.repository_command(7, &id, "first.md")
@@ -699,6 +725,11 @@ async fn repository_registry_keeps_crashed_harnesses_unresolved_across_workspace
                 "first.md",
                 mode,
                 include_str!("remote-repository.bash"),
+                "",
+                "0",
+                "0",
+                "",
+                if mode == "build" { "builder" } else { "" },
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -997,6 +1028,7 @@ async fn repository_build_launchers_guard_persisted_save_and_legacy_records() {
             let mut remote = remote_fixture(home.path(), &home.path().join("unused"));
             remote.directory = repo.path().to_str().unwrap().into();
             fs::write(home.path().join(".bash_aliases"), "spec() { return 0; }\n").unwrap();
+            workflow_runner(home.path());
             fs::write(repo.path().join("a.md"), "context").unwrap();
             let prior = repo.path().join(".spec-runs/run-prior");
             let registry = repo.path().join(".git/spec-harness");
@@ -1083,6 +1115,7 @@ spec() {
 "#,
         )
         .unwrap();
+        workflow_runner(home.path());
         let batch = |directory: &FsPath| {
             let mut command = tokio::process::Command::new("bash");
             command
@@ -1338,6 +1371,7 @@ spec() {
 "#,
         )
         .unwrap();
+        workflow_runner(home.path());
         let batch = tokio::process::Command::new("bash")
             .env("HOME", home.path())
             .env("BATCH_FIXTURE", "1")

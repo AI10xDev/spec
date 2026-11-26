@@ -1,4 +1,4 @@
-use crate::tests::{app, json, remote_fixture, request, wait_for_file};
+use crate::tests::{app, json, request, wait_for_file, workflow_remote_fixture};
 use crate::*;
 use axum::body::Body;
 use rusqlite::{Connection, OpenFlags};
@@ -553,30 +553,38 @@ async fn retrieval_limits_the_newest_filtered_candidate_window_and_detects_the_5
 
 fn fixture(root: &FsPath) -> App {
     let mut state = app(root);
-    state.remote = Some(remote_fixture(root, &root.join("unused")));
+    state.remote = Some(workflow_remote_fixture(root, &root.join("workflow-runner")));
     fs::write(root.join("summary"), SUMMARY).unwrap();
     fs::write(root.join("a.md"), "# Already completed\nPending feature\n").unwrap();
-    fs::write(
-        root.join(".bash_aliases"),
+    runner(
+        root,
         r#"
-spec() {
-    [[ $# == 2 && $1 == build && $SPEC_BUILD_SUPERVISED == 1 ]] || return 90
-    if [[ -z $SPEC_BUILD_SESSION_ID ]]; then
-        printf 'ses_Memory123\n' > "$SPEC_BUILD_SESSION_FILE"
-    else
-        [[ $SPEC_BUILD_SESSION_ID == ses_Memory123 ]] || return 91
-    fi
-    fixture_output
-}
-fixture_output() {
-    touch "$HOME/entered"
-    while [[ -f "$HOME/hold" ]]; do sleep 0.02; done
-    cat "$HOME/summary"
-}
+if [[ -z $SPEC_BUILD_SESSION_ID ]]; then
+    printf 'ses_Memory123\n' > "$SPEC_BUILD_SESSION_FILE"
+else
+    [[ $SPEC_BUILD_SESSION_ID == ses_Memory123 ]] || exit 91
+fi
+touch "$HOME/entered"
+while [[ -f "$HOME/hold" ]]; do sleep 0.02; done
+cat "$HOME/summary"
 "#,
-    )
-    .unwrap();
+    );
     state
+}
+
+fn runner(root: &FsPath, script: &str) {
+    let path = root.join("workflow-runner");
+    fs::write(&path, format!(r#"#!/bin/bash
+if [[ ${{1:-}} == --workflow-version ]]; then printf 'spec-workflow-v1\n'; exit 0; fi
+[[ $# == 1 && -f $1 && $SPEC_BUILD_SUPERVISED == 1 ]] || exit 90
+{script}
+python3 - <<'PY'
+import json, os
+with open(os.environ['SPEC_BUILD_RESULT_FILE'], 'x') as output:
+    json.dump(dict(version=1, stage=os.environ['SPEC_BUILD_STAGE'], report='Memory fixture report'), output)
+PY
+"#)).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 async fn build(state: &App) -> String {
@@ -868,15 +876,14 @@ async fn missing_reports_preserve_failed_cancelled_and_completed_operational_sta
     for outcome in ["failed", "cancelled", "completed"] {
         let root = tempfile::tempdir().unwrap();
         let state = fixture(root.path());
-        fs::write(
-            root.path().join(".bash_aliases"),
+        runner(
+            root.path(),
             match outcome {
-            "failed" => "spec() { printf 'ses_Failed123\\n' > \"${2%/*}/session-id\"; printf 'no summary\\n'; return 7; }\n",
-            "cancelled" => "spec() { printf 'ses_Cancelled123\\n' > \"${2%/*}/session-id\"; touch \"$HOME/entered\"; sleep 60; }\n",
-                _ => "spec() { printf 'no summary or session capture\n'; }\n",
+            "failed" => "printf 'ses_Failed123\\n' > \"$SPEC_BUILD_SESSION_FILE\"; printf 'no summary\\n'; exit 7",
+            "cancelled" => "printf 'ses_Cancelled123\\n' > \"$SPEC_BUILD_SESSION_FILE\"; touch \"$HOME/entered\"; sleep 60",
+                _ => "printf 'no summary or session capture\\n'",
             },
-        )
-        .unwrap();
+        );
         let id = build(&state).await;
         if outcome == "cancelled" {
             wait_for_file(&root.path().join("entered")).await;

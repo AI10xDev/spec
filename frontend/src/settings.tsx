@@ -78,7 +78,7 @@ export function Settings({ api, onClose, onChanged }: { api: Api; onClose: () =>
       setError("Enter an API key. A stored key can only be retained for the same provider and endpoint.")
       return
     }
-    if (reset && !window.confirm("Remove the saved AI profile? Chat and completions will use the server environment; spec build sessions will use their execution host defaults, which may use Azure OpenAI. Running sessions are unchanged.")) return
+    if (reset && !window.confirm("Remove the saved AI profile? Chat and completions will use the server environment; repository-save and Performance will use execution host defaults. Staged builds reject saved profiles and require host-configured Astra, with optional Sol advisory supervision. Resetting removes the profile blocker but does not configure the host. Running sessions are unchanged.")) return
     submitting.current = true
     setBusy(true)
     try {
@@ -91,8 +91,8 @@ export function Settings({ api, onClose, onChanged }: { api: Api; onClose: () =>
         }, "PUT")
       receive(view)
       setNotice(reset
-        ? view.source === "environment" ? "Saved profile removed. Server environment configuration is now active." : "Saved profile removed. No environment AI configuration is available."
-        : "Settings saved. Future requests and spec build sessions will use this profile; running sessions are unchanged.")
+        ? `Saved profile removed. ${view.source === "environment" ? "Server environment configuration is now active for chat and completions." : "No environment AI configuration is available for chat and completions."} Repository-save and Performance return to execution host defaults. Staged builds still require host-configured Astra, with optional Sol advisory supervision.`
+        : "Settings saved. Future chat, completion, repository-save and Performance requests will use this profile; running sessions are unchanged. Staged builds reject saved profiles. Reset to environment and configure Astra on the execution host; Sol advisory supervision is optional.")
       try { await onChanged() } catch {
         setError("Settings changed, but capability refresh failed. Return to the workspace and focus the window to retry.")
       }
@@ -105,17 +105,17 @@ export function Settings({ api, onClose, onChanged }: { api: Api; onClose: () =>
   return <main className="settings-page" aria-labelledby="settings-heading">
     <div className="settings-content">
       <button type="button" disabled={busy} onClick={onClose}>Back to workspace</button>
-      <div className="settings-heading"><span className="eyebrow">WORKSPACE / CONFIGURATION</span><h1 id="settings-heading" ref={heading} tabIndex={-1}>AI settings</h1><p>Choose the model behind your next request.</p></div>
-      <p>One active saved profile is shared by this server. Saving replaces it for future AI requests and builds, not running sessions. Realtime voice is configured separately.</p>
+      <div className="settings-heading"><span className="eyebrow">WORKSPACE / CONFIGURATION</span><h1 id="settings-heading" ref={heading} tabIndex={-1}>AI settings</h1><p>Choose a profile for chat, completion, repository-save and Performance.</p></div>
+      <p>One active saved profile is shared by this server. Saving replaces it for future profile-backed requests, not running sessions. Staged builder/integrator runs reject saved profiles, including Azure profiles. Realtime voice is configured separately.</p>
       <div className="settings-source">Active configuration: <strong>{!saved ? "Not loaded" : saved.source === "settings" ? "Saved settings" : saved.source === "environment" ? "Server environment" : "None"}</strong>{saved && <span>{providers[saved.provider].name} / {saved.hasApiKey ? "Key configured on server" : "No key configured"}</span>}</div>
-      {saved && <section aria-label="Spec build session agent"><p>Spec build session agent: <strong>{saved.source === "settings" ? `${providers[saved.provider].name} / ${saved.model}` : "Execution host defaults (no saved override)"}</strong>. {saved.source === "settings" ? saved.provider === "azure" ? "Azure OpenAI is selected for future builds." : "Azure OpenAI is not selected for future builds." : "The chat environment shown above does not select the build agent."}</p></section>}
+      {saved && <section aria-label="Staged build agents"><p>Staged builds require host-configured Astra for Builder and Integrator, with optional Sol advisory supervision.</p><p><strong>{saved.source === "settings" ? `Blocked by saved profile: ${providers[saved.provider].name} / ${saved.model}` : "No saved profile; host configuration is still required."}</strong> {saved.source === "settings" ? "Reset to environment before starting or continuing a staged build. This profile does not replace Astra or Sol." : "The chat environment shown above does not select or verify the staged build agents."}</p></section>}
       {loading && <p role="status">Loading settings...</p>}
       {error && <p role="alert" className="error">{error}</p>}
       {!loading && !saved && <button type="button" onClick={() => setAttempt((value) => value + 1)}>Retry loading settings</button>}
       {notice && <p role="status" className="settings-success">{notice}</p>}
       {saved && <form autoComplete="off" aria-label="AI settings" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); void update() }}>
         <fieldset disabled={busy || loading}>
-          <legend>Model provider for requests and spec build sessions</legend>
+          <legend>Model provider for chat, completion, repository-save and Performance</legend>
           <div className="settings-field"><label htmlFor="ai-provider">Provider</label><select id="ai-provider" aria-describedby="provider-help" value={profile.provider} onChange={(event) => {
             const provider = event.target.value as Provider
             const { model, endpoint, apiVersion } = providers[provider]
@@ -124,9 +124,9 @@ export function Settings({ api, onClose, onChanged }: { api: Api; onClose: () =>
             setRemoveKey(false)
             setError("")
             setNotice("")
-          }}>{Object.entries(providers).map(([value, provider]) => <option key={value} value={value}>{provider.name}</option>)}</select><small id="provider-help">To use Azure OpenAI for the spec build session agent, select Azure OpenAI. To use another provider instead, select it here and save its model and credentials. A saved non-Azure profile overrides the build host's Azure default.</small></div>
-          {profile.provider === "openrouter" && <p>Enter your OpenRouter API key and full model ID (for example, openai/gpt-4.1-mini). Choose a model that supports tools for spec build sessions. Azure credentials are not required.</p>}
-          {local && <div className="settings-local" id="local-model-help"><h2>Bring a running local server</h2><p>The Hugging Face model must already be served by a running OpenAI-compatible server on your local hardware, such as vLLM or llama.cpp. There is no automatic model download or server startup.</p><p>Use its served model ID and API base URL. A loopback endpoint (localhost or 127.0.0.1) refers to each execution host: the web server for chat and completions, and the remote build host for builds, not your browser. The server must be reachable from each host that uses it.</p></div>}
+          }}>{Object.entries(providers).map(([value, provider]) => <option key={value} value={value}>{provider.name}</option>)}</select><small id="provider-help">Select and save a provider for chat, completion, repository-save and Performance. No saved provider, including Azure, can override staged build agents. Staged builds require resetting this profile and configuring Astra on the execution host; Sol advisory supervision is optional.</small></div>
+          {profile.provider === "openrouter" && <p>Enter your OpenRouter API key and full model ID (for example, openai/gpt-4.1-mini). Choose a model that supports tools for repository-save and Performance. Azure credentials are not required for this profile; it cannot be used for staged builds.</p>}
+          {local && <div className="settings-local" id="local-model-help"><h2>Bring a running local server</h2><p>The Hugging Face model must already be served by a running OpenAI-compatible server on your local hardware, such as vLLM or llama.cpp. There is no automatic model download or server startup.</p><p>Use its served model ID and API base URL. A loopback endpoint (localhost or 127.0.0.1) refers to each execution host: the web server for chat and completions, and the remote execution host for repository-save and Performance, not your browser. The server must be reachable from each host that uses it. This profile cannot be used for staged builds.</p></div>}
           <div className="settings-field"><label htmlFor="ai-model">{profile.provider === "azure" ? "Deployment name" : "Model ID"}</label><input id="ai-model" value={profile.model} onChange={(event) => setProfile({ ...profile, model: event.target.value })} required pattern=".*\S.*" placeholder={profile.provider === "azure" ? "Your Azure deployment name" : local ? "Model ID served by your local server" : providers[profile.provider].model} aria-describedby="model-help" /><small id="model-help">{profile.provider === "azure" ? "Use the deployment name from your Azure resource, not the underlying model name." : "Defaults are examples. Choose a model available on your provider or server."}</small></div>
           <div className="settings-field"><label htmlFor="ai-endpoint">{profile.provider === "azure" ? "Azure resource endpoint" : "API base URL"}</label><input id="ai-endpoint" type="url" value={profile.endpoint} onChange={(event) => { setProfile({ ...profile, endpoint: event.target.value }); setRemoveKey(false) }} required placeholder={profile.provider === "azure" ? "https://your-resource.openai.azure.com" : providers[profile.provider].endpoint} aria-describedby="endpoint-help" /><small id="endpoint-help">Use a trusted {local ? "local server" : "provider"} endpoint without credentials, query parameters, or a chat/completions suffix. API keys are sent to this endpoint.</small></div>
           {(profile.provider === "azure" || profile.provider === "claude") && <div className="settings-field"><label htmlFor="ai-version">API version{versionRequired ? "" : " (optional)"}</label><input id="ai-version" value={profile.apiVersion} onChange={(event) => setProfile({ ...profile, apiVersion: event.target.value })} required={versionRequired} pattern=".*\S.*" placeholder={profile.provider === "claude" ? "2023-06-01" : "2024-10-21"} aria-describedby="version-help" /><small id="version-help">{profile.provider === "claude" ? "Leave blank to use the default Anthropic API version (2023-06-01)." : "Required for legacy Azure resource roots. Optional for /openai/v1 and /openai/v1/responses endpoints."}</small></div>}
@@ -134,7 +134,7 @@ export function Settings({ api, onClose, onChanged }: { api: Api; onClose: () =>
           {local && retained && <p><label><input type="checkbox" checked={removeKey} onChange={(event) => { setRemoveKey(event.target.checked); setApiKey("") }} /> Remove configured API key on save</label></p>}
           <div className="settings-actions"><button className="primary" type="submit">{busy ? "Applying..." : "Save settings"}</button><button type="button" disabled={saved.source !== "settings"} onClick={() => void update(true)}>Reset to environment</button></div>
         </fieldset>
-        <p className="settings-footnote">Reset removes the saved profile: chat and completions return to the server environment, while spec build sessions return to execution host defaults, which may use Azure OpenAI. To keep builds off Azure, save a different provider instead of resetting. Saving does not test connectivity or download a model.</p>
+        <p className="settings-footnote">Reset removes the saved profile: chat and completions return to the server environment, while repository-save and Performance return to execution host defaults. Staged builds reject all saved profiles and require host-configured Astra, with optional Sol advisory supervision. Resetting does not configure or verify those host agents. Saving does not test connectivity or download a model.</p>
       </form>}
       <StorageSettings api={api} />
     </div>

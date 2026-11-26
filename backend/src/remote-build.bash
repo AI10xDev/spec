@@ -1,5 +1,5 @@
 # SSH attachment: workspace, bytes, alias, supervisor, UUID, name, mode, repository probe,
-# session ID, config bytes, profile bytes, provider setup script.
+# session ID, config bytes, profile bytes, provider setup script, stage, handoff bytes.
 # Only an explicit C byte after all uploads cancels; EOF/signals detach after launch.
 set -eu
 umask 077
@@ -16,6 +16,16 @@ repository_probe=${8:-}
 session_id=${9:-}
 config_bytes=${10:-0}
 profile_bytes=${11:-0}
+stage=${13:-}
+handoff_bytes=${14:-0}
+unset SPEC_BUILD_STAGE SPEC_BUILD_HANDOFF_FILE SPEC_BUILD_RESULT_FILE
+[[ $handoff_bytes =~ ^(0|[1-9][0-9]{0,5})$ ]] && (( handoff_bytes <= 738304 )) || exit 125
+if [[ $mode == build || $mode == continue ]]; then
+    [[ $stage == builder || $stage == integrator ]] || exit 125
+    [[ $stage == integrator && $handoff_bytes != 0 || $stage == builder && $handoff_bytes == 0 ]] || exit 125
+else
+    [[ -z $stage && $handoff_bytes == 0 ]] || exit 125
+fi
 [[ $profile_bytes =~ ^(0|[1-9][0-9]{0,5})$ ]] && (( profile_bytes <= 65536 )) || exit 125
 [[ $config_bytes =~ ^(0|[1-9][0-9]{0,6})$ ]] || exit 125
 if [[ $mode == optimize || $mode == performance ]]; then
@@ -73,6 +83,7 @@ cleanup() {
         printf '%s\n' '[remote] Launch rejected before supervisor start.' >> "$directory/$log"
         rm -f -- "$directory/snapshot.md"
         rm -f -- "$directory/execution-profile.json" "$directory/provider-setup.bash"
+        rm -f -- "$directory/handoff.json"
         rm -f -- "$directory/legacy.tmp"
         rm -f -- "$directory/performance-launch.json"
         [[ -z $config_file ]] || rm -f -- "$config_file"
@@ -88,6 +99,7 @@ trap 'exit 125' HUP INT TERM
 # Separate report identity from initial-build invocation evidence used by discovery.
 printf '%s\0%s\0%s\0%s\0' "$PWD" "$run_kind" "$name" "$destination/$log" > "$directory/provenance.tmp"
 mv -T -- "$directory/provenance.tmp" "$directory/provenance"
+[[ -z $stage ]] || printf '%s\n' "$stage" > "$directory/stage"
 [[ -z $session_id ]] || printf '%s\n' "$session_id" > "$directory/session-id"
 reject() {
     printf '[remote] %s\n' "$1" >> "$directory/$log"
@@ -333,16 +345,40 @@ if (( profile_bytes > 0 )); then
     printf '%s' "${12}" > "$directory/provider-setup.bash"
     export SPEC_EXECUTION_PROFILE="$destination/execution-profile.json"
 fi
+if (( handoff_bytes > 0 )); then
+    head -c "$handoff_bytes" > "$directory/handoff.json"
+    [[ $(wc -c < "$directory/handoff.json") -eq "$handoff_bytes" ]] || reject 'Incomplete builder handoff.'
+    python3 -I -c '
+import json, sys
+def unique(items):
+    value = {}
+    for key, item in items:
+        if key in value:
+            raise ValueError()
+        value[key] = item
+    return value
+try:
+    with open(sys.argv[1], "rb") as source:
+        value = json.loads(source.read().decode("utf-8"), object_pairs_hook=unique)
+    if (not isinstance(value, dict) or set(value) != {"version", "stage", "report"}
+            or type(value["version"]) is not int or value["version"] != 1 or value["stage"] != "builder"
+            or not isinstance(value["report"], str) or not value["report"].strip()
+            or len(value["report"].encode("utf-8")) > 120 * 1024):
+        raise ValueError()
+except (OSError, ValueError, TypeError, RecursionError):
+    sys.exit(125)
+' "$directory/handoff.json" || reject 'Invalid original builder handoff.'
+fi
 publish || reject 'Cannot publish admitted run directory.'
 # Ignore HUP before fork, and redirect every SSH descriptor before detaching.
 # Ownership transfers before launch so an attachment signal cannot delete live input.
-if [[ $mode == build && -z $session_id ]]; then
+if [[ $mode == build && $stage == builder && -z $session_id ]]; then
     # Record the actual launch identity, not a growing log's modification time.
     printf '%s\0%s\0%s\0%s\0' "$PWD" build "$name" "$directory/$log" > "$directory/invocation"
 fi
 trap '' HUP
 launched=1
-setsid flock --exclusive --nonblock --close "$directory/lease" bash --noprofile --norc -c "$4" -- "$directory" "$3" "$log" "$mode" "$repository_probe" "$registry_record" </dev/null >/dev/null 2>&1 &
+setsid flock --exclusive --nonblock --close "$directory/lease" bash --noprofile --norc -c "$4" -- "$directory" "$3" "$log" "$mode" "$repository_probe" "$registry_record" "$stage" </dev/null >/dev/null 2>&1 &
 # The detached supervisor owns the lock now; attachment backpressure must not retain it.
 exec 9<&-
 trap 'exit 125' HUP

@@ -7,6 +7,28 @@ use tokio::process::Command;
 #[path = "continuation_remote_tests.rs"]
 mod continuation_remote_tests;
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildResult {
+    pub version: u8,
+    pub stage: String,
+    pub report: String,
+}
+
+impl BuildResult {
+    pub fn validate(&self, expected_stage: &str) -> Result<(), String> {
+        if self.version != 1
+            || !matches!(expected_stage, "builder" | "integrator")
+            || self.stage != expected_stage
+            || self.report.trim().is_empty()
+            || self.report.len() > 120 * 1024
+        {
+            return Err("invalid build result version, stage, or report".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(serde::Serialize)]
 pub struct RepositoryStatus {
     pub connected: bool,
@@ -243,8 +265,66 @@ impl Remote {
         config_bytes: usize,
         profile_bytes: usize,
     ) -> Command {
+        self.staged_command(
+            bytes,
+            id,
+            name,
+            mode,
+            session_id,
+            config_bytes,
+            profile_bytes,
+            if matches!(mode, "build" | "continue") {
+                "builder"
+            } else {
+                ""
+            },
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn workflow_command(
+        &self,
+        bytes: usize,
+        id: &str,
+        name: &str,
+        session_id: &str,
+        profile_bytes: usize,
+        stage: &str,
+        handoff_bytes: usize,
+    ) -> Command {
+        self.staged_command(
+            bytes,
+            id,
+            name,
+            if session_id.is_empty() {
+                "build"
+            } else {
+                "continue"
+            },
+            session_id,
+            0,
+            profile_bytes,
+            stage,
+            handoff_bytes,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn staged_command(
+        &self,
+        bytes: usize,
+        id: &str,
+        name: &str,
+        mode: &str,
+        session_id: &str,
+        config_bytes: usize,
+        profile_bytes: usize,
+        stage: &str,
+        handoff_bytes: usize,
+    ) -> Command {
         self.ssh(format!(
-            "bash -c {} -- {} {} {} {} {} {} {} {} {} {} {} {}",
+            "bash -c {} -- {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
             quote(&format!(
                 "[[ $7 {} performance ]] || exit 125\n{}",
                 if self.performance { "==" } else { "!=" },
@@ -268,7 +348,72 @@ impl Remote {
             config_bytes,
             profile_bytes,
             quote(include_str!("remote-provider.bash")),
+            quote(stage),
+            quote(&handoff_bytes.to_string()),
         ))
+    }
+
+    pub async fn build_result(&self, id: &str, name: &str) -> Result<BuildResult, String> {
+        if self.performance {
+            return Err("Performance does not produce staged build results".into());
+        }
+        let mut child = self
+            .ssh(format!(
+                "timeout --kill-after=1s 10s python3 -I -B -c {} {} {} {}",
+                quote(include_str!("remote-result.py")),
+                quote(&self.directory),
+                quote(id),
+                quote(name),
+            ))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let pid = child.id().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            async fn read(
+                pipe: impl tokio::io::AsyncRead + Unpin,
+                limit: usize,
+            ) -> Result<Vec<u8>, String> {
+                let mut bytes = Vec::new();
+                pipe.take((limit + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if bytes.len() > limit {
+                    return Err("remote build result response exceeded limit".into());
+                }
+                Ok(bytes)
+            }
+            let (out, err) =
+                tokio::try_join!(read(stdout, 120 * 1024 * 6 + 1024), read(stderr, 4096))?;
+            let exit = child.wait().await.map_err(|e| e.to_string())?;
+            if !exit.success() {
+                return Err(format!(
+                    "remote build result lookup {exit}: {}",
+                    String::from_utf8_lossy(&err).trim()
+                ));
+            }
+            let value: BuildResult = serde_json::from_slice(&out)
+                .map_err(|_| "invalid remote build result".to_owned())?;
+            value.validate(&value.stage)?;
+            Ok(value)
+        })
+        .await
+        .unwrap_or_else(|_| Err("remote build result lookup timed out".into()));
+        if result.is_err() {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+            let _ = child.kill().await;
+        }
+        result
     }
 
     pub async fn session_id(&self, id: &str, name: &str) -> Result<String, String> {
@@ -427,6 +572,7 @@ impl Remote {
             } else {
                 super::MAX_OUTPUT
             }) * 6
+                + 120 * 1024 * 6
                 + 4096
         } else {
             16384

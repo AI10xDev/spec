@@ -28,6 +28,9 @@ mod recovery_tests;
 #[path = "queued_build_tests.rs"]
 mod queued_build_tests;
 
+#[path = "workflow_tests.rs"]
+mod workflow_tests;
+
 pub(super) fn app(root: &FsPath) -> App {
     App {
         root: root.to_owned(),
@@ -100,6 +103,19 @@ pub(super) fn remote_fixture(root: &FsPath, runner: &FsPath) -> Remote {
     }
 }
 
+pub(super) fn workflow_remote_fixture(root: &FsPath, runner: &FsPath) -> Remote {
+    let remote = remote_fixture(root, runner);
+    fs::write(
+        root.join(".bash_aliases"),
+        format!(
+            "export SPEC_WORKFLOW_RUNNER='{}'\n",
+            runner.to_str().unwrap().replace('\'', "'\"'\"'")
+        ),
+    )
+    .unwrap();
+    remote
+}
+
 pub(super) async fn request(
     app: App,
     method: &str,
@@ -161,6 +177,7 @@ async fn all_api_routes_require_authentication() {
         ("GET", "/api/runs/id"),
         ("POST", "/api/runs/id/cancel"),
         ("POST", "/api/runs/id/continue"),
+        ("POST", "/api/runs/id/approve"),
     ] {
         let response = router(app(root.path()))
             .oneshot(
@@ -386,6 +403,10 @@ fn output_buffers_are_bounded() {
         repository_save: false,
         optimization: false,
         memory: None,
+        stage: None,
+        snapshot: None,
+        build_result: None,
+        approved_handoff: None,
         attached: true,
         dirty: false,
         persistence_error: None,
@@ -456,13 +477,13 @@ async fn build_exit_status_and_snapshot_cleanup() {
         fs::write(
             &runner,
             format!(
-                "#!/bin/sh\n[ \"$#\" = 2 ] && [ \"$1\" = build ] && [ \"$SPEC_BUILD_AUTO\" = 1 ] || exit 90\nprintf '%s' \"$2\" > snapshot-path\ncat -- \"$2\" >/dev/null\nprintf 'stderr output' >&2\nexit {exit_code}\n"
+                "#!/bin/sh\nif [ \"${{1:-}}\" = --workflow-version ]; then printf 'spec-workflow-v1\\n'; exit; fi\n[ \"$#\" = 1 ] && [ \"$SPEC_BUILD_STAGE\" = builder ] && [ \"$SPEC_BUILD_AUTO\" = 1 ] || exit 90\nprintf '%s' \"$1\" > snapshot-path\ncat -- \"$1\" >/dev/null\nprintf 'stderr output' >&2\nprintf '{{\"version\":1,\"stage\":\"builder\",\"report\":\"Builder report\"}}' > \"$SPEC_BUILD_RESULT_FILE\"\nexit {exit_code}\n"
             ),
         )
         .unwrap();
         fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
         let mut state = app(root.path());
-        state.remote = Some(remote_fixture(root.path(), &runner));
+        state.remote = Some(workflow_remote_fixture(root.path(), &runner));
         let doc = save(
             &state,
             "a.md",
@@ -484,7 +505,13 @@ async fn build_exit_status_and_snapshot_cleanup() {
         assert_eq!(response.status(), StatusCode::OK);
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if state.jobs.lock().unwrap()[0].status != "running" {
+                if state
+                    .jobs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|job| !job.recover && !job.attached)
+                {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -523,10 +550,11 @@ async fn run_streams_snapshot_and_can_be_cancelled() {
     runner
         .write_all(
             br#"#!/bin/sh
-[ "$#" = 2 ] && [ "$1" = build ] && [ "$SPEC_BUILD_AUTO" = 1 ] && [ "$SPEC_BUILD_FOREGROUND" = 1 ] || exit 90
-printf '%s' "$2" > snapshot-path
+if [ "${1:-}" = --workflow-version ]; then printf 'spec-workflow-v1\n'; exit; fi
+[ "$#" = 1 ] && [ "$SPEC_BUILD_STAGE" = builder ] && [ "$SPEC_BUILD_AUTO" = 1 ] && [ "$SPEC_BUILD_FOREGROUND" = 1 ] || exit 90
+printf '%s' "$1" > snapshot-path
 while [ ! -f ready ]; do sleep 0.02; done
-cat -- "$2"
+cat -- "$1"
 printf '\nfixture-output\n'
 sleep 60 &
 printf '%s' "$!" > descendant-pid
@@ -540,7 +568,7 @@ wait
         .unwrap();
     let runner = runner.into_temp_path();
     let mut state = app(root.path());
-    state.remote = Some(remote_fixture(root.path(), &runner));
+    state.remote = Some(workflow_remote_fixture(root.path(), &runner));
     let doc = save(
         &state,
         "a.md",
@@ -660,13 +688,14 @@ async fn restart_recovers_running_and_disconnected_completed_runs_without_relaun
         fs::write(
             &runner,
             r#"#!/bin/bash
-id=${2%/snapshot.md}
+if [[ ${1:-} == --workflow-version ]]; then printf 'spec-workflow-v1\n'; exit; fi
+id=${1%/snapshot.md}
 id=${id##*/run-}
 # Both durable local records must precede the first actual launch.
 [[ -s .spec-output/$id.json ]] || exit 91
 [[ $(cat .spec-output/latest-*) == "$id" ]] || exit 92
 printf 'launch\n' >> launches
-cat "$2" > received
+cat "$1" > received
 : > began
 printf 'before disconnect\n'
 while [[ ! -f resume ]]; do sleep 0.02; done
@@ -680,7 +709,7 @@ exit 7
         .unwrap();
         fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
         let mut state = app(root.path());
-        let remote = remote_fixture(root.path(), &runner);
+        let remote = workflow_remote_fixture(root.path(), &runner);
         state.remote = Some(remote.clone());
         let doc = save(
             &state,
@@ -882,12 +911,12 @@ async fn sixteen_runs_are_admitted_and_completion_frees_capacity() {
     let runner = root.path().join("runner");
     fs::write(
         &runner,
-        "#!/bin/sh\nwhile [ ! -f ready ]; do sleep 0.02; done\n",
+        "#!/bin/sh\nif [ \"${1:-}\" = --workflow-version ]; then printf 'spec-workflow-v1\\n'; exit; fi\nwhile [ ! -f ready ]; do sleep 0.02; done\nprintf '{\"version\":1,\"stage\":\"builder\",\"report\":\"Builder report\"}' > \"$SPEC_BUILD_RESULT_FILE\"\n",
     )
     .unwrap();
     fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
     let mut state = app(root.path());
-    state.remote = Some(remote_fixture(root.path(), &runner));
+    state.remote = Some(workflow_remote_fixture(root.path(), &runner));
     // Restore unresolved records without launching processes or contacting SSH.
     for index in 0..15 {
         let mut job = persisted_job(&Uuid::new_v4().to_string(), "0".repeat(64), true);
@@ -996,6 +1025,10 @@ fn persisted_job(id: &str, identity: String, recover: bool) -> Job {
         repository_save: false,
         optimization: false,
         memory: None,
+        stage: None,
+        snapshot: None,
+        build_result: None,
+        approved_handoff: None,
         stop: detached_control(),
         attached: false,
         dirty: false,
@@ -1117,7 +1150,7 @@ async fn ssh_exit_255_remains_recoverable_until_nohup_confirms_completion() {
 
     fs::write(
         &remote.binary,
-        "#!/bin/sh\nprintf 'SPEC-RUN-1 0 0\\nbuild completed while SSH was disconnected'\n",
+        "#!/bin/bash\nif [[ ${!#} == *'Read a successful staged result'* ]]; then printf '{\"version\":1,\"stage\":\"builder\",\"report\":\"Validated builder report\"}'; else printf 'SPEC-RUN-1 0 0\\nbuild completed while SSH was disconnected'; fi\n",
     )
     .unwrap();
     let output = json(
@@ -1367,6 +1400,10 @@ async fn terminal_log_read_survives_real_local_attachment_finalization() {
         r#"#!/bin/bash
 if [[ ${!#} == *SPEC-RUN-1* ]]; then
     printf 'SPEC-RUN-1 0 0\nverified completion'
+elif [[ ${!#} == *'Read a successful staged result'* ]]; then
+    printf '{"version":1,"stage":"builder","report":"Validated builder report"}'
+elif [[ ${!#} == *'Non-launching continuation preflight'* ]]; then
+    printf 'ses_fixture\n'
 else
     printf 'attached stream\n'
     cat >/dev/null

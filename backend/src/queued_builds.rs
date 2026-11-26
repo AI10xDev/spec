@@ -66,6 +66,13 @@ fn load(app: &App) -> Result<Vec<Saved>> {
     Ok(items)
 }
 
+// Caller holds app.files. Admission also holds recovery_gate through registration.
+pub(super) fn pending(app: &App, id: &str) -> Result<bool> {
+    Ok(load(app)?
+        .iter()
+        .any(|saved| saved.item.parent_id == id && matches!(saved.item.status, Status::Waiting)))
+}
+
 fn persist(app: &App, items: &[Saved]) -> Result<()> {
     let data = serde_json::to_vec(items).map_err(|_| invalid("Cannot encode queued builds"))?;
     if data.len() > MAX_QUEUE {

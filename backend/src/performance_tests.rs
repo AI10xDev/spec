@@ -3,20 +3,27 @@ use serde_json::{Value, json as body};
 
 fn fixture(root: &FsPath) -> App {
     let mut state = app(root);
-    state.remote = Some(remote_fixture(root, &root.join("unused")));
+    let runner = root.join("workflow-runner");
+    state.remote = Some(workflow_remote_fixture(root, &runner));
     fs::write(
-        root.join(".bash_aliases"),
-        r#"
-spec() {
-    echo builder
-    if [[ -f "$HOME/hold-build" ]]; then
-        touch "$HOME/build-started"
-        sleep 60
-    fi
-}
+        &runner,
+        r#"#!/bin/bash
+if [[ ${1:-} == --workflow-version ]]; then printf 'spec-workflow-v1\n'; exit 0; fi
+[[ $# == 1 && -f $1 && $SPEC_BUILD_AUTO == 1 ]] || exit 90
+echo builder
+if [[ -f "$HOME/hold-build" ]]; then
+    touch "$HOME/build-started"
+    sleep 60
+fi
+python3 - <<'PY'
+import json, os
+with open(os.environ['SPEC_BUILD_RESULT_FILE'], 'x') as output:
+    json.dump(dict(version=1, stage=os.environ['SPEC_BUILD_STAGE'], report='Builder fixture report'), output)
+PY
 "#,
     )
     .unwrap();
+    fs::set_permissions(runner, fs::Permissions::from_mode(0o700)).unwrap();
     let bin = root.join(".local/bin");
     fs::create_dir_all(&bin).unwrap();
     let runner = bin.join("opencode-source");

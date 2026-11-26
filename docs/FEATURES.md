@@ -73,11 +73,72 @@ With `SPEC_SSH_TARGET` and `SPEC_SSH_WORKSPACE` set on the **local** Rust server
 
 1. A confirmation warns about tools, filesystem changes, provider costs, and inherited permissions.
 2. The current buffer is saved.
-3. The local server checks the saved revision and uploads an immutable snapshot over SSH. A fixed remote supervisor writes a private temporary snapshot, sources the remote `~/.bash_aliases`, and invokes `spec build <snapshot-file>` in the remote build directory with `SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1`. It also exports `OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1 OPENCODE_QUESTION_AUTO_RECOMMEND=1` and clears persistent-session variables. Automatic approval and recommended question answers are requested to minimize runtime prompting; actual behavior depends on the installed alias/engine. Unsupported questions are not blindly answered. Builds are limited to 120 KiB (local saving still supports 2 MiB). Other local files are not synced, and build changes remain remote.
-4. The right pane follows output. Disable **Follow output** to keep your scroll position.
+3. The local server checks the saved revision and uploads an immutable snapshot over SSH. A fixed remote supervisor writes a private temporary snapshot and sources trusted remote `~/.bash_aliases`. It requires an absolute executable `SPEC_WORKFLOW_RUNNER`, probes `--workflow-version` for exactly `spec-workflow-v1` plus a newline and exit 0, then invokes that same runner directly with the snapshot path. There is no generic `spec build` fallback. Builds are limited to 120 KiB (local saving still supports 2 MiB). Other local files are not synced, and build changes remain remote.
+4. The **Builder** explores/plans, may edit preliminary unit/smoke tests and run experiments, and reports a handoff. It is not read-only, but must not implement end-to-end. The right pane follows runtime output; disable **Follow output** to keep your scroll position.
 5. **Stop run** sends an explicit control byte to request remote process-group cancellation and snapshot cleanup. EOF or SSH disconnect only detaches the log viewer.
 
-A failure to launch the local SSH client is reported immediately. SSH connection/authentication and remote startup errors appear in the run output. An SSH attachment exit 255 leaves remote completion unconfirmed; it is not proof the remote command failed. A verified remote exit status is shown as completed or failed; completion means **CLI exit success**, not independent verification that generated software is correct. Snapshot creation must succeed before launch; the snapshot is removed after process cleanup. Some remote launchers strip trailing newlines when reading the prompt.
+The runner must come from the separately installed external **AI10x/opencode-fork**
+checkout (`main` commit `e60a017d878486eb6b143e55cb9b9f320091d46d` or equivalent),
+with its dependencies and rebuilt compatible engine. The Spec web server is not
+that runner and does not deploy it. See [host setup](INSTALLATION.md#install-the-external-runner).
+Interactive `.bashrc` and login profiles are not loaded; export the absolute runner
+path in trusted `~/.bash_aliases`, outside interactive-shell guards.
+
+Both stages require executing model `azure/gpt-6-astra` on the host; selected
+execution profiles are rejected. Sol (`azure/gpt-6-sol`) is optional read-only,
+nonblocking advice, never an approval gate. The adapter keeps
+`SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1` with `SPEC_BUILD_SUPERVISED=1`, but sets
+`OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=0 OPENCODE_QUESTION_AUTO_RECOMMEND=0`.
+Read/edit are allowed; `task`, `external_directory`, `glob` and `grep` are denied.
+Other permitted tools receive automatic per-request `once` approval by the runner,
+not global `always` grants. Questions are not autoanswered, even recommended
+options; the agent must report questions/options/blockers for later user feedback.
+Host policy lists are advisory and do not sandbox tool or shell effects.
+
+A failure to launch the local SSH client is reported immediately. SSH
+connection/authentication and remote startup errors appear in output. An SSH
+attachment exit 255 leaves completion unconfirmed; it is not proof of remote
+failure. A staged run needs both successful remote status and a validated separate
+result to complete. Neither verifies that generated software is correct. The
+temporary snapshot is removed after process cleanup, while the original snapshot
+remains in private local run records for approval and recovery.
+
+### Reports, Approval And Feedback
+
+The **Builder report** or **Integrator report** appears separately from runtime
+logs. It is read from private `result.json`, checked for valid envelope, stage,
+provenance and successful status, and persisted independently of the truncated log
+tail. Reports are at most 120 KiB UTF-8 and come from the executing actor, not Sol.
+Validation does not verify implementation or report claims. Read the report and
+inspect actual remote diffs/checks before proceeding. The task bar counts only
+the current executing stage's reported todos; Sol's checklist is separate advice
+and does not change execution progress or establish correctness.
+
+Use **Send & revise builder** or **Use recommended & revise builder** to revise a
+successful Builder in the same session. Only explicit **Approve & implement**
+posts `{}` to authenticated `POST /api/runs/{id}/approve` and starts a **fresh
+Integrator session** for further exploration and end-to-end implementation.
+Approval requires the latest successful Builder, a durable validated report and
+matching remote configuration. The server also rejects approval if the saved spec
+content differs from the original snapshot or that Builder has a pending saved-build
+queue entry. This is not just a browser guard. The UI additionally blocks approval
+for unsaved changes and feedback drafts; approval never sends those drafts/edits.
+Run a new Builder for changed requirements and resolve queued revisions first.
+
+Integrator receives the original snapshot and approved Builder handoff. **Send &
+continue** or **Use recommended & continue** resumes that Integrator within the
+same stage/session and approved scope, always with the original approved handoff.
+The handoff is context, not new permissions. Stage, original snapshot, validated
+result and approved handoff persist in private local `.spec-output/` records.
+Legacy runs without staged metadata need a new Builder; old logs cannot substitute
+for a validated report or explicit approval.
+
+Feedback accepts Enter to submit and Shift+Enter for a newline. During an active
+run, **Queue follow-up** holds one browser-memory message for same-stage/session
+delivery after confirmed success. Keep the page open; this is not live stdin.
+Failure, Stop, replacement or ambiguous delivery pauses it, not a blind retry.
+Saving, editing, recommended-choice feedback and both queue types **never
+autoapprove integration**. See [staged workflows](WORKFLOWS.md#choose-the-right-action).
 
 ### Queue saved editor follow-ups
 
@@ -86,17 +147,25 @@ During an active supported build, **Save & run** (or **Ctrl+Enter / Cmd+Enter**)
 - The backend captures the acknowledged saved revision, not a later editor buffer. Later edits and autosaves do not replace queued instructions or get overwritten when the queue dispatches.
 - One snapshot may be queued per parent run. The **Saved build queue** shows its filename, revision, and waiting, started, or paused state. Cancel the entry before replacing it.
 - Snapshots persist in private local `.spec-output/` storage. Execution does not require the browser to stay open; restarting the backend resumes waiting entries with the same remote configuration.
-- A fresh spec build starts only after authoritative successful parent completion, attachment cleanup, and conflicting runs have resolved. Unknown remote status waits; failed or stopped parents pause the entry. A changed latest-run association or remote configuration also prevents dispatch.
+- A fresh **Builder** starts only after authoritative successful parent completion, attachment cleanup, and conflicting runs have resolved. It does not start an Integrator, even if queued from one. Unknown remote status waits; failed or stopped parents pause the entry. A changed latest-run association or remote configuration also prevents dispatch.
 - **Cancel queued build** removes waiting work; dismissing an already-started entry does not stop its child. Use **Stop run** for a dispatched build. Stop on the parent revokes its queued work even if final success races the cancellation.
 - An uncertain launch is never automatically resubmitted. Inspect the recorded child output before scheduling another build. The queue holds up to 32 entries, with a maximum 120 KiB per snapshot; dismiss old entries to release space.
 
-This differs from the answer-area chat follow-up queue: chat messages continue the same agent session and remain page-local. Saved editor follow-ups execute a fresh build using the preserved spec snapshot, including its completion markers.
+This differs from the feedback queue: feedback continues the same stage/session
+and remains page-local. Saved editor follow-ups start fresh Builders using the
+preserved snapshot, including completion markers. Neither queue grants approval;
+a pending saved-build queue entry for a Builder also blocks server-side approval.
 
 API: `GET /api/queued-builds` lists queue metadata; `POST /api/runs/{id}/queued-build` accepts `{name, revision}`; `DELETE /api/runs/{id}/queued-build` removes that parent's entry without cancelling an already-started child. All require the existing server token.
 
 ### Run limits and lifecycle
 
 Builds (including continuations), repository saves, and [optimization](../REFERENCE.md#output-and-safety) have no overall supervisor runtime limit or UI attachment deadline. Ordinary builds and repository saves cap agent output; optimization output remains uncapped and has separate retention rules.
+
+The inner staged runner still enforces host-policy `runTimeoutMs` and any numeric
+`maxTokens` budget for the executing actor's reported usage per sweep, excluding
+Sol. `reviewTimeoutMs` only bounds optional advice. Outer keep-alives do not disable
+these limits, and reported-token budgets are not hard provider billing caps.
 
 - At most one unresolved run per filename and 16 in total, including recovered or detached sessions whose completion is unconfirmed. Admission errors distinguish a blocked filename from the total run limit.
 - Latest 256 KiB of output per retained run. Recovery reads a bounded latest-256-KiB tail for all modes. Truncation is explicitly indicated.
@@ -111,6 +180,11 @@ Builds (including continuations), repository saves, and [optimization](../REFERE
 
 The Rust backend embeds the supervisor and sends it over SSH. To deploy this behavior, rebuild and restart the actual SSH-launching backend, not just the execution VM. Already-running supervisors retain their original behavior, including older watchdog deadlines.
 
+The external engine/runner, provider configuration and runtime `~/projects/Agent.md`
+require separate explicit host-owner installation. The repo's [Agent.md](../Agent.md)
+is only a versioned snapshot; editor changes do not deploy it. No live host
+deployment or provider validation was performed for this documentation update.
+
 ## 7. What changed from the original
 
 | Original capability | Web rewrite |
@@ -119,9 +193,9 @@ The Rust backend embeds the supervisor and sends it over SSH. To deploy this beh
 | One visible spec at a time | Multiple independent editor tabs |
 | Newline-delimited save history | Workspace file listing with filtering and timestamps |
 | Spec/output split | Desktop two-pane view; stacked mobile view |
-| Background shell build | Opt-in remote foreground build over SSH; local web server, capped agent output plus uncapped keep-alives, cancellation, no overall runtime limit |
+| Background shell build | Staged remote runner under a detached SSH supervisor: Builder, explicit approval, fresh Integrator; capped logs plus separate reports, cancellation, host-policy execution limits |
 | Basename mirror saves | No mirroring; saves only the named workspace file |
-| Persistent V2 session inbox | Not ported; explicit [continuation of completed builds](../REFERENCE.md#continue-a-completed-build) resumes the captured engine session |
+| Persistent V2 session inbox | Not ported; explicit [continuation of completed builds](../REFERENCE.md#continue-a-completed-build) resumes the captured session in the same stage, never approves integration |
 | Azure inline completion/filename ranking | Optional sentence-part trailing completions; filename ranking not ported |
 | `/eval`, `/telle`, legacy eval, plan picker | Not ported |
 | Terminal keybindings/syntax highlighting | Browser editing, save/run shortcuts, slash completion-marker toggle, and display-only source highlighting |

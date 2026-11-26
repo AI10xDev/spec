@@ -55,7 +55,7 @@ fi
 # Both writers append so agent output cannot overwrite supervisor keep-alives.
 setsid bash --noprofile --norc -c "$log_command" -- "$mode" 9<&- < "$directory/pipe" >> "$directory/$3" &
 logger=$!
-setsid bash --noprofile --norc -c "$2" -- "$directory/snapshot.md" "$directory/ready" "${4:-build}" "${5:-}" 9<&- </dev/null > "$directory/pipe" 2>&1 &
+setsid bash --noprofile --norc -c "$2" -- "$directory/snapshot.md" "$directory/ready" "${4:-build}" "${5:-}" "${7:-}" 9<&- </dev/null > "$directory/pipe" 2>&1 &
 pid=$!
 SECONDS=0
 # setsid must establish the group before cancellation can kill it.

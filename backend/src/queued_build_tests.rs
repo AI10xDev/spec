@@ -55,20 +55,27 @@ async fn queued_build_snapshot_survives_autosave_and_restart_and_dispatches_once
     fs::write(
         &runner,
         r#"#!/bin/bash
-[[ $# == 2 && $1 == build ]] || exit 90
+if [[ ${1:-} == --workflow-version ]]; then printf 'spec-workflow-v1\n'; exit; fi
+[[ $# == 1 && $SPEC_BUILD_STAGE == builder ]] || exit 90
 printf 'build\n' >> launches
-if [[ $(cat "$2") == parent ]]; then
+if [[ $(cat "$1") == parent ]]; then
   touch entered
   while [[ ! -f release ]]; do sleep 0.02; done
 else
-  cat "$2" > captured
+  cat "$1" > captured
 fi
+printf '{"version":1,"stage":"builder","report":"Builder fixture report"}' > "$SPEC_BUILD_RESULT_FILE"
 "#,
     )
     .unwrap();
     fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
     let mut state = app(root.path());
     state.remote = Some(remote_fixture(root.path(), &runner));
+    fs::write(
+        root.path().join(".bash_aliases"),
+        "export SPEC_WORKFLOW_RUNNER=\"$HOME/runner\"\n",
+    )
+    .unwrap();
     fs::write(root.path().join("a.md"), "parent").unwrap();
     let revision = read(root.path(), "a.md").ok().unwrap().revision;
     let response = request(
@@ -135,6 +142,10 @@ fi
     .await
     .unwrap();
     terminal(&fresh, &child).await;
+    let staged = recovery::load(&fresh, &child).ok().unwrap();
+    assert_eq!(staged.stage.as_deref(), Some("builder"));
+    assert_eq!(staged.snapshot.as_deref(), Some(captured));
+    assert!(staged.approved_handoff.is_none());
     competing_check.await.unwrap();
     worker.abort();
     let _ = worker.await;
@@ -663,7 +674,7 @@ async fn queued_build_worker_retries_terminal_checkpoint_under_parent_gate() {
     let (state, parent) = fixture(root.path(), false);
     enqueue(&state, &parent).await;
     fs::write(&state.remote.as_ref().unwrap().binary, format!(
-        "#!/bin/bash\nif [[ ${{!#}} == *\" snapshot 'a.md'\" ]]; then\n  printf 'SPEC-RUN-1 0 0\\n'\nelif [[ ${{!#}} == *'Non-launching continuation preflight'* ]]; then\n  exit 125\nelse\n  printf 'build\\n' >> '{}/launches'\nfi\n",
+        "#!/bin/bash\nif [[ ${{!#}} == *\" snapshot 'a.md'\" ]]; then\n  printf 'SPEC-RUN-1 0 0\\n'\nelif [[ ${{!#}} == *'Read a successful staged result'* ]]; then\n  printf '{{\"version\":1,\"stage\":\"builder\",\"report\":\"Builder fixture report\"}}'\nelif [[ ${{!#}} == *'Non-launching continuation preflight'* ]]; then\n  exit 125\nelse\n  printf 'build\\n' >> '{}/launches'\nfi\n",
         root.path().display(),
     )).unwrap();
     let record = root.path().join(format!(".spec-output/{parent}.json"));

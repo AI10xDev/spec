@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest"
 import { renderToStaticMarkup } from "react-dom/server"
 import { BuildProgress, taskChecklist, taskChecklists, taskProgress } from "./progress"
+import { RunReport } from "./run-report"
 import type { Output } from "./tabs"
 
 const tasks = "# Todos\n[\u2713] Implement\n[\u2022] Verify\n[ ] Document\n\n"
 const output: Output = { id: "run-a", name: "foo.md", status: "running", output: tasks, truncated: false, recoverable: true }
 
 describe("reported build progress", () => {
-  it("keeps the latest integrator and supervisor snapshots independently and combines their counts", () => {
+  it("keeps the latest integrator and advisory supervisor snapshots independently", () => {
     const integrator = tasks.replace("# Todos", "# Todos (Integrator)")
     const supervisor = "# Todos (Supervisor)\n[\u2713] Review plan\n[ ] Review integration\n\n"
     const reports = integrator + supervisor
@@ -15,27 +16,60 @@ describe("reported build progress", () => {
       Integrator: taskChecklist(tasks),
       Supervisor: [{ text: "Review plan", status: "completed" }, { text: "Review integration", status: "pending" }],
     })
-    expect(taskProgress(reports)).toEqual({ completed: 2, total: 5, cancelled: 0 })
-    expect(taskProgress(reports + integrator.replace("[\u2022]", "[\u2713]").replace("[ ]", "[\u2713]"))).toEqual({ completed: 4, total: 5, cancelled: 0 })
+    expect(taskProgress(reports)).toEqual({ completed: 1, total: 3, cancelled: 0 })
+    expect(taskProgress(reports + integrator.replace("[\u2022]", "[\u2713]").replace("[ ]", "[\u2713]"))).toEqual({ completed: 3, total: 3, cancelled: 0 })
     const html = renderToStaticMarkup(<BuildProgress output={{ ...output, output: reports }} />)
     expect(html).toContain('aria-label="Integrator checklist"')
     expect(html).toContain('aria-label="Supervisor checklist"')
-    expect(html).toContain('aria-valuenow="40"')
-    expect(html).toContain("2 of 5 tasks reported complete")
+    expect(html).toContain('aria-valuenow="33"')
+    expect(html).toContain("1 of 3 tasks reported complete")
+    expect(html).toContain("Supervisor (advisory)")
+    expect(html).toContain("never affects execution progress")
     expect(html).toContain("Review integration: Pending")
   })
 
-  it("does not erase the other role or report a percentage while one role's snapshot is unknown", () => {
+  it("does not erase or gate execution progress when the supervisor snapshot is unknown", () => {
     const reports = tasks + "# Todos (Supervisor)\n[\u2713] Review\n\n"
     for (const suffix of ["# Todos (Supervisor)\n", "# Todos (Supervisor)\n[\u2713] Partial\n", "# Todos (Supervisor)\n\n", "# Todos (Supervisor)\n[?] Invalid\n\n"]) {
-      expect(taskProgress(reports + suffix)).toBeNull()
+      expect(taskProgress(reports + suffix)).toEqual({ completed: 1, total: 3, cancelled: 0 })
       expect(taskChecklists(reports + suffix)).toEqual({ Integrator: taskChecklist(tasks), Supervisor: null })
       const html = renderToStaticMarkup(<BuildProgress output={{ ...output, output: reports + suffix }} />)
-      expect(html).not.toContain("aria-valuenow")
+      expect(html).toContain('aria-valuenow="33"')
       expect(html).toContain("Implement: Completed")
       expect(html).toContain("Waiting for a complete supervisor task report")
     }
     expect(taskProgress("# Todos (Integrator)\n\n# Todos (Supervisor)\n\n")).toBeNull()
+    expect(taskProgress("# Todos (Supervisor)\n[\u2713] Review\n\n")).toBeNull()
+  })
+
+  it("measures only the selected execution stage, including unlabeled staged CLI snapshots", () => {
+    const builder = "# Todos (Builder)\n[\u2713] Inspect\n[ ] Plan\n\n"
+    const reports = builder + "# Todos (Integrator)\n[\u2713] Implement\n\n# Todos (Supervisor)\n[ ] Review\n\n"
+    expect(taskProgress(reports, "builder")).toEqual({ completed: 1, total: 2, cancelled: 0 })
+    expect(taskProgress(reports, "integrator")).toEqual({ completed: 1, total: 1, cancelled: 0 })
+    expect(taskProgress(tasks, "builder")).toEqual({ completed: 1, total: 3, cancelled: 0 })
+    expect(taskProgress(builder, "integrator")).toBeNull()
+    expect(taskProgress(reports + "# Todos (Builder)\n", "builder")).toBeNull()
+    const html = renderToStaticMarkup(<BuildProgress output={{ ...output, stage: "builder", output: reports, status: "completed", approvable: true }} />)
+    expect(html).toContain("Builder progress")
+    expect(html).toContain("Builder run completed.")
+    expect(html).toContain('aria-label="Builder checklist"')
+    expect(html).toContain('aria-valuenow="50"')
+    const integrator = renderToStaticMarkup(<BuildProgress output={{ ...output, stage: "integrator", output: reports }} />)
+    expect(integrator).toContain("Integrator in progress.")
+    expect(integrator).toContain('aria-valuenow="100"')
+  })
+
+  it("renders validated reports independently of truncated logs and escapes their content", () => {
+    const report = "Plan <script>alert(1)</script>\nFull report beyond the retained log window"
+    const html = renderToStaticMarkup(<RunReport output={{ ...output, stage: "builder", truncated: true, report }} />)
+    expect(html).toContain('aria-label="Builder report"')
+    expect(html).toContain("Plan &lt;script&gt;alert(1)&lt;/script&gt;")
+    expect(html).toContain("Full report beyond the retained log window")
+    expect(html).not.toContain(tasks)
+    expect(html).not.toContain("<script>")
+    expect(renderToStaticMarkup(<RunReport output={output} />)).toBe("")
+    expect(renderToStaticMarkup(<RunReport output={{ ...output, report: null }} />)).toBe("")
   })
 
   it("ignores fenced and quoted role snapshots as it does legacy examples", () => {

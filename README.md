@@ -8,6 +8,12 @@ You do not need a formal requirements document.
 Start with a small task such as fixing a form, adding a filter, or improving a
 README. Spec helps organize that work; you still review and test the changes.
 
+In the current staged workflow, **Save & run** starts a Builder to explore, plan,
+edit preliminary unit/smoke tests and run experiments, not implement end-to-end.
+Review its report, then explicitly **Approve & implement** to start a fresh
+Integrator for end-to-end work. Feedback revises the same stage; saving and queues
+never grant approval. See [staged builds](docs/SUPERVISED_BUILDS.md).
+
 ## Choose Your Starting Point
 
 | I want to... | Start here |
@@ -85,6 +91,9 @@ unset SPEC_COMMAND
 ```
 
 This downloads a known release and starts Spec without remote coding runs.
+The staged workflow described here requires the current staged Spec implementation
+and a separately upgraded execution host; the older tag is not a staged-workflow
+installation guarantee.
 `unset SPEC_COMMAND` clears an old setting that this version no longer accepts;
 it is harmless if you have never set it. A Git "detached HEAD" notice is expected
 when downloading a release tag; it is not an installation error.
@@ -133,8 +142,8 @@ development server.
 Before continuing, you or that person must:
 
 1. Put a checkout of your project on a trusted development server, with its dependencies and tests ready. Use a separate branch for the task.
-2. Install and configure a compatible `spec build` launcher, such as [Specific](https://github.com/AI10xDev/specific), and its AI engine/account on that server. This web app's server binary is not that launcher.
-3. Complete the [remote setup checklist](docs/INSTALLATION.md#enable-remote-builds), including making the launcher available to noninteractive SSH commands and installing its helper tools.
+2. Explicitly install OpenCode from [AI10x/opencode-fork](https://github.com/AI10x/opencode-fork) `main` commit `e60a017d878486eb6b143e55cb9b9f320091d46d`, or an equivalent staged implementation, with Bun, a rebuilt compatible engine and remote Astra configuration. Sol is optional read-only advice, not a required model or approval gate.
+3. Follow the [staged execution-host setup](docs/SUPERVISED_BUILDS.md#execution-host-setup). In trusted remote `~/.bash_aliases`, export `SPEC_WORKFLOW_RUNNER=/absolute/path/to/script/run-spec.sh` pointing to an executable. The adapter requires `--workflow-version` to print exactly `spec-workflow-v1` plus a newline, then invokes that runner directly. There is no legacy `spec build` fallback for builds or continuations. Install the trusted runtime `~/projects/Agent.md` separately; the repo's `Agent.md` is only a snapshot, not deployed policy.
 4. Connect over SSH once, verify the server's identity through a trusted channel, and confirm you can sign in. The app cannot stop to ask for a password or key passphrase; use an SSH agent for an encrypted key.
 
 Stop the local-only app. From the Spec folder on **your own computer**, start it
@@ -165,17 +174,30 @@ defaults refer to the original developer's machine setup.
 description, not your project's source tree. It does not install your project's
 dependencies or copy changed code back to your computer. Review the changes in
 the server's checkout and bring them back through your normal Git workflow.
+Spec also does not deploy or upgrade the host runner, engine or policy. No live
+host deployment was performed for this documentation update.
 
 Use a development environment, not production. A coding run can edit files,
 execute commands, use available credentials, and incur AI charges. Automatic
-tool approval is requested; the confirmation dialog is not a sandbox. Do not
+per-request `once` tool approval is handled by the runner, not global `always`
+grants. Runtime questions are **not autoanswered**, even recommended options;
+the agent reports them as questions/blockers for later feedback. Read/edit are
+allowed, while `task`, `external_directory`, `glob` and `grep` are denied. These
+tool rules and advisory host policy do not sandbox shell effects. Do not
 give it customer data, secrets, or access it does not need.
 
 ### What About AI Settings?
 
 **Settings** lets you configure a provider for optional chat and writing
-suggestions, and select a profile for future agent runs. It does not install the
-remote engine or download a local model. You can skip it for basic editing.
+suggestions, and select a profile for supported separate agent workflows. It does
+not install the remote engine or download a local model. You can skip it for basic
+editing.
+
+Staged builds and continuations require **`azure/gpt-6-astra` on the remote host**
+and reject selected single-model execution profiles. Clear the selected profile
+with **Reset to environment** before staged builds; this does not configure remote
+Astra for you. Repository-save, Optimize and Performance keep their separate
+provider behavior.
 
 For remote runs, a saved AI profile, including its API key, is sent over SSH to a
 private temporary file on the server. Trust that server and the account running
@@ -210,17 +232,19 @@ Do not add dependencies or change unrelated pages.
 Do not commit, push, deploy, or contact production services.
 
 ## Check the work
-Find and run the project's documented checks for this form.
-Add a test for empty and invalid email input.
+Builder: inspect the project's checks and plan the fix; preliminary tests and experiments are allowed.
+Do not implement end-to-end before explicit approval in Spec.
+Integrator, after approval: implement and add tests for empty and invalid email input.
 Report the changed files, test commands and results, and anything not checked.
 ```
 
 1. Confirm the remote checkout is on the intended branch and has no conflicting work. A branch name in the spec is not proof of the checkout's current state.
-2. Click **Save & run**, read the warning, and confirm. Output appears beside the spec.
-3. When the run finishes, read its summary and inspect the actual code changes on the server. `git status` and `git diff` there are useful starting points.
-4. Run the project's relevant tests. Try the form yourself with empty, invalid, and valid input, including on a narrow screen. A successful run status does not prove the change is correct.
-5. If something is missing, give a specific follow-up such as "The error disappears when I resize the page. Fix that and add a regression test."
-6. Once verified, commit and open a pull request through your normal review process. Spec does not make review or deployment decisions for you.
+2. Click **Save & run**, read the warning, and confirm the Builder sweep. Output appears beside the spec.
+3. Read its separate **Builder report** and inspect the preliminary remote edits/checks. `git status` and `git diff` there are useful starting points. Use **Send & revise builder** to resolve questions or revise the plan.
+4. Click **Approve & implement** only when ready to authorize that report. This starts a fresh Integrator using the original saved snapshot and approved handoff, not current editor changes or drafts.
+5. Read the **Integrator report** and inspect the actual implementation. Run the relevant tests and try empty, invalid and valid input, including on a narrow screen. Report validation and a successful status do not prove correctness.
+6. If something is missing, use **Send & continue** for an Integrator follow-up, such as "The error disappears when I resize the page. Fix that and add a regression test."
+7. Once verified, commit and open a pull request through your normal review process. Spec does not make review or deployment decisions for you.
 
 ### Save, Run, Or Continue?
 
@@ -237,8 +261,10 @@ button still downloads the spec as text.
 | What you want | What to use |
 | --- | --- |
 | Keep your writing without starting work | **Save**. |
-| Run the requirements currently in the editor | **Save & run**; during an eligible active build, confirm queueing the saved snapshot instead. |
-| Ask a successful build to do one more thing | Type the instruction in feedback and use **Send & continue**, when available. |
+| Explore the requirements currently in the editor | **Save & run** starts a Builder; during an eligible active build, confirm queueing a snapshot for a fresh Builder instead. |
+| Revise a successful Builder report | **Send & revise builder** or **Use recommended & revise builder**; stays in that session, never approves implementation. |
+| Authorize end-to-end implementation | **Approve & implement** for the latest successful Builder report; starts a fresh Integrator. |
+| Ask a successful Integrator to do one more thing | **Send & continue** or **Use recommended & continue**; stays in that Integrator session and approved scope. |
 | Ask about the task or output without changing code | **Session chat**, if an AI provider is configured. This is separate from the coding agent. |
 
 **Continue does not send editor changes**, even if they autosaved. If you rewrote
@@ -246,11 +272,23 @@ the spec, use a new **Save & run** instead. Do not start another run against the
 same project just because output is quiet; first check whether the current one
 is still working.
 
+Stage, original snapshot, validated report and approved handoff persist in private
+run records. Reports are displayed separately from truncated runtime logs. Approval
+sends `POST /api/runs/{id}/approve` with `{}` and never includes editor changes or
+feedback drafts. Resolve those changes/drafts and queued revisions first; changed
+requirements need a new Builder. Every Integrator follow-up retains the original
+approved Builder handoff as context, not additional permissions.
+The server rejects approval if saved spec content differs from the original
+snapshot or that Builder has a pending saved-build queue entry, even if a client
+tries to bypass the UI guards.
+
 During an eligible active build, **Save & run** can queue a fixed saved-editor
 snapshot for execution after confirmed successful completion. This queue survives
 browser/server restarts; later editor changes do not alter it. Unlike browser-only
 queued feedback, it does not need the chat page to stay open. See
 [saved editor follow-ups](docs/FEATURES.md#queue-saved-editor-follow-ups).
+Saved-editor queues always start Builders; browser-only feedback queues stay in
+the same stage/session. Neither queue autoapproves integration.
 
 ### Track What You Have Checked
 
@@ -305,8 +343,9 @@ Explain where a "remember me" option would fit and any risks to discuss first.
 Propose a small implementation plan, but do not implement it yet.
 ```
 
-Review that explanation before authorizing changes in a later task. "Do not
-edit" is an instruction to the agent, not an enforced read-only environment.
+If you later want implementation, write those requirements and obtain a new
+Builder report before **Approve & implement**. "Do not edit" is an instruction
+to the agent, not an enforced read-only environment.
 
 ### Improve Project Documentation
 
@@ -330,7 +369,7 @@ evidence that it worked.
 
 - **Before starting:** pick one outcome, use a dedicated branch, and note the starting state. Preserve unrelated work.
 - **While writing:** describe an observable result, what must stay unchanged, and how to check it. Replace "make it better" with concrete examples.
-- **During the run:** read warnings and watch costs. Runs have no overall time limit; a keep-alive message only means the process is still alive.
+- **During the run:** read warnings and watch costs. The outer supervisor has no overall time limit, but the staged runner enforces the host policy's execution deadline and any numeric executing-actor token budget. A keep-alive only means the process is alive.
 - **Before merging:** review the diff, tests, and user-visible behavior. Keep unverified requirements pending.
 - **With teammates:** share reviewed specs and pull requests, not the app's access token or private logs. Different spec filenames do not isolate changes to a shared checkout; use separate checkouts for parallel work.
 
@@ -346,7 +385,7 @@ evidence that it worked.
 | A save conflict appears | **Download** your draft first. Close its editor tab and confirm discarding that editor copy, then refresh **Saved files**, reopen the file, and merge your changes. Selecting the already-open tab will not reload it. |
 | The browser closed or the connection dropped during a build | Reopen the app and saved spec, then use **Load nohup output** or **Active runs** to inspect the existing run before retrying. |
 | You need to stop a build | Use **Stop run** and check that cancellation is confirmed. Closing the browser or stopping the local app normally does not stop an uploaded remote build. |
-| The agent cannot find your project or engine | Check the remote checkout path and [remote installation checklist](docs/INSTALLATION.md#enable-remote-builds). Installing something locally does not install it on the server. |
+| The agent cannot find your project or engine | Check the remote checkout path and [staged host setup](docs/SUPERVISED_BUILDS.md#execution-host-setup), including the executable runner and exact capability probe. Installing something locally does not install it on the server. |
 
 For more detail, see [Development workflows](docs/WORKFLOWS.md), the
 [workspace guide](docs/FEATURES.md), and

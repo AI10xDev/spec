@@ -1,11 +1,34 @@
 use super::*;
 use tokio::io::AsyncWriteExt;
 
+fn staged_function_fixture(home: &FsPath, function: &str) {
+    let runner = home.join("workflow-runner");
+    fs::write(&runner, format!("#!/bin/bash\nif [[ ${{1:-}} == --workflow-version ]]; then printf 'spec-workflow-v1\\n'; exit 0; fi\n{function} build \"$1\"\n")).unwrap();
+    fs::set_permissions(runner, fs::Permissions::from_mode(0o700)).unwrap();
+    let aliases = home.join(".bash_aliases");
+    fs::write(
+        &aliases,
+        format!(
+            "{}\nexport -f {function}\nexport SPEC_WORKFLOW_RUNNER=\"$HOME/workflow-runner\"\n",
+            fs::read_to_string(&aliases).unwrap()
+        ),
+    )
+    .unwrap();
+}
+
 fn transport_lock_fixture(home: &FsPath) -> Remote {
     let runner = home.join("runner");
     let remote = tests::remote_fixture(home, &runner);
     fs::write(&runner, "#!/bin/bash\n: > started\nfor ((i=0; i<300; i++)); do [[ -f hold ]] || exit 0; sleep 0.05; done\nexit 98\n").unwrap();
     fs::set_permissions(runner, fs::Permissions::from_mode(0o700)).unwrap();
+    let staged = home.join("workflow-runner");
+    fs::write(&staged, "#!/bin/bash\nif [[ ${1:-} == --workflow-version ]]; then printf 'spec-workflow-v1\\n'; exit 0; fi\nexec \"$HOME/runner\" build \"$1\"\n").unwrap();
+    fs::set_permissions(staged, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        home.join(".bash_aliases"),
+        "export SPEC_WORKFLOW_RUNNER=\"$HOME/workflow-runner\"\n",
+    )
+    .unwrap();
     let cli = home.join(".local/bin/opencode-source");
     fs::create_dir_all(cli.parent().unwrap()).unwrap();
     fs::write(&cli, "#!/usr/bin/python3\nimport json,pathlib,time\nprint(json.dumps({'type':'text','sessionID':'ses_LockFixture','part':{'text':'fixture'}}),flush=True)\npathlib.Path('started').touch()\nfor i in range(300):\n if not pathlib.Path('hold').exists(): break\n time.sleep(0.05)\n").unwrap();
@@ -995,9 +1018,7 @@ print(os.environ['SPEC_EXECUTION_API_KEY'], flush=True)
             if mode == "build" || mode == "continue" {
                 assert_eq!(output.status.code(), Some(125), "{provider} {mode}: {text}");
                 assert!(
-                    text.contains(
-                        "Supervised builds require azure/gpt-6-sol and azure/gpt-6-astra"
-                    ),
+                    text.contains("Supervised builds require azure/gpt-6-astra"),
                     "{text}"
                 );
                 assert!(text.contains("clear the selected profile"), "{text}");
@@ -1056,6 +1077,8 @@ async fn incomplete_selected_profile_never_launches_and_is_removed() {
 #[tokio::test]
 async fn repository_save_admission_captures_settings_once_and_cancel_cleans_private_profile() {
     let root = tempfile::tempdir().unwrap();
+    // Settings reject group-writable ancestors regardless of the test runner's umask.
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
     assert!(
@@ -1363,6 +1386,14 @@ async fn truncated_upload_never_starts_build_and_persists_rejection() {
             include_str!("remote-supervisor.bash"),
             &Uuid::new_v4().to_string(),
             "a.md",
+            "build",
+            "",
+            "",
+            "0",
+            "0",
+            "",
+            "builder",
+            "0",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1454,15 +1485,18 @@ async fn truncated_optimizer_config_rejects_before_launch_and_removes_partial_up
 }
 
 #[tokio::test]
-async fn remote_function_is_supported_and_missing_spec_is_reported() {
+async fn remote_staged_runner_is_supported_and_missing_runner_is_reported() {
     for defined in [true, false] {
         let root = tempfile::tempdir().unwrap();
         let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
         fs::write(root.path().join(".bash_aliases"), if defined {
             "spec() { test \"$1\" = build && test \"$SPEC_BUILD_FOREGROUND\" = 1 && test \"$SPEC_BUILD_AUTO\" = 1 || return 90; cat -- \"$2\"; }\n"
         } else {
-            "PATH=/nonexistent\n"
+            "unset SPEC_WORKFLOW_RUNNER\n"
         }).unwrap();
+        if defined {
+            staged_function_fixture(root.path(), "spec");
+        }
         let mut child = remote
             .command(5, &Uuid::new_v4().to_string(), "a.md")
             .stdin(Stdio::piped())
@@ -1481,11 +1515,8 @@ async fn remote_function_is_supported_and_missing_spec_is_reported() {
             assert!(output.status.success());
             assert_eq!(output.stdout, b"hello");
         } else {
-            assert_eq!(output.status.code(), Some(127));
-            assert!(
-                String::from_utf8_lossy(&output.stdout)
-                    .contains("spec alias/function/launcher not found")
-            );
+            assert_eq!(output.status.code(), Some(125));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("Set SPEC_WORKFLOW_RUNNER"));
         }
     }
 }
@@ -1515,7 +1546,7 @@ async fn remote_engine_path_and_auto_settings_reach_children_without_login_profi
         fs::create_dir(&runtime_bin).unwrap();
         let runtime_name = FsPath::new(runtime.trim()).file_name().unwrap();
         std::os::unix::fs::symlink(runtime.trim(), runtime_bin.join(runtime_name)).unwrap();
-        for utility in ["mktemp", "rm"] {
+        for utility in ["mktemp", "rm", "timeout", "head"] {
             std::os::unix::fs::symlink(format!("/usr/bin/{utility}"), runtime_bin.join(utility))
                 .unwrap();
         }
@@ -1523,7 +1554,7 @@ async fn remote_engine_path_and_auto_settings_reach_children_without_login_profi
         // executable (not a shell alias) in its inherited PATH.
         fs::write(
             &runner,
-            "#!/bin/bash\n[[ $1 == build && $SPEC_BUILD_FOREGROUND == 1 && $SPEC_BUILD_AUTO == 1 ]] || exit 90\nopencode-source \"$2\"\n",
+            "#!/bin/bash\nif [[ ${1:-} == --workflow-version ]]; then printf 'spec-workflow-v1\\n'; exit 0; fi\n[[ $# == 1 && $SPEC_BUILD_FOREGROUND == 1 && $SPEC_BUILD_AUTO == 1 ]] || exit 90\nopencode-source \"$1\"\n",
         )
         .unwrap();
         fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1551,6 +1582,7 @@ exit {status}
         }
         let aliases = root.path().join(".bash_aliases");
         let mut definition = fs::read_to_string(&aliases).unwrap();
+        definition.push_str("export SPEC_WORKFLOW_RUNNER=\"$HOME/run-spec.sh\"\n");
         // Policy must be exported after sourcing aliases, even when they unset
         // it or opt back into interactive sessions.
         if install == ".local/bin" {
@@ -1613,6 +1645,7 @@ spec() {
 "#,
         )
         .unwrap();
+        staged_function_fixture(root.path(), "spec");
         // Advance only after readiness; bound cleanup if a test assertion fails.
         let supervisor = include_str!("remote-supervisor.bash")
             .replace(
@@ -1640,6 +1673,14 @@ spec() {
                 &supervisor,
                 &Uuid::new_v4().to_string(),
                 "a.md",
+                "build",
+                "",
+                "",
+                "0",
+                "0",
+                "",
+                "builder",
+                "0",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1771,6 +1812,7 @@ spec() {
 "#,
     )
     .unwrap();
+    staged_function_fixture(root.path(), "spec");
     let mut child = remote
         .command(5, &Uuid::new_v4().to_string(), "a.md")
         .stdin(Stdio::piped())
@@ -1807,7 +1849,7 @@ spec() {
     assert_eq!(fs::read_to_string(directory.join("status")).unwrap(), "7\n");
     assert!(root.path().join("wrote-all").exists());
     assert!(!snapshot.exists());
-    assert_eq!(fs::read_dir(directory).unwrap().count(), 5);
+    assert_eq!(fs::read_dir(directory).unwrap().count(), 6);
     let log = fs::read(directory.join("a.md.out")).unwrap();
     assert_eq!(log.len(), 8 * 1024 * 1024);
     assert!(log.starts_with(b"output after disconnect\n"));
@@ -1866,6 +1908,14 @@ event('final RL validation_accuracy=0.875 ' + key)
             let cli = root.path().join(".local/bin/opencode-source");
             fs::create_dir_all(cli.parent().unwrap()).unwrap();
             std::os::unix::fs::symlink(&runner, cli).unwrap();
+            if mode == "build" {
+                fs::write(
+                    root.path().join(".bash_aliases"),
+                    "spec() { \"$HOME/runner\" \"$@\"; }\n",
+                )
+                .unwrap();
+                staged_function_fixture(root.path(), "spec");
+            }
             let payload = if performance {
                 include_str!("performance-session.py")
             } else {
@@ -1991,6 +2041,10 @@ async fn builds_and_optimizers_complete_without_timeout_and_keep_alive_beyond_bu
                 "",
                 "",
                 if mode == "optimize" { "1" } else { "0" },
+                "0",
+                "",
+                if mode == "build" { "builder" } else { "" },
+                "0",
             ])
             .env("HOME", root.path())
             .stdin(Stdio::piped())
@@ -2180,6 +2234,7 @@ spec() {
 "#,
     )
     .unwrap();
+    staged_function_fixture(root.path(), "spec");
     // Bound remote cleanup even if the test fails before it can send cancellation.
     let supervisor = include_str!("remote-supervisor.bash").replace(
         "while kill -0 \"$pid\" 2>/dev/null; do",
@@ -2197,6 +2252,14 @@ spec() {
             &supervisor,
             &Uuid::new_v4().to_string(),
             "a.md",
+            "build",
+            "",
+            "",
+            "0",
+            "0",
+            "",
+            "builder",
+            "0",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2256,6 +2319,7 @@ async fn early_explicit_cancel_is_not_eof_or_snapshot_data() {
     let root = tempfile::tempdir().unwrap();
     let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
     fs::write(root.path().join(".bash_aliases"), "spec() { sleep 60; }\n").unwrap();
+    staged_function_fixture(root.path(), "spec");
     let mut child = remote
         .command(5, &Uuid::new_v4().to_string(), "a.md")
         .stdin(Stdio::piped())
@@ -2296,6 +2360,7 @@ async fn retention_prunes_only_old_finished_sessions_and_rejects_unsafe_parent()
     let root = tempfile::tempdir().unwrap();
     let remote = tests::remote_fixture(root.path(), &root.path().join("unused"));
     fs::write(root.path().join(".bash_aliases"), "spec() { return 0; }\n").unwrap();
+    staged_function_fixture(root.path(), "spec");
     let sessions = root.path().join(".spec-runs");
     fs::create_dir(&sessions).unwrap();
     fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
@@ -2604,6 +2669,7 @@ async fn named_logs_preserve_and_quote_original_filenames_and_recover_without_me
             "spec() { cat -- \"$2\"; }\n",
         )
         .unwrap();
+        staged_function_fixture(root.path(), "spec");
         let id = Uuid::new_v4().to_string();
         let mut child = remote
             .command(5, &id, name)
@@ -2638,6 +2704,7 @@ async fn named_logs_preserve_and_quote_original_filenames_and_recover_without_me
             "invocation".into(),
             "lease".into(),
             "provenance".into(),
+            "stage".into(),
             "status".into(),
         ];
         expected.sort();
@@ -2771,6 +2838,7 @@ async fn stable_remote_id_refuses_duplicate_launch_even_after_completion() {
         "spec() { printf 'launch\\n' >> launches; printf 'original output'; }\n",
     )
     .unwrap();
+    staged_function_fixture(root.path(), "spec");
     let id = Uuid::new_v4().to_string();
     for duplicate in [false, true] {
         let mut child = remote
@@ -2863,7 +2931,7 @@ fn remote_alias_completion_instructions_are_scoped_merged_and_private() {
             let bin = root.path().join("runtime bin");
             fs::create_dir(&bin).unwrap();
             std::os::unix::fs::symlink(executable.trim(), bin.join(runtime)).unwrap();
-            for utility in ["mktemp", "rm"] {
+            for utility in ["mktemp", "rm", "timeout", "head"] {
                 std::os::unix::fs::symlink(format!("/usr/bin/{utility}"), bin.join(utility))
                     .unwrap();
             }
@@ -2908,6 +2976,7 @@ process.stdout.write(JSON.stringify({{
                 ),
             )
             .unwrap();
+            staged_function_fixture(root.path(), "fixture_build");
             let output = std::process::Command::new("/bin/bash")
                 .args([
                     "--noprofile",

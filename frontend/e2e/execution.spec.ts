@@ -26,14 +26,32 @@ test.beforeAll(async () => {
   const executable = path.join(directory, "runner.cjs")
   await writeFile(executable, `#!${process.execPath}
 const fs = require("node:fs")
+if (process.argv.length === 3 && process.argv[2] === "--workflow-version") {
+  process.stdout.write("spec-workflow-v1\\n")
+  process.exit(0)
+}
 if (process.cwd() !== ${JSON.stringify(remoteWorkspace)}) process.exit(91)
-if (process.argv.length !== 4 || process.argv[2] !== "build" || process.env.SPEC_BUILD_AUTO !== "1" || process.env.SPEC_BUILD_FOREGROUND !== "1") process.exit(90)
+if (process.argv.length !== 3 || process.env.SPEC_BUILD_AUTO !== "1" || process.env.SPEC_BUILD_FOREGROUND !== "1") process.exit(90)
 if (process.env.SPEC_BUILD_SUPERVISED !== "1" || process.env.OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS !== "0" || process.env.OPENCODE_QUESTION_AUTO_RECOMMEND !== "0") process.exit(92)
 if ("SPEC_SESSION_DIR" in process.env || "KIBI_SPEC_SESSION" in process.env) process.exit(93)
-const content = fs.readFileSync(process.argv[3], "utf8")
+const content = fs.readFileSync(process.argv[2], "utf8")
+const stage = process.env.SPEC_BUILD_STAGE
+if (stage !== "builder" && stage !== "integrator") process.exit(95)
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT)
 const instructions = fs.readFileSync(config.instructions.at(-1), "utf8")
-if (!instructions.includes("Implement only pending requirements; retain completed requirements as context.")) process.exit(94)
+if (!instructions.includes("Apply the stage scope above only to pending requirements; retain completed requirements as context.") || !instructions.includes("Stage scope for this invocation: " + stage + ".")) process.exit(94)
+const runDirectory = require("node:path").dirname(process.env.SPEC_BUILD_RESULT_FILE)
+fs.writeFileSync(runDirectory + "/received", content)
+fs.writeFileSync(runDirectory + "/received-session", process.env.SPEC_BUILD_SESSION_ID ?? "")
+if (stage === "integrator") fs.copyFileSync(process.env.SPEC_BUILD_HANDOFF_FILE, runDirectory + "/received-handoff")
+if (!process.env.SPEC_BUILD_SESSION_ID) fs.writeFileSync(process.env.SPEC_BUILD_SESSION_FILE, "ses_" + require("node:crypto").randomUUID().replaceAll("-", "") + "\\n")
+process.on("exit", (code) => {
+  if (code === 0) fs.writeFileSync(process.env.SPEC_BUILD_RESULT_FILE, JSON.stringify({
+    version: 1,
+    stage,
+    report: stage === "builder" ? "Builder plan: implement the saved requirement and verify it with a smoke test.\\n" + content : "Integrator result: exercised the approved snapshot and handoff through the local SSH fixture.\\n" + content,
+  }))
+})
 fs.appendFileSync(${JSON.stringify(path.join(directory, "launches"))}, "launch\\n")
 {
   process.stdout.write("fixture stdout: " + content + "\\n")
@@ -53,14 +71,14 @@ fs.appendFileSync(${JSON.stringify(path.join(directory, "launches"))}, "launch\\
     require("node:readline").createInterface({ input: child.stdout }).on("line", (line) => {
       const snapshot = JSON.parse(line)
       if (!snapshot.output.startsWith(previous)) throw new Error("Progress producer must emit cumulative coordinator output")
-      process.stdout.write(snapshot.output.slice(previous.length))
+      process.stdout.write(snapshot.output.slice(previous.length).replaceAll("Todos (Integrator)", "Todos (Builder)"))
       previous = snapshot.output
     })
     child.on("error", () => process.exit(1))
     child.on("exit", (code) => process.exit(code ?? 1))
   } else if (content.startsWith("PROGRESS\\n")) {
     let previous = "0"
-    process.stdout.write("# Todos (Integrator)\\n\\n# Todos (Supervisor)\\n\\n")
+    process.stdout.write("# Todos (Builder)\\n\\n# Todos (Supervisor)\\n\\n")
     setInterval(() => {
       const phase = fs.readFileSync(${JSON.stringify(path.join(directory, "progress-phase"))}, "utf8")
       if (phase === previous) return
@@ -70,7 +88,7 @@ fs.appendFileSync(${JSON.stringify(path.join(directory, "launches"))}, "launch\\
         process.exit(0)
       }
       const rows = phase === "1" ? ["[\\u2713] Implement", "[\\u2022] Verify", "[ ] Document"] : ["[\\u2713] Implement", "[\\u2713] Verify", "[\\u2713] Document"]
-      process.stdout.write("\\x1b[0m# \\x1b[0mTodos (Integrator)\\n" + rows.join("\\n") + "\\n\\n# Todos (Supervisor)\\n[\\u2713] Review plan\\n[ ] Review integration\\n\\n")
+      process.stdout.write("\\x1b[0m# \\x1b[0mTodos (Builder)\\n" + rows.join("\\n") + "\\n\\n# Todos (Supervisor)\\n[\\u2713] Review plan\\n[ ] Review integration\\n\\n")
     }, 50)
     setTimeout(() => process.exit(2), 60_000)
   } else if (content.startsWith("WAIT\\n")) {
@@ -90,7 +108,7 @@ export HOME=${quote(directory)}
 exec /bin/bash -c "\${!#}"
 `)
   await chmod(ssh, 0o700)
-  await writeFile(path.join(directory, ".bash_aliases"), `alias spec=${quote(quote(executable))}
+  await writeFile(path.join(directory, ".bash_aliases"), `export SPEC_WORKFLOW_RUNNER=${quote(executable)}
 unset OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS
 export SPEC_BUILD_FOREGROUND=0 SPEC_BUILD_AUTO=0 OPENCODE_QUESTION_AUTO_RECOMMEND=0
 export SPEC_SESSION_DIR=/unused/session KIBI_SPEC_SESSION=1
@@ -176,36 +194,38 @@ test("rainbow completion follows live task reports and resets across runs and ta
   await expect(page.getByLabel("Run output")).toContainText("fixture stdout")
 
   await writeFile(path.join(directory, "progress-phase"), "1")
-  await expect(bar).toHaveAttribute("aria-valuenow", "40")
-  await expect(section).toContainText("2 of 5 tasks reported complete")
-  await expect(section.getByRole("group", { name: "Integrator checklist", exact: true })).toContainText("1 of 3 complete")
+  await expect(bar).toHaveAttribute("aria-valuenow", "33")
+  await expect(section).toContainText("1 of 3 tasks reported complete")
+  await expect(section.getByRole("group", { name: "Builder checklist", exact: true })).toContainText("1 of 3 complete")
   const supervisor = section.getByRole("group", { name: "Supervisor checklist", exact: true })
   await expect(supervisor).toContainText("1 of 2 complete")
+  await expect(supervisor).toContainText("Advisory review only; never affects execution progress.")
   await expect(supervisor.getByRole("checkbox", { name: "Review plan: Completed", exact: true })).toBeChecked()
   await expect(supervisor.getByRole("checkbox", { name: "Review integration: Pending", exact: true })).not.toBeChecked()
   await expect(section.getByRole("checkbox", { name: "Implement: Completed", exact: true })).toBeChecked()
   await expect(section.getByRole("checkbox", { name: "Verify: In progress", exact: true })).not.toBeChecked()
   await expect(section.getByRole("checkbox", { name: "Document: Pending", exact: true })).not.toBeChecked()
   expect(await bar.locator("div").evaluate((element) => getComputedStyle(element).backgroundImage)).toContain("linear-gradient")
-  await page.screenshot({ path: testInfo.outputPath("build-progress-40-desktop.png"), fullPage: true })
+  await page.screenshot({ path: testInfo.outputPath("builder-progress-33-desktop.png"), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
   await editor.fill("Unsaved edits do not change measured progress.")
-  await expect(bar).toHaveAttribute("aria-valuenow", "40")
+  await expect(bar).toHaveAttribute("aria-valuenow", "33")
 
   await page.getByRole("textbox", { name: "New filename" }).fill("other-progress.md")
   await page.getByRole("button", { name: "Create file" }).click()
   await expect(page.getByRole("progressbar")).toHaveCount(0)
   await page.getByRole("navigation", { name: "Editor tabs" }).getByRole("button", { name: /^progress\.md/ }).click()
-  await expect(bar).toHaveAttribute("aria-valuenow", "40")
+  await expect(bar).toHaveAttribute("aria-valuenow", "33")
 
   await writeFile(path.join(directory, "progress-phase"), "2")
-  await expect(bar).toHaveAttribute("aria-valuenow", "80")
+  await expect(bar).toHaveAttribute("aria-valuenow", "100")
+  await expect(section).toContainText("3 of 3 tasks reported complete")
   await expect(section.getByRole("checkbox", { checked: true })).toHaveCount(4)
   await expect(supervisor.getByRole("checkbox", { name: "Review integration: Pending", exact: true })).not.toBeChecked()
-  await expect(section).toContainText("Build in progress")
+  await expect(section).toContainText("Builder in progress")
   await writeFile(path.join(directory, "progress-phase"), "3")
-  await expect(section).toContainText("Build run completed")
+  await expect(section).toContainText("Builder run completed")
   await expect(bar).toHaveAttribute("aria-valuenow", "100")
   await expect(section.getByRole("checkbox", { checked: true })).toHaveCount(5)
   await expect(run).toBeEnabled()
@@ -219,7 +239,7 @@ test("rainbow completion follows live task reports and resets across runs and ta
   await expect(section).toContainText("Waiting for reported task counts")
   await expect(section.getByRole("checkbox")).toHaveCount(0)
   await page.getByRole("button", { name: "Stop run" }).click()
-  await expect(section).toContainText("Build cancelled")
+  await expect(section).toContainText("Builder cancelled")
   await expect(bar).not.toHaveClass(/indeterminate/)
   await expect(bar).not.toHaveAttribute("aria-valuenow")
   expect(pageErrors).toEqual([])
@@ -247,8 +267,10 @@ test("enabled execution: confirmation, saved snapshot, per-file polling, complet
   await run.click()
   expect((await confirmation).type()).toBe("confirm")
   expect((await confirmation).message()).toContain("incur provider costs")
-  expect((await confirmation).message()).toContain("Automatic tool approval is requested")
-  expect((await confirmation).message()).toContain("recommended answers to runtime questions")
+  expect((await confirmation).message()).toContain("Tools are automatically approved once per correlated request, with no persistent grants.")
+  expect((await confirmation).message()).toContain("SPEC_BUILD_AUTO=1 is not authorization.")
+  expect((await confirmation).message()).toContain("Runtime questions require user input.")
+  expect((await confirmation).message()).not.toContain("recommended answers")
   await expect(pane.getByText("Idle", { exact: true })).toBeVisible()
   await expect(editor).toHaveValue(snapshot)
   await expect(run).toBeEnabled()
@@ -261,7 +283,7 @@ test("enabled execution: confirmation, saved snapshot, per-file polling, complet
   expect(response.ok()).toBe(true)
   const { id } = await response.json() as { id: string }
   await expect(page.getByRole("status")).toHaveText("Saved snapshot.md")
-  await expect(pane.getByText("running", { exact: true })).toBeVisible()
+  await expect(pane.getByText("Builder / running", { exact: true })).toBeVisible()
   await expect(output).toContainText(`fixture stdout: ${snapshot}`)
   await expect(output).toContainText(`fixture stderr: ${snapshot}`)
   await expect(run).toBeEnabled()
@@ -279,7 +301,7 @@ test("enabled execution: confirmation, saved snapshot, per-file polling, complet
   await expect(run).toBeEnabled()
   page.once("dialog", (dialog) => dialog.accept())
   await run.click()
-  await expect(pane.getByText("completed", { exact: true })).toBeVisible()
+  await expect(pane.getByText("Builder / completed", { exact: true })).toBeVisible()
   await expect(output).toContainText(`fixture stdout: ${second}`)
   await expect(output).toContainText(`fixture stderr: ${second}`)
   await expect(output).not.toContainText(snapshot)
@@ -291,7 +313,7 @@ test("enabled execution: confirmation, saved snapshot, per-file polling, complet
   const resumed = page.waitForResponse((response) => response.url().endsWith(`/api/runs/${id}`) && response.request().method() === "GET")
   await tabs.getByRole("button", { name: /^snapshot\.md/ }).click()
   expect((await resumed).ok()).toBe(true)
-  await expect(pane.getByText("running", { exact: true })).toBeVisible()
+  await expect(pane.getByText("Builder / running", { exact: true })).toBeVisible()
   await expect(output).toContainText(`fixture stdout: ${snapshot}`)
   await expect(output).toContainText(/fixture progress \d+: WAIT/)
   await expect(output).not.toContainText(edited)
@@ -299,13 +321,96 @@ test("enabled execution: confirmation, saved snapshot, per-file polling, complet
   await expect(editor).toHaveValue(edited)
   await expect(run).toBeEnabled()
   await page.getByRole("button", { name: "Stop run" }).click()
-  await expect(pane.getByText("cancelled", { exact: true })).toBeVisible()
+  await expect(pane.getByText("Builder / cancelled", { exact: true })).toBeVisible()
   await expect(page.getByRole("button", { name: "Stop run" })).toBeHidden()
   await expect(run).toBeEnabled()
   await tabs.getByRole("button", { name: "completed.md", exact: true }).click()
-  await expect(pane.getByText("completed", { exact: true })).toBeVisible()
+  await expect(pane.getByText("Builder / completed", { exact: true })).toBeVisible()
   await expect(output).toHaveText(completedOutput!)
   expect(pageErrors).toEqual([])
+})
+
+test("validated builder approval starts a fresh integrator and continuation retains its session and handoff", async ({ page, context }) => {
+  // Exercise the real Rust API and local SSH transport without response mocks.
+  await context.unroute("**/api/performance")
+  await context.unroute("**/api/performance/runs")
+  const errors: string[] = []
+  page.on("pageerror", error => errors.push(error.message))
+  await page.goto(url)
+  await page.getByRole("textbox", { name: "New filename" }).fill("approval.md")
+  await page.getByRole("button", { name: "Create file" }).click()
+  const snapshot = "COMPLETE\nAdd a greeting and verify its rendered text."
+  await page.getByRole("textbox", { name: "Edit approval.md", exact: true }).fill(snapshot)
+  const started = page.waitForResponse(response => response.url().endsWith("/api/runs") && response.request().method() === "POST")
+  page.once("dialog", dialog => dialog.accept())
+  await page.getByRole("button", { name: "Save & run" }).click()
+  const builderResponse = await started
+  expect(builderResponse.ok()).toBe(true)
+  const builder = await builderResponse.json() as { id: string }
+  const builderDirectory = path.join(directory, "remote-project", ".spec-runs", `run-${builder.id}`)
+  const builderReport = page.getByRole("region", { name: "Builder report", exact: true })
+  const plan = `Builder plan: implement the saved requirement and verify it with a smoke test.\n${snapshot}`
+  await expect(builderReport.locator("pre")).toHaveText(plan)
+  await expect(page.getByLabel("Run output", { exact: true })).not.toContainText(plan)
+  const approve = page.getByRole("button", { name: "Approve & implement", exact: true })
+  await expect(approve).toBeEnabled()
+  expect(await readFile(path.join(builderDirectory, "stage"), "utf8")).toBe("builder\n")
+  expect(await readFile(path.join(builderDirectory, "received-session"), "utf8")).toBe("")
+  const builderSession = await readFile(path.join(builderDirectory, "session-id"), "utf8")
+  expect(builderSession).toMatch(/^ses_[A-Za-z0-9]+\n$/)
+  expect(JSON.parse(await readFile(path.join(builderDirectory, "result.json"), "utf8"))).toEqual({ version: 1, stage: "builder", report: plan })
+
+  const launches = await readFile(path.join(directory, "launches"), "utf8")
+  page.once("dialog", dialog => dialog.dismiss())
+  await approve.click()
+  await expect(approve).toBeEnabled()
+  await expect(builderReport.locator("pre")).toHaveText(plan)
+  expect(await readFile(path.join(directory, "launches"), "utf8")).toBe(launches)
+
+  const approved = page.waitForResponse(response => response.url().endsWith(`/api/runs/${builder.id}/approve`) && response.request().method() === "POST")
+  page.once("dialog", dialog => dialog.accept())
+  await approve.click()
+  const approval = await approved
+  expect(approval.ok()).toBe(true)
+  expect(approval.request().postDataJSON()).toEqual({})
+  const integrator = await approval.json() as { id: string }
+  expect(integrator.id).not.toBe(builder.id)
+  const integratorDirectory = path.join(directory, "remote-project", ".spec-runs", `run-${integrator.id}`)
+  const report = page.getByRole("region", { name: "Integrator report", exact: true })
+  const result = `Integrator result: exercised the approved snapshot and handoff through the local SSH fixture.\n${snapshot}`
+  await expect(report.locator("pre")).toHaveText(result)
+  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("Integrator / completed", { exact: true })).toBeVisible()
+  await expect(builderReport).toBeHidden()
+  await expect(approve).toBeHidden()
+  expect(await readFile(path.join(integratorDirectory, "stage"), "utf8")).toBe("integrator\n")
+  expect(await readFile(path.join(integratorDirectory, "received"), "utf8")).toBe(snapshot)
+  expect(await readFile(path.join(integratorDirectory, "received-session"), "utf8")).toBe("")
+  const integratorSession = await readFile(path.join(integratorDirectory, "session-id"), "utf8")
+  expect(integratorSession).toMatch(/^ses_[A-Za-z0-9]+\n$/)
+  expect(integratorSession).not.toBe(builderSession)
+  const handoff = await readFile(path.join(integratorDirectory, "received-handoff"), "utf8")
+  expect(JSON.parse(handoff)).toEqual({ version: 1, stage: "builder", report: plan })
+  expect(JSON.parse(await readFile(path.join(integratorDirectory, "result.json"), "utf8"))).toEqual({ version: 1, stage: "integrator", report: result })
+
+  const feedback = "Also verify the greeting on mobile."
+  await page.getByLabel("Feedback to build session").fill(feedback)
+  const continued = page.waitForResponse(response => response.url().endsWith(`/api/runs/${integrator.id}/continue`) && response.request().method() === "POST")
+  await page.getByRole("button", { name: "Send & continue", exact: true }).click()
+  const continuation = await continued
+  expect(continuation.ok()).toBe(true)
+  expect(continuation.request().postDataJSON()).toEqual({ message: feedback })
+  const followup = await continuation.json() as { id: string }
+  expect(followup.id).not.toBe(integrator.id)
+  await expect(report.locator("pre")).toHaveText(`Integrator result: exercised the approved snapshot and handoff through the local SSH fixture.\n${feedback}`)
+  const followupDirectory = path.join(directory, "remote-project", ".spec-runs", `run-${followup.id}`)
+  expect(await readFile(path.join(followupDirectory, "stage"), "utf8")).toBe("integrator\n")
+  expect(await readFile(path.join(followupDirectory, "received"), "utf8")).toBe(feedback)
+  expect(await readFile(path.join(followupDirectory, "received-session"), "utf8")).toBe(integratorSession.trim())
+  expect(await readFile(path.join(followupDirectory, "session-id"), "utf8")).toBe(integratorSession)
+  expect(await readFile(path.join(followupDirectory, "received-handoff"), "utf8")).toBe(handoff)
+  expect(await readFile(path.join(workspace, "approval.md"), "utf8")).toBe(snapshot)
+  expect(await readFile(path.join(directory, "launches"), "utf8")).toBe(`${launches}launch\nlaunch\n`)
+  expect(errors).toEqual([])
 })
 
 test("enabled execution: empty specs are rejected and nonzero exits show failure", async ({ page }) => {
@@ -334,7 +439,7 @@ test("enabled execution: empty specs are rejected and nonzero exits show failure
   page.once("dialog", (dialog) => dialog.accept())
   await run.click()
   await expect(page.getByRole("alert")).toBeHidden()
-  await expect(pane.getByText("failed (exit status: 7)", { exact: true })).toBeVisible()
+  await expect(pane.getByText("Builder / failed (exit status: 7)", { exact: true })).toBeVisible()
   await expect(output).toContainText(`fixture stdout: ${failed}`)
   await expect(output).toContainText(`fixture stderr: ${failed}`)
   await expect(page.getByRole("button", { name: "Stop run" })).toBeHidden()
@@ -355,7 +460,7 @@ test("slash-marked lines reach the build unchanged with completion instructions"
   await expect(editor).toHaveValue(snapshot)
   page.once("dialog", (dialog) => dialog.accept())
   await page.getByRole("button", { name: "Save & run" }).click()
-  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("completed", { exact: true })).toBeVisible()
+  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("Builder / completed", { exact: true })).toBeVisible()
   await expect(page.getByLabel("Run output")).toContainText(`fixture stdout: ${snapshot}`)
   expect(await readFile(path.join(workspace, "markers.md"), "utf8")).toBe(snapshot)
 })
@@ -514,7 +619,7 @@ test("load nohup output reports a missing directory and browses retained logs wi
   page.once("dialog", (dialog) => dialog.accept())
   await page.getByRole("button", { name: "Save & run" }).click()
   const { id } = await (await started).json() as { id: string }
-  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("completed", { exact: true })).toBeVisible()
+  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("Builder / completed", { exact: true })).toBeVisible()
   const launches = await readFile(path.join(directory, "launches"), "utf8")
   const log = path.join(directory, "remote-project", ".spec-runs", `run-${id}`, "log-file.md.out")
   await appendFile(log, "\nFresh from disk, not cached output. <script>alert(1)</script>\n")
@@ -572,7 +677,7 @@ test("load nohup output reports a missing directory and browses retained logs wi
   await page.getByRole("button", { name: "Return to associated output" }).click()
   await expect(output).toHaveText(cached!)
   await expect(snapshot).toBeHidden()
-  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText(/^unavailable.*remote run directory missing/)).toBeVisible()
+  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText(/^Builder \/ unavailable.*remote run directory missing/)).toBeVisible()
   await expect(editor).toHaveValue("Unsaved editor buffer")
   expect(builds).toEqual([])
   expect(await readFile(path.join(directory, "launches"), "utf8")).toBe(launches)
@@ -665,7 +770,7 @@ test("delayed retained reads cannot replace output after switching tabs or start
   page.once("dialog", (dialog) => dialog.accept())
   await page.getByRole("button", { name: "Save & run" }).click()
   const output = page.getByLabel("Run output")
-  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("completed", { exact: true })).toBeVisible()
+  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("Builder / completed", { exact: true })).toBeVisible()
   await expect(output).toContainText("Other tab output.")
   const otherOutput = await output.textContent()
   const tabs = page.getByRole("navigation", { name: "Editor tabs" })
@@ -692,7 +797,7 @@ test("delayed retained reads cannot replace output after switching tabs or start
       } else {
         page.once("dialog", (dialog) => dialog.accept())
         await page.getByRole("button", { name: "Save & run" }).click()
-        await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("completed", { exact: true })).toBeVisible()
+        await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("Builder / completed", { exact: true })).toBeVisible()
         await expect(output).toContainText("New build replaces historical request.")
       }
       const newer = await output.textContent()
@@ -802,7 +907,7 @@ test("startup restores live and completed output after server restart without re
   expect(await readFile(path.join(remoteDirectory, "detached.md.out"), "utf8")).toContain("finished after server shutdown")
   await expect(readFile(path.join(remoteDirectory, "snapshot.md"), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
   await expect(output).toContainText("finished after server shutdown")
-  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("completed", { exact: true })).toBeVisible()
+  await expect(page.getByRole("region", { name: "Output and logs pane" }).getByText("Builder / completed", { exact: true })).toBeVisible()
   await new Promise<void>((resolve) => {
     server.once("exit", () => resolve())
     server.kill("SIGTERM")

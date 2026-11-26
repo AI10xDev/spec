@@ -1,6 +1,7 @@
 import { useEffect, useEffectEvent, useRef, useState } from "react"
 import { LogOutput } from "./highlighting"
 import { BuildProgress } from "./progress"
+import { RunReport } from "./run-report"
 import { RecoveryNotice } from "./recovery-notice"
 import type { Output } from "./tabs"
 
@@ -146,6 +147,7 @@ export function ActiveRuns({ open, knownOutputs, api, onOutput, onClose }: Props
         {current?.status.startsWith("unavailable") && <p>Remote output is unavailable. Showing cached output, which may be incomplete.</p>}
         {current && <RecoveryNotice output={current} />}
         {current && selected.kind === "build" && <BuildProgress output={{ ...current, transportUnavailable: current.transportUnavailable || !!detailError }} />}
+        {current && <RunReport output={current} />}
         {current?.truncated && <p>Older output was truncated; showing the latest 256 KiB.</p>}
         <pre className="output" aria-label="Active run output">{current ? <LogOutput value={current.output} /> : "No output loaded yet."}</pre>
       </div>}

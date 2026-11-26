@@ -10,6 +10,7 @@ import time
 
 MAX_OUTPUT = 262144
 MAX_REPORT = 8388608
+MAX_BUILD_REPORT = 120 * 1024
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 
 
@@ -38,6 +39,28 @@ def private(parent, name, directory=False):
         os.close(fd)
 
 
+def read(parent, name, limit):
+    with private(parent, name) as fd:
+        before = os.fstat(fd)
+        if before.st_size > limit:
+            raise ValueError("retained metadata exceeds limit")
+        data = os.read(fd, limit + 1)
+        after = os.fstat(fd)
+        if (len(data) != before.st_size or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns):
+            raise ValueError("retained metadata changed during read")
+        return data
+
+
+def unique(items):
+    value = {}
+    for key, item in items:
+        if key in value:
+            raise ValueError("duplicate retained result key")
+        value[key] = item
+    return value
+
+
 def candidate(root, workspace, run_id, name, historical, full_report=False):
     with private(root, "run-" + run_id, True) as run:
         # Never substitute output.log, including when the selected log disappears.
@@ -45,15 +68,15 @@ def candidate(root, workspace, run_id, name, historical, full_report=False):
             workspace = os.path.normpath(workspace)
             expected = [os.fsencode(workspace), b"build", os.fsencode(name),
                         os.fsencode(os.path.join(workspace, ".spec-runs", "run-" + run_id, name + ".out")), b""]
+            fields = None
             try:
-                with private(run, "provenance") as provenance:
-                    fields = os.read(provenance, 16385).split(b"\0")
-                    if (os.fstat(provenance).st_size > 16384 or len(fields) != 5
-                            or fields[1] not in (b"build", b"continue", b"repository-save", b"optimize")
-                            or fields[0] != expected[0] or fields[2:] != expected[2:]):
-                        raise ValueError("retained log lacks matching name/run-kind provenance")
-                    if fields[1] == b"optimize":
-                        raise NotSpecReport("optimizer output is not an ordinary spec report")
+                fields = read(run, "provenance", 16384).split(b"\0")
+                if (len(fields) != 5
+                        or fields[1] not in (b"build", b"continue", b"repository-save", b"optimize")
+                        or fields[0] != expected[0] or fields[2:] != expected[2:]):
+                    raise ValueError("retained log lacks matching name/run-kind provenance")
+                if fields[1] == b"optimize":
+                    raise NotSpecReport("optimizer output is not an ordinary spec report")
             except FileNotFoundError:
                 if name == "optimization":
                     # Shipped initial builds have concrete invocation evidence.
@@ -69,15 +92,14 @@ def candidate(root, workspace, run_id, name, historical, full_report=False):
                             "Choose a report with verified name/run-kind provenance or a legacy initial-build invocation; "
                             "inspect the original retained log manually. A session ID is not sufficient proof.") from None
             try:
-                with private(run, "status") as status:
-                    code = os.read(status, 5)
-                    if not re.fullmatch(rb"(0|[1-9][0-9]{0,2})\n?", code):
-                        raise ValueError("invalid retained run status")
-                    code = int(code)
-                    if code > 255:
-                        raise ValueError("invalid retained run status")
-                    status = {0: "completed", 124: "timed out", 130: "cancelled"}.get(
-                        code, "failed (exit status: %d)" % code)
+                status_bytes = read(run, "status", 4)
+                if not re.fullmatch(rb"(0|[1-9][0-9]{0,2})\n?", status_bytes):
+                    raise ValueError("invalid retained run status")
+                code = int(status_bytes)
+                if code > 255:
+                    raise ValueError("invalid retained run status")
+                status = {0: "completed", 124: "timed out", 130: "cancelled"}.get(
+                    code, "failed (exit status: %d)" % code)
             except FileNotFoundError:
                 with private(run, "lease") as lease:
                     status = "unknown (remote status unavailable)"
@@ -93,6 +115,35 @@ def candidate(root, workspace, run_id, name, historical, full_report=False):
                 raise ValueError("retained log exceeds size limit")
             if not historical:
                 return {"id": run_id, "modified": info.st_mtime_ns // 1000000000}
+            workflow = {}
+            try:
+                stage = read(run, "stage", 11)
+            except FileNotFoundError:
+                # Only genuinely legacy runs may omit stage metadata. An orphaned
+                # result must not acquire identity from a log or a session ID.
+                try:
+                    os.stat("result.json", dir_fd=run, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ValueError("retained result lacks stage metadata")
+            else:
+                if (stage not in (b"builder\n", b"integrator\n") or fields is None
+                        or fields[1] not in (b"build", b"continue")):
+                    raise ValueError("invalid retained stage provenance")
+                workflow = {"stage": stage.decode().strip(), "approvable": False}
+                if status == "completed":
+                    if status_bytes != b"0\n":
+                        raise ValueError("retained result requires successful status")
+                    value = json.loads(read(run, "result.json", MAX_BUILD_REPORT * 6 + 1024).decode("utf-8"),
+                                       object_pairs_hook=unique)
+                    if (not isinstance(value, dict) or set(value) != {"version", "stage", "report"}
+                            or type(value["version"]) is not int or value["version"] != 1
+                            or value["stage"] != workflow["stage"]
+                            or not isinstance(value["report"], str) or not value["report"].strip()
+                            or len(value["report"].encode("utf-8")) > MAX_BUILD_REPORT):
+                        raise ValueError("invalid retained build result")
+                    workflow["report"] = value["report"]
             limit = MAX_REPORT if full_report else MAX_OUTPUT
             count = min(info.st_size, limit)
             output = os.pread(log, count, 0 if full_report else info.st_size - count)
@@ -111,7 +162,7 @@ def candidate(root, workspace, run_id, name, historical, full_report=False):
             truncated = info.st_size >= limit if full_report else info.st_size > limit
             return {"id": run_id, "name": name, "output": text,
                     "status": status, "truncated": truncated or changed or lossy,
-                    "recoverable": False, "continuable": False}
+                    "recoverable": False, "continuable": False, **workflow}
 
 
 def main():
@@ -173,6 +224,6 @@ def main():
 
 try:
     print(json.dumps(main(), ensure_ascii=True, separators=(",", ":")))
-except (OSError, ValueError) as error:
+except (OSError, ValueError, TypeError, RecursionError) as error:
     print("retained run lookup failed: " + str(error), file=sys.stderr)
     sys.exit(125)

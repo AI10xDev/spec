@@ -6,9 +6,15 @@ fn fixture(root: &FsPath) -> App {
     state.remote = Some(remote_fixture(root, &root.join("unused")));
     fs::write(
         root.join(".bash_aliases"),
-        r#"
-spec() {
-    [[ $# == 2 && $1 == build && $SPEC_BUILD_SUPERVISED == 1 ]] || return 90
+        "export SPEC_WORKFLOW_RUNNER=\"$HOME/workflow-runner\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("workflow-runner"),
+        r#"#!/bin/bash
+if [[ ${1:-} == --workflow-version ]]; then printf 'spec-workflow-v1\n'; exit; fi
+run() {
+    [[ $# == 1 && $SPEC_BUILD_SUPERVISED == 1 && $SPEC_BUILD_STAGE == builder ]] || return 90
     if [[ -z $SPEC_BUILD_SESSION_ID ]]; then
         printf 'ses_Router123\n' > "$SPEC_BUILD_SESSION_FILE"
         printf 'Recommended option: implement the feature.\n'
@@ -16,11 +22,18 @@ spec() {
     fi
     [[ $SPEC_BUILD_SESSION_ID == ses_Router123 ]] || return 91
     printf 'continue\n' >> "$HOME/launches"
-    cat -- "$2"
+    cat -- "$1"
     printf '\n'
     if [[ -f "$HOME/wait" ]]; then sleep 60; fi
 }
+run "$@" || exit $?
+printf '{"version":1,"stage":"builder","report":"Builder fixture report"}' > "$SPEC_BUILD_RESULT_FILE"
 "#,
+    )
+    .unwrap();
+    fs::set_permissions(
+        root.join("workflow-runner"),
+        fs::Permissions::from_mode(0o700),
     )
     .unwrap();
     fs::write(
@@ -449,12 +462,22 @@ async fn continuation_rejects_failed_repository_save_remote_mismatch_and_stale_r
         let state = fixture(root.path());
         let id = Uuid::new_v4().to_string();
         let mut job = persisted_job(&id, state.remote.as_ref().unwrap().identity(), false);
+        job.stage = Some("builder".into());
+        job.snapshot = Some("original snapshot".into());
+        job.build_result = Some(remote::BuildResult {
+            version: 1,
+            stage: "builder".into(),
+            report: "validated report".into(),
+        });
         let error = match case {
             "failed" => {
                 job.status = "failed (exit status: 7)".into();
                 "completed build"
             }
             "repository-save" => {
+                job.stage = None;
+                job.snapshot = None;
+                job.build_result = None;
                 job.repository_save = true;
                 "completed build"
             }

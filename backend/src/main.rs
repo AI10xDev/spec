@@ -44,6 +44,7 @@ mod recovery;
 mod remote;
 mod settings;
 mod storage;
+mod workflow;
 use azure_realtime::AzureRealtime;
 use completion::Completion;
 use realtime::Realtime;
@@ -122,6 +123,14 @@ struct Job {
     optimization: bool,
     #[serde(default)]
     memory: Option<memory::Sweep>,
+    #[serde(default)]
+    stage: Option<String>,
+    #[serde(default)]
+    snapshot: Option<String>,
+    #[serde(default)]
+    build_result: Option<remote::BuildResult>,
+    #[serde(default)]
+    approved_handoff: Option<remote::BuildResult>,
     #[serde(skip, default = "detached_control")]
     stop: watch::Sender<RunControl>,
     #[serde(skip)]
@@ -209,12 +218,13 @@ enum RunInput {
     Queued(String),
     RepositorySave(Run),
     Continue(String, String),
+    Approve(String),
     Optimize(Optimize),
     ProjectOptimization(Performance),
     Performance(Performance),
 }
 
-const CONTINUE_RECOMMENDED: &str = "Use the recommended option from your last response and continue the build session. Implement it now; do not stop at a plan. If no recommended option was provided, explain what input is needed rather than guessing.";
+const CONTINUE_RECOMMENDED: &str = "Use the recommended option from your last response and continue within the current stage. Builder feedback is not approval to integrate: continue planning, exploration, and preliminary tests or experiments only. If no recommended option was provided, explain what input is needed rather than guessing.";
 
 #[derive(Serialize, Deserialize)]
 struct Output {
@@ -225,6 +235,12 @@ struct Output {
     truncated: bool,
     recoverable: bool,
     continuable: bool,
+    #[serde(default)]
+    stage: Option<String>,
+    #[serde(default)]
+    report: Option<String>,
+    #[serde(default)]
+    approvable: bool,
 }
 
 #[derive(Serialize)]
@@ -510,6 +526,24 @@ async fn continue_recommended(
     start_run(app, RunInput::Continue(id, input.message)).await
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Approve {}
+
+async fn approve(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(_input): Json<Approve>,
+) -> Result<Json<serde_json::Value>> {
+    recovery::initialize(&app)?;
+    {
+        let _files = app.files.lock().unwrap();
+        let jobs = recovery::restore(&app, &id)?;
+        workflow::require_approval(&app, jobs.iter().find(|job| job.id == id).unwrap())?;
+    }
+    start_run(app, RunInput::Approve(id)).await
+}
+
 async fn repository(State(app): State<App>) -> Result<Json<serde_json::Value>> {
     let status = match &app.remote {
         Some(remote) => remote
@@ -616,9 +650,14 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
     }
     let _recovery_guard = app.recovery_gate.lock().await;
     let parent_id = match &input {
-        RunInput::Continue(id, _) => Some(id.clone()),
+        RunInput::Continue(id, _) | RunInput::Approve(id) => Some(id.clone()),
         _ => None,
     };
+    let approval = matches!(&input, RunInput::Approve(_));
+    let mut stage =
+        (!performance && !repository_save && !optimization).then(|| "builder".to_owned());
+    let mut snapshot = None;
+    let mut approved_handoff = None;
     let mut optimization_spec = String::new();
     let mut queued_id = None;
     let mut continued_revision = None;
@@ -682,6 +721,9 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
                     || job.status != "completed"
                     || job.repository_save
                     || job.optimization
+                    || app.performance
+                    || job.persistence_error.is_some()
+                    || job.dirty
                 {
                     return Err(Error(StatusCode::CONFLICT, "Only a completed build can be continued. Wait for completion or load its output before retrying.".into()));
                 }
@@ -691,6 +733,13 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
                         "Remote configuration does not match the saved run".into(),
                     ));
                 }
+                workflow::validate(job)?;
+                if job.stage.is_none() || workflow::report(job).is_none() {
+                    return Err(Error(StatusCode::CONFLICT, "A validated stage result and original snapshot are required before continuing; start a new builder for legacy runs".into()));
+                }
+                stage = job.stage.clone();
+                snapshot = job.snapshot.clone();
+                approved_handoff = job.approved_handoff.clone();
                 job.name.clone()
             };
             // The latest pointer is advanced before launch under this same gate.
@@ -723,7 +772,26 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             }
             (name, message, Some(session))
         }
+        RunInput::Approve(id) => {
+            let _files = app.files.lock().unwrap();
+            let jobs = recovery::restore(&app, &id)?;
+            let job = jobs.iter().find(|job| job.id == id).unwrap();
+            workflow::require_approval(&app, job)?;
+            stage = Some("integrator".into());
+            snapshot = job.snapshot.clone();
+            approved_handoff = job.build_result.clone();
+            (job.name.clone(), job.snapshot.clone().unwrap(), None)
+        }
     };
+    if stage.is_some() && snapshot.is_none() {
+        snapshot = Some(content.clone());
+    }
+    let handoff_bytes = approved_handoff
+        .as_ref()
+        .map(serde_json::to_vec)
+        .transpose()
+        .map_err(|_| invalid("Cannot encode approved builder handoff"))?
+        .unwrap_or_default();
     // A changed SSH configuration cannot prove that an old harness finished.
     {
         let jobs = app.jobs.lock().unwrap();
@@ -764,8 +832,17 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
     let id = queued_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let (stop, mut stopped) = watch::channel(RunControl::Running);
     {
-        let _files = queued_parent.as_ref().map(|_| app.files.lock().unwrap());
-        let mut jobs = app.jobs.lock().unwrap();
+        let _files = (queued_parent.is_some() || approval).then(|| app.files.lock().unwrap());
+        let mut jobs = if approval {
+            // Recheck under files -> jobs and retain both locks until the new
+            // latest run is durable. Save and enqueue cannot invalidate approval.
+            let parent = parent_id.as_deref().unwrap();
+            let jobs = recovery::restore(&app, parent)?;
+            workflow::require_approval(&app, jobs.iter().find(|job| job.id == parent).unwrap())?;
+            jobs
+        } else {
+            app.jobs.lock().unwrap()
+        };
         if let Some(job) = jobs
             .iter()
             .find(|job| job.name == name && (job.recover || job.attached))
@@ -812,6 +889,10 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             recover: true,
             repository_save,
             optimization,
+            stage: stage.clone(),
+            snapshot,
+            build_result: None,
+            approved_handoff,
             memory: (!performance && !repository_save && !optimization).then(|| memory::Sweep {
                 started_at: Some(memory::now()),
                 finished_at: None,
@@ -854,7 +935,17 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
     } else {
         "build"
     };
-    let mut command = if performance || !profile_bytes.is_empty() {
+    let mut command = if let Some(stage) = &stage {
+        remote.workflow_command(
+            content.len(),
+            &id,
+            &name,
+            session_id.as_deref().unwrap_or(""),
+            profile_bytes.len(),
+            stage,
+            handoff_bytes.len(),
+        )
+    } else if performance || !profile_bytes.is_empty() {
         remote.execution_command(
             content.len(),
             &id,
@@ -911,7 +1002,9 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             &app,
             &id,
             if session_id.is_some() {
-                b"[started] Submitting feedback and continuing the same build session with automatic tool approval.\n"
+                b"[started] Submitting feedback within the same stage and session. Builder feedback is not integration approval.\n"
+            } else if stage.as_deref() == Some("integrator") {
+                b"[started] Explicitly approved integration in a fresh session using the original spec snapshot and approved builder handoff.\n"
             } else if repository_save {
                 b"[started] remote repository save over SSH with the saved snapshot as context and the existing repository workflow. Output and logs only.\n"
             } else if performance {
@@ -921,16 +1014,17 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             } else if optimization {
                 b"[started] Uploading the editor spec to remote ~/projects and optimizing the latest detached build using its absolute path. No iteration or time limit; Stop run cancels. Progress and gain reports follow.\n"
             } else {
-                b"[started] remote spec build over SSH: running the saved snapshot with automatic tool approval requested. Output and logs only.\n"
+                b"[started] Builder planning, exploration, and preliminary tests or experiments using the saved snapshot. Integration requires explicit user approval of the final builder report.\n"
             },
         );
         // EOF only detaches. Stop sends a distinct control byte after the entire
-        // snapshot, optimization spec, and profile, so an early Stop cannot corrupt them.
+        // snapshot, optimization spec, profile, and handoff, so an early Stop cannot corrupt them.
         let mut control = stopped.clone();
         let mut upload = tokio::spawn(async move {
             stdin.write_all(content.as_bytes()).await?;
             stdin.write_all(optimization_spec.as_bytes()).await?;
             stdin.write_all(&profile_bytes).await?;
+            stdin.write_all(&handoff_bytes).await?;
             drop(profile_bytes);
             let _ = control.changed().await;
             if *control.borrow() == RunControl::Cancel {
@@ -994,7 +1088,11 @@ async fn start_run(app: App, input: RunInput) -> Result<Json<serde_json::Value>>
             // A concurrent disk-log read may already have persisted authoritative
             // terminal evidence. Local SSH teardown must not overwrite it.
             if job.recover {
-                job.status = status;
+                job.status = if stage.is_some() && status == "completed" {
+                    "verifying stage result".into()
+                } else {
+                    status
+                };
             }
             job.attached = false;
             job.dirty = true;
@@ -1044,6 +1142,7 @@ async fn output(State(app): State<App>, Path(id): Path<String>) -> Result<Json<O
     recovery::initialize(&app)?;
     drop(recovery::restore(&app, &id)?);
     recovery::refresh(&app, &id, false).await?;
+    let _files = app.files.lock().unwrap();
     let jobs = app.jobs.lock().unwrap();
     let job = jobs
         .iter()
@@ -1056,8 +1155,11 @@ async fn output(State(app): State<App>, Path(id): Path<String>) -> Result<Json<O
         output: String::from_utf8_lossy(&job.output.iter().copied().collect::<Vec<_>>())
             .into_owned(),
         truncated: job.truncated,
-        recoverable: job.recover,
+        recoverable: job.recover || (job.stage.is_some() && job.attached),
         continuable: !app.performance && !job.repository_save && !job.optimization,
+        stage: job.stage.clone(),
+        report: workflow::report(job),
+        approvable: workflow::approvable(&app, job)?,
     }))
 }
 
@@ -1093,10 +1195,11 @@ async fn output_log(
                 "Remote configuration does not match the saved run".into(),
             )
         })?;
-    let (status, bytes, truncated) = match remote.snapshot(&id, false, &name).await {
+    let (mut status, bytes, truncated) = match remote.snapshot(&id, false, &name).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             // A missing or rejected remote log must not hide output we already have.
+            let _files = app.files.lock().unwrap();
             let jobs = app.jobs.lock().unwrap();
             let cached = jobs.iter().find(|job| job.id == id).unwrap_or(&job);
             return Ok(Json(Some(Output {
@@ -1106,11 +1209,15 @@ async fn output_log(
                 output: String::from_utf8_lossy(&cached.output.iter().copied().collect::<Vec<_>>())
                     .into_owned(),
                 truncated: cached.truncated,
-                recoverable: cached.recover,
+                recoverable: cached.recover || (cached.stage.is_some() && cached.attached),
                 continuable: !cached.repository_save && !cached.optimization,
+                stage: cached.stage.clone(),
+                report: workflow::report(cached),
+                approvable: workflow::approvable(&app, cached)?,
             })));
         }
     };
+    let result = workflow::result(remote, &id, &name, job.stage.as_deref(), &mut status).await;
     let terminal = status != "running" && !status.starts_with("unknown");
     let observed_at = memory::now();
     let session_id = if terminal
@@ -1126,9 +1233,10 @@ async fn output_log(
     } else {
         None
     };
-    let (status, recoverable) = {
+    let (status, recoverable, report, approvable) = {
         // Completed entries can be evicted while SSH is in flight. Restore and
         // retain the cache guard through publication, as ordinary output reads do.
+        let _files = app.files.lock().unwrap();
         let mut jobs = recovery::restore(&app, &id)?;
         let cached = jobs.iter_mut().find(|job| job.id == id).unwrap();
         if terminal {
@@ -1137,8 +1245,10 @@ async fn output_log(
             let previous_status = cached.status.clone();
             let previous_recover = cached.recover;
             let previous_memory = cached.memory.clone();
+            let previous_result = cached.build_result.clone();
             if cached.recover {
                 cached.status = status.clone();
+                cached.build_result = result;
             }
             if !app.performance {
                 memory::capture(cached, &bytes, truncated);
@@ -1154,6 +1264,9 @@ async fn output_log(
                 cached.status = previous_status;
                 cached.recover = previous_recover;
                 cached.memory = previous_memory;
+                cached.build_result = previous_result;
+                cached.persistence_error = Some(error.1.clone());
+                cached.dirty = true;
                 return Err(error);
             }
             cached.dirty = false;
@@ -1165,9 +1278,14 @@ async fn output_log(
             if cached.attached && cached.stop.send(RunControl::Detach).is_err() {
                 cached.attached = false;
             }
-            (cached.status.clone(), false)
+            (
+                cached.status.clone(),
+                cached.stage.is_some() && cached.attached,
+                workflow::report(cached),
+                workflow::approvable(&app, cached)?,
+            )
         } else {
-            (status, true)
+            (status, true, None, false)
         }
     };
     // A disk snapshot must not replace the buffer an attached SSH stream is appending to.
@@ -1179,6 +1297,9 @@ async fn output_log(
         output: String::from_utf8_lossy(&bytes).into_owned(),
         truncated,
         continuable: !job.repository_save && !job.optimization,
+        stage: job.stage.clone(),
+        report,
+        approvable,
     })))
 }
 
@@ -1370,6 +1491,7 @@ fn router(app: App) -> Router {
         .route("/api/runs/{id}", get(output))
         .route("/api/runs/{id}/cancel", post(cancel))
         .route("/api/runs/{id}/continue", post(continue_recommended))
+        .route("/api/runs/{id}/approve", post(approve))
         .merge(performance)
         .layer(DefaultBodyLimit::max(MAX_FILE * 6 + 1024))
         .route_layer(middleware::from_fn_with_state(app.clone(), authenticate))

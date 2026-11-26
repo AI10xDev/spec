@@ -2,7 +2,7 @@
 
 A local-first **Rust backend + Vite / React / TypeScript frontend** for writing specifications and viewing build output side by side.
 
-This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional execution delegates over SSH to the remote `spec build` alias/function. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
+This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/AI10xDev/specific), the project behind the development machine's `spec` shell command. “Rust++” was clarified to mean Rust, not a separate language or C++ requirement. The HTTP backend is Rust; optional staged builds delegate over SSH directly to a capability-checked OpenCode runner configured by `SPEC_WORKFLOW_RUNNER`. OpenCode is an **optional external execution engine**, not a Rust reimplementation of the model/provider stack.
 
 ## Latest release: v0.1.15
 
@@ -10,11 +10,17 @@ This is a source-derived web rewrite of [AI10xDev/specific](https://github.com/A
 
 Rebuild and restart the local server, then reconnect using its new token URL. Already-running remote supervisors are not upgraded. This is a Git-tagged source release, with no prebuilt binaries; package manifests remain at `0.1.0`, as in prior releases.
 
+The staged build contract below describes the current implementation, not a claim
+that an older release tag includes it or that a live execution host has been
+upgraded. Host installation is explicit and separate from installing Spec; see
+[staged builds](docs/SUPERVISED_BUILDS.md).
+
 ## Documentation
 
 - [Start here: everyday use](README.md): plain-language installation, your first task, practical examples, and reviewing the results.
 - [Installation](docs/INSTALLATION.md): prerequisites, local-first setup, remote execution, upgrades, and troubleshooting.
 - [Development workflows](docs/WORKFLOWS.md): writing useful specs, reviewing results, follow-ups, teamwork, and measured optimization.
+- [Staged builds](docs/SUPERVISED_BUILDS.md): Builder reports, explicit approval, Integrator sessions, host setup and runtime policy.
 - [Workspace guide](docs/FEATURES.md): editing, autosave, shortcuts, conflicts, and output recovery.
 - [Configuration reference](#configuration) and [AI settings](#ai-settings): server variables and optional providers.
 - [Performance](PERFORMANCE.md), [Optimization](OPTIMIZE.md), and [Analytics](docs/ANALYTICS.md): specialized workflows and evidence limits.
@@ -36,10 +42,12 @@ Rebuild and restart the local server, then reconnect using its new token URL. Al
 - **Local file workflow:** create, edit, save, reopen, and download UTF-8 files; Ctrl/Cmd+S saves the active editor.
 - **Completed spec lines:** press `/` to toggle the current line's `# ` completion marker; Alt+/ inserts a literal slash. The build agent is instructed to retain completed lines as context and implement only pending requirements.
 - **Trailing completions:** optional selected-provider ghost text for the current sentence part; Tab or **Accept part** inserts it, Escape dismisses it.
-- **Optional Save & run:** explicit confirmation, immutable saved-spec input, live output polling, follow toggle, cancellation, concurrency limits, and supervisor keep-alives every 60 seconds with no overall execution timeout.
-- **Saved editor build queue:** Save & run during an active build stores a fixed snapshot for execution after confirmed successful finalization. Queue state survives browser/server restarts; subsequent autosaves do not change queued instructions. See [saved editor follow-ups](docs/FEATURES.md#queue-saved-editor-follow-ups).
+- **Optional Save & run:** explicit confirmation starts Builder exploration/planning, allowing preliminary unit/smoke-test edits and experiments but not end-to-end implementation. Input is immutable, with live polling, cancellation and concurrency limits. The outer supervisor has no overall timeout; the runner enforces the host execution deadline and any numeric executing-actor token budget.
+- **Approve & implement:** authenticated `POST /api/runs/{id}/approve` with `{}` starts a fresh Integrator from the latest successful Builder's original snapshot and durable validated handoff. Only this explicit action transitions stages.
+- **Durable stage reports:** private records retain stage, original snapshot, validated result and approved handoff separately from capped logs. Report validation is not verification of implementation.
+- **Saved editor build queue:** Save & run during an active build stores a fixed snapshot for a fresh Builder after confirmed successful finalization. Queue state survives browser/server restarts; subsequent autosaves do not change queued instructions. Queues never autoapprove integration. See [saved editor follow-ups](docs/FEATURES.md#queue-saved-editor-follow-ups).
 - **Rainbow build progress:** the selected build's latest complete CLI task list drives a live completion bar; missing counts show indeterminate activity, never a made-up percentage. See [progress reporting](#build-progress-reporting).
-- **Continue completed builds:** **Use recommended & continue** resumes the same captured engine session with a fixed recommended-choice prompt, without saving or uploading editor changes.
+- **Same-stage feedback:** **Send & revise builder** / **Use recommended & revise builder** stay in the Builder session. **Send & continue** / **Use recommended & continue** stay in the Integrator session and approved scope. Neither uploads editor changes or grants stage approval.
 - **History-aware planning:** initial builds, continuations, and prose optimization agents are instructed to read relevant previous `.out` spec outputs before planning. They reconcile completed features/refactors and validation evidence with the current code, avoid repeating confirmed work, and flag missing or uncertain evidence. This is an agent-driven review using file tools, not a completion flag inferred from a successful run; snapshots and completion markers remain unchanged.
 - **Structured build memory:** each admitted build or continuation has a separate sweep record with job/session/parent keys, spec revision, observation times, and agent-reported changes, reasons, checks, and unresolved work. Read previous jobs through the authenticated [memory GraphQL API](docs/BUILD_MEMORY.md); agent claims remain separate from verified operational status.
 - **Analytics:** select a saved spec's `.out` report for read-only metric charts and optional validated `.eval` checks, with missing-report and incomplete-evidence warnings. See the [format and limitations](docs/ANALYTICS.md); local snapshots have no verified terminal status.
@@ -101,9 +109,9 @@ The backend checks container ACLs before the batch and before each block-blob up
 
 Storage credentials are separate from AI settings and build handoffs. They persist in a sibling `<SPEC_SETTINGS_FILE filename>.storage.json` file (default `profile.json.storage.json`) under the same private settings directory, with `0700` directory and `0600` file permissions, outside served roots. APIs return only the account/container and whether a key is configured. An omitted key is retained only for the same account. **Remove storage settings** removes the saved configuration/key, not remote blobs. Storage changes and concurrent uploads are blocked while a batch runs; uploads continue if the browser disconnects. All storage APIs require the workspace bearer token: `GET/PUT/DELETE /api/settings/storage` and `POST /api/settings/storage/upload`. Upload requires a JSON body with the confirmed `accountName` and `containerName`; a destination mismatch returns `412` before any Azure request (reopen Settings and confirm again). Rotating the key at the same destination does not invalidate confirmation.
 
-### Remote execution through `spec build` (local web server)
+### Remote staged execution (local web server)
 
-The **browser, Rust web backend, and editable workspace run on your local computer**. **Save & run** executes `spec build <snapshot-file>` remotely over SSH; **Performance** starts its own remote builder session for the built Gemma RL workflow, and continuation uses `opencode-source`. No remote web backend, HTTP port forwarding, or remote frontend build is needed.
+The **browser, Rust web backend, and editable workspace run on your local computer**. **Save & run**, approval and continuation invoke the configured staged runner directly over SSH. **Performance** starts its own separate remote builder session for the built Gemma RL workflow. Repository-save and Optimize also retain their separate behavior. No remote web backend, HTTP port forwarding, or remote frontend build is needed.
 
 `./run.sh` configures remote execution automatically using the defaults above. To choose another host and directory, start the app on your **local computer** like this:
 
@@ -146,13 +154,13 @@ To build **all specs already in remote `~/project`** without starting the web ap
 ./remote-build.sh           # Build each spec serially in that remote directory
 ```
 
-This uses the same host/key settings as `ops.sh`. Set `SPEC_SSH_WORKSPACE=/absolute/remote/path` to override the directory. Only top-level regular `.md`, `.txt`, `.spec`, and extensionless files are inputs; hidden files, symlinks, subdirectories, and output logs are excluded. Local specs and remote `~/specs` are not automatically copied. An empty directory prints “No specs found.” Each invocation writes separate logs under remote `project/.spec-runs/batch-*/`, continues after individual failures, and exits nonzero if any build fails. Keep SSH connected until the batch finishes. Use `ops.sh` and **Save & run** for the web app's detached per-file builds.
+This legacy batch helper uses the same host/key settings as `ops.sh`, but not the web app's staged approval API or durable report contract; it still invokes `spec build`. Set `SPEC_SSH_WORKSPACE=/absolute/remote/path` to override the directory. Only top-level regular `.md`, `.txt`, `.spec`, and extensionless files are inputs; hidden files, symlinks, subdirectories, and output logs are excluded. Local specs and remote `~/specs` are not automatically copied. An empty directory prints “No specs found.” Each invocation writes separate logs under remote `project/.spec-runs/batch-*/`, continues after individual failures, and exits nonzero if any build fails. Keep SSH connected until the batch finishes. Use `ops.sh` and **Save & run** for the web app's staged detached per-file builds.
 
 Both `./ops.sh` and `./run.sh` check an explicitly supplied key before building and convert relative paths (from your current directory) or literal `~/` paths to absolute paths. An empty key is treated as unset. Launching the Rust binary directly still requires an absolute key path.
 
 The error `SPEC_SSH_KEY must be an absolute local private-key file path` could previously mean either a relative path **or a missing file**. The backend now distinguishes those cases. A key must exist on the computer running the local server; a path on the remote host does not work. If this computer has no authorized key or configured SSH identity, provide one before using **Save & run**.
 
-To trace the installed local `spec` command, check `type spec` in your interactive shell. In the Specific installation, `~/.bashrc` sources `~/.local/share/specific/shell/specific.sh`; its `spec build` function calls `bin/specific-run-build`, which invokes `opencode run --agent build`. OpenCode provider credentials may be configured in `~/.config/opencode/opencode.jsonc`. Those API credentials authenticate model requests, not SSH connections, and cannot be used as `SPEC_SSH_KEY`. Remote builds need their own working SSH identity and OpenCode configuration on the remote host.
+To trace a legacy local `spec` command, check `type spec` in your interactive shell. In the Specific installation, `~/.bashrc` sources `~/.local/share/specific/shell/specific.sh`; its `spec build` function calls `bin/specific-run-build`, which invokes `opencode run --agent build`. That is not the staged web-build entrypoint. OpenCode provider credentials may be configured in `~/.config/opencode/opencode.jsonc`. Those API credentials authenticate model requests, not SSH connections, and cannot be used as `SPEC_SSH_KEY`. Remote builds need their own working SSH identity and OpenCode configuration on the remote host.
 
 Open the full localhost URL printed by the **local** Rust server, including its token. **Save & run** first saves locally, then sends just that immutable spec snapshot over SSH. Other local project files are **not synced**. The remote build works in `SPEC_SSH_WORKSPACE`; its file changes remain remote. Prepare that remote checkout separately. `SPEC_WORKSPACE` is the local editor directory and is independent of the remote build directory.
 
@@ -164,25 +172,26 @@ For responsiveness, files over 256 Ki characters or 5,000 lines use a labeled pl
 
 The rainbow bar and read-only step checklist appear above the associated build
 output and in the selected build's Active runs detail. They update with the
-existing live poll (normally every 650 ms). The bar counts completed tasks across
-the latest complete `# Todos (Integrator)` and `# Todos (Supervisor)` snapshots,
-displaying each role's checklist separately. The supervised runner forwards both
-agents' structured `todo.updated` events; it resets both lists for every sweep.
-Legacy unlabeled `# Todos` snapshots are treated as integrator reports. ANSI
-styling and fenced examples are ignored. Cancelled
-tasks stay in the total but do not count as completed. A revised task list can
+existing live poll (normally every 650 ms). The bar counts only the executing
+stage's latest complete `# Todos (Builder)` or `# Todos (Integrator)` snapshot.
+`# Todos (Supervisor)` is displayed separately as optional advisory progress and
+never affects the execution percentage. The runner forwards structured
+`todo.updated` events and resets lists for every sweep. Unlabeled `# Todos`
+snapshots use the current stage; legacy unstaged runs treat them as Integrator
+reports. ANSI styling and fenced examples are ignored. Cancelled tasks stay in
+the total but do not count as completed. A revised task list can
 lower the percentage; these are agent-reported tasks, not independently verified
 requirements, elapsed-time estimates, or progress inferred from editor `# ` markers.
 
 Before task counts arrive, unsupported log formats and partially streamed lists
 show indeterminate activity while the build runs. A partial, cleared or invalid
-role snapshot hides the combined percentage without erasing the other role's
-checklist. Truncated output also has no
-percentage because the complete task-list context is unavailable. Activity stops
+executing-role snapshot hides the percentage without erasing the other role's
+checklist; missing advisory tasks do not hide execution progress. Truncated output
+also has no percentage because the complete task-list context is unavailable. Activity stops
 on terminal or unavailable states; unavailable states label any last reported
 counts as potentially stale. A successful CLI exit alone never fills the bar.
 Likewise, 100% reported tasks does not mark a running process complete: the build's
-status must independently reach `completed` before the UI says "Build run completed."
+status must independently reach `completed` before the UI says the stage run completed.
 New runs and continuations start fresh, and switching files follows that file's
 run. Retained historical views, repository-save jobs, and Performance output do
 not display this build-task bar. Reduced-motion and forced-colors settings are
@@ -198,35 +207,91 @@ An active or unresolved harness blocks repository saves, including runs for othe
 
 #### Remote shell requirements
 
-The remote machine needs Linux, Bash, `setsid`, `flock`, GNU coreutils (including `stdbuf`), findutils, and a configured `spec` build alias/function (or shell launcher on PATH) with its engine/provider credentials. It does **not** need this Rust web server or Bun/Vite for the web UI. Optimization has additional requirements described below.
+The remote machine needs Linux, Bash, `setsid`, `flock`, GNU coreutils (including
+`stdbuf`), findutils, Python 3 for result recovery, Bun for the staged runner, and
+a configured V2-capable OpenCode engine. It does **not** need this Rust web server
+or a remote frontend build. Optimization has additional requirements below.
 
-For builds and continuation, the adapter explicitly sources the trusted remote **`~/.bash_aliases`** in noninteractive Bash with alias expansion enabled. Optimization does not source that file. For a new build it invokes:
+The host owner must explicitly install OpenCode from
+[`AI10x/opencode-fork`](https://github.com/AI10x/opencode-fork), `main` commit
+`e60a017d878486eb6b143e55cb9b9f320091d46d`, or an equivalent staged implementation,
+including its scripts/dependencies and a rebuilt compatible engine. Configure
+`azure/gpt-6-astra` remotely; it is required in both stages. `azure/gpt-6-sol` is
+optional read-only advisory and never gates startup, tools or completion. Clear
+selected execution profiles; staged builds reject them rather than replace Astra.
+
+Builds, approval and continuation explicitly source trusted remote
+**`~/.bash_aliases`** in noninteractive Bash. Configure this there, outside any
+interactive-shell guard, using the actual absolute executable path:
 
 ```sh
-export SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1
-export OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1 OPENCODE_QUESTION_AUTO_RECOMMEND=1
-spec build "$snapshot"
-```
-
-Before sourcing that file, the adapter prepends the remote user's `~/.local/bin` and `~/.bun/bin` to `PATH` so user-installed engines are available to child launchers. If your alias/function is defined elsewhere, arrange for `~/.bash_aliases` to source its trusted definition and set the required engine PATH. Interactive `.bashrc` and login profiles are not loaded by the adapter; definitions guarded by an interactive-shell check will not work. The `spec` command must remain in the foreground, propagate its exit status, and accept an explicit snapshot filename. Do not resolve `spec` to the Rust web-server binary. The archived scripts are provenance, not installed configuration, and are not modified or automatically sourced.
-
-If a build reports `run-spec.sh: ... opencode-source: command not found`, the remote launcher was found but its engine was not. Verify that `opencode-source` is installed and executable **on the remote host**. For a custom installation, add an exported PATH to the remote `~/.bash_aliases`, outside any interactive-shell guard:
-
-```sh
+export SPEC_WORKFLOW_RUNNER=/absolute/path/to/script/run-spec.sh
+# Optional custom engine executable location:
 export PATH="$HOME/path/to/engine/bin:$PATH"
 ```
 
-Use the actual directory containing the engine. An interactive shell alias for `opencode-source` is not sufficient: `run-spec.sh` starts a child shell that needs an executable on its exported PATH. No local engine installation or SSH forwarding change is needed.
+The adapter requires that runner to be an executable file at an absolute path.
+It probes `"$SPEC_WORKFLOW_RUNNER" --workflow-version` under a short timeout and
+accepts only exit 0 with exactly `spec-workflow-v1` plus a newline. It then invokes
+that **same executable directly** with the immutable snapshot path. The probe
+must not load policy, start an engine or perform provider work. There is no
+`spec build` wrapper fallback for staged builds, approval or continuation.
 
-**Automatic tool approval and recommended question answers are requested.** The adapter sets `SPEC_BUILD_AUTO=1`, `OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=1`, and `OPENCODE_QUESTION_AUTO_RECOMMEND=1` after sourcing aliases, and clears persistent-session settings. A compatible OpenCode harness can then run unattended after the one **Save & run** confirmation. The installed remote alias/engine determines actual approval and answer behavior; verify it supports these flags and the foreground contract. There is no browser runtime-answer channel or blind `yes` fallback for unsupported engines or questions without a recommendation. Assume builds can modify remote files, execute tools, access the network, and incur provider costs using remote credentials. The UI confirmation is not a sandbox or per-tool approval boundary.
+Before sourcing aliases, the adapter prepends `~/.local/bin` and `~/.bun/bin` to
+PATH. Interactive `.bashrc` and login profiles are not loaded. The runner uses
+`SPEC_OPENCODE`, otherwise its checkout's host-specific compiled engine if present,
+then an executable `opencode-source` on PATH; an interactive engine alias is not
+sufficient. Spec does not deploy the host engine, runner, policy or credentials.
+Rebuild/restart the actual SSH-launching Spec backend to embed its updated adapter.
+No live host deployment or provider validation was performed for this doc update.
+For a complete host-owner walkthrough, see
+[external runner installation](docs/INSTALLATION.md#install-the-external-runner).
+
+The adapter clears inherited stage/session/handoff/result settings and supplies
+the admitted invocation's metadata. It sets `SPEC_BUILD_SUPERVISED=1` and
+`SPEC_BUILD_FOREGROUND=1 SPEC_BUILD_AUTO=1`, but explicitly overrides
+`OPENCODE_PERMISSION_AUTO_ALLOW_ALWAYS=0 OPENCODE_QUESTION_AUTO_RECOMMEND=0`.
+The runner allows read/edit, denies `task`, `external_directory`, `glob` and `grep`,
+and automatically replies **once** to other permitted, correlated executing-session
+tool requests. No global `always` grants are saved. Use `read` for directory
+listings or scoped commands for search; glob/grep lack canonical confinement in
+the current V2 core.
+
+**Runtime questions are not autoanswered**, even recommended options. The runner
+rejects them with guidance to report the question, options and blocker for user
+feedback. Rejection is not approval; there is no live browser runtime-answer
+channel. A user-clicked recommended-choice continuation is a separate, explicit
+same-stage follow-up. Sol may only read and update its own todos; its requests,
+errors, missing model, timeouts and block/fix advice never veto execution.
+
+The trusted runtime policy is `~/projects/Agent.md` or an absolute
+`SPEC_AGENT_POLICY` override, reloaded per invocation. Missing/invalid policy
+blocks startup. The versioned [Agent.md](Agent.md) is a repository snapshot, not
+deployed policy; its external targets remain unchanged. Its older model-review
+and allowlist descriptions do not change current semantics: policy rules and
+CLI/account/region/infrastructure lists are advisory, not a shell allowlist, IAM
+or sandbox. `reviewTimeoutMs` bounds optional advice; `maxFixes` is parsed without
+a forced repair loop. Numeric `maxTokens` limits the executing actor's reported
+tokens per sweep, excluding Sol; `null` disables that cap. `runTimeoutMs` remains
+an execution deadline. Use provider quotas and OS/IAM isolation for hard limits.
+See [runtime policy](docs/SUPERVISED_BUILDS.md#runtime-policy).
+
+Repository-save still uses the trusted `spec build` alias/function and its existing
+auto flags, not this stage transition. Optimize and Performance remain separate
+and do not source the build alias file. Do not resolve a legacy `spec` launcher to
+this Rust web-server binary. Archived scripts are provenance, not deployed config.
 
 #### Sessions and cancellation
 
 Builds (including continuations), repository saves, and optimization have **no overall supervisor runtime limit or UI attachment deadline**. The agent-output cap and retention policy below apply to ordinary builds and repository saves; optimization has separate reporting and retention rules described under [optimization](#optimization).
 
+The staged runner inside that supervisor still enforces the host policy's
+`runTimeoutMs` and any numeric executing-actor `maxTokens` budget; an outer
+keep-alive saying "no execution timeout" does not disable those inner limits.
+
 The build adapter supplies supplemental OpenCode instructions without rewriting the saved snapshot. A single leading `# ` after optional indentation marks only that line completed; removing it reopens the requirement. `##` headings, inline hashes, and hashes in code blocks are not completion markers. The `/` editor shortcut preserves indentation and native undo; inside fenced code it types a normal slash. Use Alt+/ for literal slashes elsewhere. The remote adapter needs Bun or Node to merge these instructions into OpenCode configuration; the remote launcher must honor that configuration.
 
-Snapshot text is sent as data over SSH stdin, never interpolated into shell code or included in the SSH command line. After a complete upload, a detached supervisor owns the build and its `0600` snapshot in a `0700` run directory under `SPEC_SSH_WORKSPACE/.spec-runs/`. That parent directory must be owned by the remote user, private (`0700`), and not a symlink. The snapshot is removed after process cleanup on exit or cancellation. Later local saves do not change the running input.
+Snapshot text is sent as data over SSH stdin, never interpolated into shell code or included in the SSH command line. After a complete upload, a detached supervisor owns the build and its `0600` snapshot in a `0700` run directory under `SPEC_SSH_WORKSPACE/.spec-runs/`. That parent directory must be owned by the remote user, private (`0700`), and not a symlink. The temporary uploaded snapshot is removed after process cleanup on exit or cancellation; the original staged snapshot remains in private local run records for approval/recovery. Later local saves do not change the running input.
 
 **Closing SSH, stdin EOF, closing the browser, and normal server shutdown do not cancel an uploaded build.** The supervisor ignores SIGHUP (no-hangup behavior), runs in its own session, and writes output to a private file rather than the SSH socket. Instead of a shared `nohup.out`, each run uses `<spec filename>.out`, for example `idea.md.out` or `idea.out` for an extensionless spec named `idea`. The full filename and separate run directories keep logs distinct across specs and repeat builds. SSH only tails that log. **Stop run** sends an explicit cancellation control byte after the snapshot; the supervisor kills the build's process group, including ordinary descendants. Normal process exit still ends the run. Stop cannot be guaranteed through a broken connection; an unconfirmed cancellation is reported as detached rather than cancelled.
 
@@ -243,33 +308,101 @@ cat status                    # Absent while running; published atomically after
 touch cancel                  # Explicitly stop a still-running detached build
 ```
 
-`status` contains the CLI exit code: `0` success, `124` a child timeout or an older supervisor's watchdog timeout, `130` cancellation, or `125` supervisor error (these reserved codes can also be returned by a launcher). Completion means CLI exit success, not verification of generated changes. `<spec filename>.out` merges stdout/stderr and retains the **first 8 MiB of agent output**; excess agent output is drained/discarded without breaking the log pipe. Supervisor keep-alive messages bypass this cap, so the total log can exceed 8 MiB and slowly grows while the process stays alive. Files are `0600`; they can contain sensitive spec/tool output. The browser keeps only the latest 256 KiB it received. Recovery reads a bounded latest-256-KiB tail for all modes, including uncapped optimization logs. Recovery also reads legacy `output.log` files for sessions launched before this naming change, including builds still running during an upgrade.
+`status` contains the CLI exit code: `0` success, `124` a child timeout or an older supervisor's watchdog timeout, `130` cancellation, or `125` supervisor error (these reserved codes can also be returned by a launcher). Staged completion additionally requires a validated result; neither establishes correctness of generated changes. `<spec filename>.out` merges stdout/stderr and retains the **first 8 MiB of agent output**; excess agent output is drained/discarded without breaking the log pipe. Supervisor keep-alive messages bypass this cap, so the total log can exceed 8 MiB and slowly grows while the process stays alive. Files are `0600`; they can contain sensitive spec/tool output. The browser keeps only the latest 256 KiB it received. Recovery reads a bounded latest-256-KiB tail for all modes, including uncapped optimization logs. Recovery also reads legacy `output.log` files for sessions launched before this naming change, including builds still running during an upgrade.
+
+The staged `result.json` is read separately after successful remote status, not
+parsed out of the truncated log. Its exact envelope is
+`{"version":1,"stage":"builder","report":"Concrete handoff/report"}`; results
+allow `builder` or `integrator`, while approved handoffs must use `builder`.
+The report must be nonempty and at most 120 KiB UTF-8. Private file checks,
+provenance, stage matching and strict envelope validation reject unsafe, malformed,
+oversized or mismatched results. A missing/invalid successful result fails staged
+completion; transport failure leaves it unresolved for recovery. The UI's separate
+stage report remains usable when the runtime log is truncated, but its claims
+still require human review and actual validation.
 
 Completed run directories older than seven days are pruned on the next launch in that remote workspace. There is no background retention service or strict total disk quota; manually remove finished directories sooner if needed. Do not delete a live run directory. Host reboot, SIGKILL of the supervisor, disk failure, or children that deliberately create separate process groups remain outside the guarantee and may leave stale snapshots or missing status. Missing status is not proof of a live build after such a failure.
 
 Keep `.spec-runs/` out of remote version control and artifact uploads, for example by adding it to that checkout's `.git/info/exclude`. Private filesystem permissions do not prevent a same-user tool from reading or committing session files.
 
-Run records and latest-run associations persist privately in the local workspace's `.spec-output/` directory. After restarting the server, connect using its newly printed token and open the spec from **Saved files** to restore its latest output and status. Live or unresolved sessions resume polling; **Load nohup output** explicitly rereads the latest associated remote log without launching a build or replacing the editor buffer. Recovery requires the same remote configuration for unfinished sessions; cached finished output remains available without SSH. **Stop run** explicitly cancels a recovered session. Unresolved sessions count toward concurrency limits and block another run for the same file. Recovery itself only retrieves logs/status; continuation is a separate explicit action described below. Local records have no automatic disk pruning; protect them like specs because they can contain sensitive runtime output.
+Run records and latest-run associations persist privately in the local workspace's `.spec-output/` directory. After restarting the server, connect using its newly printed token and open the spec from **Saved files** to restore its latest output and status. Live or unresolved sessions resume polling; **Load nohup output** explicitly rereads the latest associated remote log without launching a build or replacing the editor buffer. Recovery requires the same remote configuration for unfinished sessions; cached finished output remains available without SSH. **Stop run** explicitly cancels a recovered session. Unresolved sessions count toward concurrency limits and block another run for the same file. Recovery retrieves logs/status and staged results; continuation is a separate explicit action described below. Local records have no automatic disk pruning; protect them like specs because they can contain sensitive runtime output.
+
+Staged records additionally retain the original snapshot, stage, validated result
+and approved Builder handoff for Integrators. Recovery also retrieves the separate
+stage result where required; it never infers approval from logs or starts integration.
 
 An SSH attachment exiting **255** does not establish that the remote build failed. It is shown as detached with remote completion unconfirmed; older cached logs may still contain `[failed (exit status: 255)]`. If **Load nohup output** also reports an SSH exit 255, inspect its error for connectivity, authentication, or host-key failures, restore access, and retry loading rather than starting another build. Cached output and unresolved-run guards are preserved. A successfully loaded remote status file containing `255` is different: it confirms that the remote command failed, and the UI keeps that failure visible.
 
 If the associated remote run directory is missing, **Load nohup output** preserves available cached output but cannot recreate the log. Use **Browse retained runs** to list other private, spec-named logs in the configured remote workspace, then explicitly select a run by UUID and **log updated** timestamp. This requires Python 3.7+ on the remote host. The read-only snapshot is separate from the associated run: it does not relink local records, clear unresolved status, enable continuation/cancellation, or change session chat context. Another run may have used different instructions. **Return to associated output** restores the original view. Discovery excludes ambiguous legacy `output.log` files and unsafe storage; the reserved name `optimization` additionally requires matching initial-build metadata to avoid mixing optimizer logs with an ordinary spec. A bounded scan reports when its list is incomplete. Viewing logs never launches a build.
 
+#### Approve a Builder report
+
+**Save & run** begins a Builder exploration/planning sweep. Preliminary unit/smoke
+test edits and experiments are allowed, but end-to-end implementation must wait.
+Only explicit **Approve & implement** sends authenticated
+`POST /api/runs/{id}/approve` with the empty JSON object `{}`. Extra fields are
+rejected. The backend requires the latest successful Builder on the same remote,
+a durable original snapshot and validated report, and no unresolved/attached state
+or persistence error. It also reads the current saved spec and requires its content
+to match the original snapshot exactly; missing/unreadable or changed saved specs
+are ineligible. A pending (waiting) saved-build queue entry for that Builder also
+blocks approval. These are server-side admission checks, held with the document
+and job locks through child registration, not merely disabled UI controls. The
+backend rechecks the authoritative saved checkpoint. Active, failed, stale, legacy,
+Integrator and already-approved runs cannot be approved.
+
+Approval creates a new Integrator run and **fresh executing engine session**, with
+the original saved snapshot and approved Builder report. It does not send editor
+changes or feedback drafts. The UI blocks approval while edited requirements,
+feedback drafts or queued revisions need resolving; changed requirements need a
+new Builder report. Saving, feedback and either queue never autoapprove. The
+Integrator further explores and implements the approved work end-to-end, including
+integration/verification. Its handoff is context, not new tool permissions.
+
+The external Spec backend binds approval to the report. Setting runner stage and
+handoff environment variables standalone is not a secure human-approval boundary;
+the runner does not cryptographically verify user approval or transition itself.
+
 #### Continue a completed build
 
-**Use recommended & continue** sends a fixed follow-up asking the engine to implement its last recommended option. It immediately resumes the same engine session with automatic tool approval requested; it can modify remote files, execute tools, access the network, and incur provider costs. It does not save or upload editor changes. The button is enabled only for a completed, confirmed build, not a repository save, failed run, or active run. The backend additionally requires that run to be the latest for its spec and match the current remote configuration.
+Builder feedback uses **Send & revise builder** or **Use recommended & revise
+builder**. Integrator feedback uses **Send & continue** or **Use recommended &
+continue**. These immediately resume the same captured session **in the same
+stage**, not a fresh Integrator. Recommended-choice feedback is a user action,
+not automatic answering of runtime questions or approval to implement. A confirmed
+successful latest staged run, durable validated report, session metadata and the
+same remote configuration are required. Legacy runs need a new Builder.
 
-The **Feedback to build session** input below the logs accepts answers and actions with **Enter**; **Shift+Enter** inserts a newline. For a completed build, **Send & continue** immediately submits the follow-up. While the agent is running, **Queue follow-up** accepts one pending message per run and sends it to that same session after confirmed successful completion. The queue also accepts Enter during a sheet autosave. This is not live stdin or immediate steering: **keep this browser page open** for delivery. Queued messages are memory-only, shown separately from new drafts, and can be canceled before dispatch. Switching editor tabs does not redirect delivery. Stop requests, failed/replaced runs, and delivery errors pause queued work; ambiguous errors are never automatically retried. Review the associated run before canceling and resubmitting a paused message.
+The feedback input accepts **Enter** to submit and **Shift+Enter** for a newline.
+While running, **Queue follow-up** holds one browser-memory message per run for
+the same stage/session after confirmed success. Keep the page open for delivery;
+this is not live stdin or immediate steering. Stop, failure, replacement or delivery
+errors pause it; ambiguous errors are not retried automatically. A saved-editor
+queue is different: it persists a fixed snapshot across browser/server restarts
+and launches a fresh Builder after confirmed success. Neither queue approves
+integration.
 
-Follow-ups request automatic tool approval and can modify remote files and incur provider costs. Editor changes are not sent. Drafts are scoped to each run, retained on submission failure, and carried forward when a queued follow-up starts its continuation. `POST /api/runs/{id}/continue` still requires confirmed completion and accepts `{ "message": "Your feedback" }`, preserving exact text up to 16 KiB UTF-8 (nonempty after trimming, no NUL bytes). Sending `{}` retains the recommended-option behavior.
+`POST /api/runs/{id}/continue` accepts `{ "message": "Your feedback" }`, preserving
+exact text up to 16 KiB UTF-8 (nonempty after trimming, no NUL bytes); `{}` uses the
+fixed recommended-choice prompt. Editor changes are not sent. Drafts stay scoped
+to the run and are retained on submission failure. Tool permissions still use the
+runner's automatic per-request once replies and can modify remote files and incur
+costs, subject to the stage instructions.
 
-Continuation requires remote `opencode-source` in `~/.bash_aliases` or on PATH. It invokes `opencode-source run --dir "$workspace" --session "$session_id" --agent build -- "$prompt"`, not `spec build`. This launcher must use the same engine session storage and configuration as the original build. An installation whose `spec` launcher uses only `opencode` needs a compatible `opencode-source` launcher before using continuation; the adapter does not automatically select another engine.
-
-New builds install a temporary OpenCode plugin to capture the first root session ID in a private `session-id` file. The remote engine must honor the supplemental plugin configuration. Builds without that metadata, including older runs, cannot be continued; start a new build instead. Each continuation creates a separate harness/log directory while retaining the engine session ID and prior logs.
+Continuation invokes the same capability-checked `SPEC_WORKFLOW_RUNNER`, with the
+captured `SPEC_BUILD_SESSION_ID` and unchanged stage. The runner writes the executing
+session ID to private `session-id` metadata; there is no legacy capture-plugin or
+direct `opencode-source run` continuation route. Each sweep has a new harness/log
+directory. Integrator follow-ups always receive the original approved Builder
+handoff via `SPEC_BUILD_HANDOFF_FILE`, not a newly inferred approval or substituted
+Integrator report. Preserve the same host engine storage/configuration.
 
 Duplicate requests for an older run are rejected once its continuation is submitted. Missing session metadata and local SSH spawn failures leave the original run retryable. After SSH starts, failures (including remote launcher/configuration rejection) do not restore the old run's retry eligibility: the adapter cannot safely assume the engine did not execute. Inspect the logs and remote session before starting a new build; there is no automatic retry or failed-run continuation.
 
-Builds are capped at **120 KiB** because some existing launchers forward the prompt as one Linux process argument. Editing/saving support 2 MiB. Remote launchers using Bash command substitution may strip trailing newlines and must use an end-of-options separator when passing prompts to their engine.
+Build snapshots remain capped at **120 KiB**; editing/saving support 2 MiB. This
+limit predates staged execution and accommodates legacy launchers that forward
+prompts as one Linux process argument. The staged adapter passes a snapshot file
+to the runner, not spec text in shell command syntax.
 
 `SPEC_COMMAND` and local build execution have been removed: unset the old variable and use the SSH settings above. No model credentials are needed locally for editing or SSH builds. Validation uses an isolated SSH stand-in running the actual remote supervisor and alias scripts; no live SSH host or provider call is required by tests.
 
@@ -355,8 +488,11 @@ Each command runs under a Linux subreaper that cleans up detached descendants be
 ### AI settings
 
 Open **Settings** in the workspace header to select the AI model for session chat,
-trailing completions, and future agent runs (builds, continuations, repository
-saves, and model-guided optimization). One active profile is shared by everyone
+trailing completions, and supported separate workflows such as repository saves
+and model-guided optimization. Staged builds, approval and continuations reject
+selected execution profiles and require remote `azure/gpt-6-astra`; optional Sol
+advice does not replace it. Clear the profile with **Reset to environment** and
+configure Astra on the execution host. One active profile is shared by everyone
 using this server. Saving replaces that profile, persists across server restarts,
 and takes effect without restarting. Already-running requests and builds retain
 their admitted configuration. Voice settings remain independent.
@@ -369,27 +505,28 @@ their admitted configuration. Voice settings remain independent.
 | OpenRouter | Model ID such as `openai/gpt-4.1-mini`, API key, and `https://openrouter.ai/api/v1`; uses Chat Completions. |
 | Local Hugging Face | Served model ID, loopback OpenAI-compatible API URL such as `http://127.0.0.1:8000/v1`, and an optional API key. |
 
-**OpenRouter for the spec build session agent:** select **OpenRouter**, enter your
+**OpenRouter for chat and supported profile-based workflows:** select **OpenRouter**, enter your
 OpenRouter API key and full model ID (including the publisher prefix, for example
 `openai/gpt-4.1-mini`), keep `https://openrouter.ai/api/v1` as the API base URL,
-and choose **Save settings**. The build-agent summary shows the saved selection,
-not unsaved form edits. Future builds and continuations use this profile instead
-of the execution host's default Azure model; Azure credentials are not required.
-To use Azure again, select **Azure OpenAI** and save its deployment, endpoint,
-version, and key. The provider selector is the Azure opt-in/opt-out control;
-**Reset to environment** is not an Azure opt-out because host defaults may use Azure.
+and choose **Save settings**. A saved profile does not select the staged executing
+model: staged builds reject it rather than replacing Astra. The provider selector
+controls chat and supported profile-based workflows, not the staged runner's fixed
+model. **Reset to environment** is not an Azure opt-out; it clears the profile and
+staged builds still require remote Azure Astra configuration.
 
 Model defaults are examples, not availability guarantees. Cloud endpoints require
 HTTPS. Saving validates configuration, not credentials, connectivity, model
-availability, or tool support. Agent builds and optimization need a tool-capable
-model and a remote launcher that honors the supplied OpenCode configuration.
+availability, or tool support. Profile-based agent workflows need a tool-capable
+model and a remote launcher that honors the supplied OpenCode configuration;
+staged builds instead need the required Astra configuration and runner contract.
 Remote runs with a saved profile also require Python 3 on the execution host.
 
 **Local inference:** obtain a compatible Hugging Face model and serve it on your
 own hardware using an OpenAI-compatible runtime such as vLLM or llama.cpp. Settings
 does not download weights, start that runtime, or allocate hardware. The URL must
 use `localhost` or a loopback IP. It refers to the Rust server host for chat and
-completions, and the SSH execution host for builds/optimization, not the browser.
+completions, and the SSH execution host for supported profile-based workflows such
+as optimization, not the browser. It cannot replace Astra in staged builds.
 If those hosts differ, provide a reachable local service on each host. Hardware,
 model licensing/access, and inference-runtime installation remain your responsibility.
 
@@ -403,14 +540,16 @@ directory is `.spec-settings-<workspace hash>` beside the workspace; override wi
 an absolute `SPEC_SETTINGS_FILE` path in a dedicated private directory (its parent
 must already exist). Do not commit, serve, or distribute that file.
 
-For remote runs the selected profile is sent through SSH stdin into a private
+For remote requests the selected profile can be sent through SSH stdin into a private
 per-run file, never the command line, and removed on normal cleanup. Trust the
 execution host and its tools: they run as the user and can access the credential.
 Crashes or forced termination can leave private files requiring manual cleanup.
+The staged adapter rejects a selected profile rather than using it for model work.
 
 **Reset to environment** removes the active saved profile. Chat/completions then
-use the local Azure environment configuration described below, while builds and
-optimization return to their existing remote defaults. Reset does not unify those
+use the local Azure environment configuration described below; staged builds use
+required remote Astra and other workflows return to their separate remote defaults.
+Reset does not install or configure remote Astra, or unify those
 independent host configurations or revoke provider credentials. A valid saved
 profile takes precedence over invalid text environment configuration at startup;
 without a saved profile, partial/invalid text configuration still fails startup.
