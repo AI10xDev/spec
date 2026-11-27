@@ -1,0 +1,9 @@
+.research-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.editor-pane > .pane-heading { flex-wrap: wrap; gap: 12px; }
+.deep-research textarea { width: 100%; min-width: 0; box-sizing: border-box; padding: 10px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; font: inherit; resize: vertical; }
+.deep-research textarea:focus-visible { outline: 2px solid var(--accent); }
+.deep-research p, .deep-research li, .deep-research h3 { overflow-wrap: anywhere; white-space: pre-wrap; }
+.deep-research a { color: var(--accent); }
+.research-citations a { margin-left: 4px; }
+.research-ungrounded { font-size: 12px; font-style: italic; }
+.research-error { margin: 16px 24px; }

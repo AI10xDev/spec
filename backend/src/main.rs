@@ -42,6 +42,7 @@ mod queued_builds;
 mod realtime;
 mod recovery;
 mod remote;
+mod research;
 mod settings;
 mod storage;
 mod workflow;
@@ -64,6 +65,7 @@ struct App {
     remote: Option<Remote>,
     computeruse: Arc<computeruse::Bridge>,
     completion: Option<Completion>,
+    research: Option<research::Research>,
     settings: Arc<settings::Store>,
     storage: Arc<storage::Store>,
     realtime: Option<Realtime>,
@@ -1441,6 +1443,12 @@ fn router(app: App) -> Router {
         )
         .route("/api/analytics", post(analytics::report))
         .route(
+            "/api/research",
+            get(research::status)
+                .post(research::research)
+                .layer(DefaultBodyLimit::max(research::MAX_BODY)),
+        )
+        .route(
             "/api/feature-review",
             get(feature_review::status)
                 .post(feature_review::review)
@@ -1584,6 +1592,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         remote,
         computeruse,
         completion,
+        research: research::Research::from_env().unwrap_or_else(|error| {
+            eprintln!("Deep research disabled: {error}");
+            None
+        }),
         settings,
         storage,
         realtime,

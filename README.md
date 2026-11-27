@@ -24,6 +24,7 @@ never grant approval. See [staged builds](docs/SUPERVISED_BUILDS.md).
 | Write clearer tasks | Use the [everyday examples](#everyday-examples). |
 | Understand every setting | Read [Installation](docs/INSTALLATION.md) and the [configuration reference](REFERENCE.md#configuration). |
 | Compare repository features | Use **Feature review** beside **Performance output** for cited PDF and Markdown reports. See [scope and Azure image setup](docs/FEATURE_REVIEW.md). |
+| Research a question on the web | Use **Deep research** beside the editor's **Saved/Unsaved** badge for a read-only Exa report and Markdown download. Requires a server-side `EXA_API_KEY`; see [privacy, limits and setup](docs/DEEP_RESEARCH.md). |
 
 ## Install And Open Spec
 

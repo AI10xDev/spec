@@ -7,6 +7,7 @@ import { Chat } from "./chat"
 import { LogOutput } from "./highlighting"
 import { Analytics } from "./analytics"
 import { FeatureReview } from "./feature-review"
+import { DeepResearch } from "./deep-research"
 import { BuildProgress } from "./progress"
 import { RunReport } from "./run-report"
 import { Settings } from "./settings"
@@ -101,6 +102,7 @@ function App() {
   const performanceButton = useRef<HTMLButtonElement>(null)
   const [analytics, setAnalytics] = useState(false)
   const [featureReview, setFeatureReview] = useState(false)
+  const [deepResearch, setDeepResearch] = useState(false)
   const featureReviewOpener = useRef<HTMLButtonElement | null>(null)
   const [settings, setSettings] = useState(false)
   const configRequest = useRef(0)
@@ -1007,7 +1009,8 @@ function App() {
         {performanceError && !performance && <div role="alert" className="error">{performanceError}<button aria-label="Dismiss Performance error" onClick={() => setPerformanceError("")}>×</button></div>}
         <div className="panes">
           <section className="editor-pane" aria-label="Spec editing pane">
-            <div className="pane-heading"><div><span className="eyebrow">01 / SPEC</span><h2>{tab?.name ?? "Your next idea"}</h2></div><span className="badge">{tab ? dirty(tab) ? "Unsaved" : "Saved" : "Editor"}</span></div>
+            <div className="pane-heading"><div><span className="eyebrow">01 / SPEC</span><h2>{tab?.name ?? "Your next idea"}</h2></div><div className="research-actions"><span className="badge">{tab ? dirty(tab) ? "Unsaved" : "Saved" : "Editor"}</span><button onClick={() => setDeepResearch(true)}>Deep research</button></div></div>
+            {deepResearch && <DeepResearch api={api} editorText={tab?.content} onClose={() => setDeepResearch(false)} />}
             {tabs.map((editor) => <Editor key={editor.name} active={!settings && editor.name === active} name={editor.name} value={editor.content} token={token} available={completion} enabled={complete} onEnabled={setComplete} onSave={() => void save()} onChange={(content) => {
               if (content !== editor.content) {
                 edited.current.add(editor.name)
