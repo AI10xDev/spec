@@ -4,7 +4,7 @@ import type { ResearchOutput } from "./deep-research-export"
 import "./deep-research.css"
 
 type Api = <T>(path: string, body?: unknown, method?: string, signal?: AbortSignal) => Promise<T>
-type Status = { configured: boolean; message: string }
+type Status = { configured: boolean; message: string; preferences?: import("./exa-settings").ExaPreferences | null }
 
 export function DeepResearch({ api, editorText, onClose }: { api: Api; editorText: string | undefined; onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null)
@@ -74,6 +74,7 @@ export function DeepResearch({ api, editorText, onClose }: { api: Api; editorTex
     {!result ? <form className="analytics-select" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); void generate() }}>
       <p>Research a question with Exa Deep Search. Opening this dialog sends no editor content. Research never edits your spec, launches builds, or grants approval.</p>
       <p role="status">{status?.message ?? "Checking Exa configuration…"}</p>
+      {status?.preferences && <p>Server settings when opened: {status.preferences.enabled ? "enabled" : "disabled"}; up to {status.preferences.numResults} returned pages; {status.preferences.domainMode === "any" ? "any domain" : `${status.preferences.domainMode} domains: ${status.preferences.domains.join(", ")}`}. Change these in Settings → Exa Deep Search. Another authorized browser may change server settings before submission; this is not a per-request filter override.</p>}
       <label htmlFor="research-query">Research question</label>
       <textarea id="research-query" rows={6} value={query} disabled={busy} aria-describedby="research-limit research-disclosure" onChange={(event) => setQuery(event.target.value)} />
       <span id="research-limit">{new TextEncoder().encode(query).length.toLocaleString()} / {MAX_QUERY_BYTES.toLocaleString()} UTF-8 bytes</span>
@@ -83,7 +84,7 @@ export function DeepResearch({ api, editorText, onClose }: { api: Api; editorTex
         if (invalid) { setError(invalid); return }
         setQuery(editorText); setError("")
       }}>Use current editor text</button>
-      <p id="research-disclosure">Only the visible question is sent to Exa when you select Start research. Review it and remove private data or credentials first. Exa may incur charges and perform multiple internal searches. Waiting is limited to 90 seconds; closing or timing out does not guarantee stopping provider work or charges. No automatic retries.</p>
+      <p id="research-disclosure">The visible question and configured search filters are sent to Exa when you select Start research. No filenames, editor buffers or logs are sent implicitly. Review it and remove private data or credentials first. Exa may incur charges and perform multiple internal searches. Waiting is limited to 90 seconds; closing or timing out does not guarantee stopping provider work or charges. No automatic retries.</p>
       <p>Read-only results are not saved as history. Download before closing.</p>
       <button className="primary" disabled={busy || !status?.configured}>{busy ? "Researching…" : "Start research"}</button>
       {busy && <p role="status">Waiting for Exa research. You can stop waiting and close.</p>}

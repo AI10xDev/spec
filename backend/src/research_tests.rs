@@ -26,7 +26,16 @@ async fn fake(
                 async move {
                     count.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(headers["x-api-key"], "fake-key");
-                    assert_eq!(input, payload(input["query"].as_str().unwrap()));
+                    assert_eq!(input["type"], "deep");
+                    assert_eq!(input["numResults"], 10);
+                    assert!(input.get("includeDomains").is_none());
+                    assert!(input.get("excludeDomains").is_none());
+                    assert_eq!(input.as_object().unwrap().len(), 4);
+                    assert_eq!(input["outputSchema"], json!({"type": "object", "additionalProperties": false,
+                        "required": ["title", "summary", "findings", "limitations"],
+                        "properties": {"title": {"type": "string"}, "summary": {"type": "string"},
+                            "findings": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
+                            "limitations": {"type": "array", "maxItems": 20, "items": {"type": "string"}}}}));
                     tokio::time::sleep(delay).await;
                     (
                         StatusCode::from_u16(status).unwrap(),
@@ -143,7 +152,10 @@ async fn authenticated_real_router_read_only_and_bounded() {
     let root = tempfile::tempdir().unwrap();
     let mut app = crate::tests::app(root.path());
     let (research, calls, server) = fake(200, valid().to_string(), Duration::ZERO).await;
-    app.research = Some(research);
+    app.research = Arc::new(crate::research_settings::Store::open(
+        app.settings.research_file(),
+        Some(research),
+    ));
     for method in ["GET", "POST"] {
         let response = crate::router(app.clone())
             .oneshot(
@@ -185,7 +197,10 @@ async fn authenticated_real_router_read_only_and_bounded() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(app.jobs.lock().unwrap().is_empty());
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
-    app.research = None;
+    app.research = Arc::new(crate::research_settings::Store::open(
+        app.settings.research_file(),
+        None,
+    ));
     let response = crate::router(app.clone())
         .oneshot(
             Request::builder()
@@ -308,4 +323,123 @@ async fn chunked_body_bound_and_https_only_transport() {
             .1
             .starts_with("Could not receive Exa")
     );
+}
+
+#[tokio::test]
+async fn hot_settings_apply_literal_payloads_and_preserve_inflight_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = crate::tests::app(root.path());
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let wait = release.clone();
+    let server = Router::new().route(
+        "/search",
+        post(
+            move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                let sent = sent.clone();
+                let wait = wait.clone();
+                async move {
+                    sent.send((
+                        headers["x-api-key"].to_str().unwrap().to_owned(),
+                        body.clone(),
+                    ))
+                    .unwrap();
+                    if body["query"] == "old" {
+                        wait.notified().await;
+                    }
+                    Json(valid())
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("http://{}/search", listener.local_addr().unwrap())).unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+    let mut environment = Research::configured(Some("old-key")).unwrap().unwrap();
+    environment.client = Client::new();
+    environment.url = url.clone();
+    app.research = Arc::new(crate::research_settings::Store::open(
+        app.settings.research_file(),
+        Some(environment),
+    ));
+    let old = app.research.snapshot().unwrap();
+    let running = tokio::spawn(async move { old.run("old").await });
+    let (key, body) = received.recv().await.unwrap();
+    assert_eq!(key, "old-key");
+    assert_eq!(body["numResults"], 10);
+    assert!(body.get("includeDomains").is_none());
+    for mode in ["include", "exclude", "any"] {
+        let domains = if mode == "any" {
+            vec![]
+        } else {
+            vec![" Example.ORG "]
+        };
+        let response = crate::router(app.clone()).oneshot(Request::builder()
+            .uri("/api/settings/research").method("PUT")
+            .header("authorization", "Bearer test-token").header("content-type", "application/json")
+            .body(Body::from(json!({"preferences":{"enabled":true,"numResults":2,"domainMode":mode,"domains":domains},"apiKey":"new-key"}).to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // Test-only transport replacement; production always uses the fixed HTTPS URL.
+        let mut snapshot = app.research.snapshot().unwrap();
+        snapshot.client = Client::new();
+        snapshot.url = url.clone();
+        assert_eq!(
+            snapshot.run("blocked").await.err().unwrap().0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert!(received.try_recv().is_err()); // saves never contact Exa
+        if mode == "any" {
+            break;
+        }
+        let request = payload("new", &snapshot.preferences);
+        assert_eq!(request["type"], "deep");
+        assert_eq!(request["numResults"], 2);
+        assert_eq!(
+            request[if mode == "include" {
+                "includeDomains"
+            } else {
+                "excludeDomains"
+            }],
+            json!(["example.org"])
+        );
+        assert!(
+            request
+                .get(if mode == "include" {
+                    "excludeDomains"
+                } else {
+                    "includeDomains"
+                })
+                .is_none()
+        );
+    }
+    release.notify_one();
+    assert!(running.await.unwrap().is_ok());
+    let mut snapshot = app.research.snapshot().unwrap();
+    snapshot.client = Client::new();
+    snapshot.url = url;
+    assert!(snapshot.run("new").await.is_ok());
+    let (key, body) = received.recv().await.unwrap();
+    assert_eq!(key, "new-key");
+    assert_eq!(body["numResults"], 2);
+    assert!(body.get("includeDomains").is_none());
+    assert!(body.get("excludeDomains").is_none());
+    let response = crate::router(app.clone()).oneshot(Request::builder().uri("/api/settings/research").method("PUT")
+        .header("authorization", "Bearer test-token").header("content-type", "application/json")
+        .body(Body::from(json!({"preferences":{"enabled":false,"numResults":2,"domainMode":"any","domains":[]}}).to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = crate::router(app)
+        .oneshot(
+            Request::builder()
+                .uri("/api/research")
+                .method("POST")
+                .header("authorization", "Bearer test-token")
+                .header("content-type", "application/json")
+                .body(Body::from("{\"query\":\"disabled\"}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(received.try_recv().is_err());
+    server.abort();
 }

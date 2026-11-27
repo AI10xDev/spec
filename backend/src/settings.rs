@@ -119,6 +119,14 @@ impl Store {
         Ok(store)
     }
 
+    pub fn research_file(&self) -> PrivateFile {
+        let mut name = self.file.path.file_name().unwrap().to_os_string();
+        name.push(".research.json");
+        PrivateFile {
+            path: self.file.path.with_file_name(name),
+        }
+    }
+
     pub fn storage_file(&self) -> PrivateFile {
         let mut name = self.file.path.file_name().unwrap().to_os_string();
         name.push(".storage.json");

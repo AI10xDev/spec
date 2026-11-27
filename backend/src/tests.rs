@@ -38,7 +38,17 @@ pub(super) fn app(root: &FsPath) -> App {
         remote: None,
         computeruse: Arc::default(),
         completion: None,
-        research: None,
+        research: Arc::new(research_settings::Store::open(
+            settings::PrivateFile::open(
+                root.with_extension("settings")
+                    .join("profile.json.research.json"),
+                root,
+                &root.join("ui"),
+            )
+            .ok()
+            .unwrap(),
+            None,
+        )),
         settings: Arc::new(
             settings::Store::open(
                 root.with_extension("settings").join("profile.json"),

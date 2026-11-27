@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { StorageSettings } from "./storage-settings"
+import { ExaSettings } from "./exa-settings"
 
 type Provider = "azure" | "openai" | "claude" | "openrouter" | "huggingface"
 type Profile = { provider: Provider; model: string; endpoint: string; apiVersion: string }
@@ -23,6 +24,7 @@ export function Settings({ api, onClose, onChanged }: { api: Api; onClose: () =>
   const [removeKey, setRemoveKey] = useState(false)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [exaBusy, setExaBusy] = useState(false)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
   const [attempt, setAttempt] = useState(0)
@@ -104,7 +106,7 @@ export function Settings({ api, onClose, onChanged }: { api: Api; onClose: () =>
 
   return <main className="settings-page" aria-labelledby="settings-heading">
     <div className="settings-content">
-      <button type="button" disabled={busy} onClick={onClose}>Back to workspace</button>
+      <button type="button" disabled={busy || exaBusy} onClick={onClose}>Back to workspace</button>
       <div className="settings-heading"><span className="eyebrow">WORKSPACE / CONFIGURATION</span><h1 id="settings-heading" ref={heading} tabIndex={-1}>AI settings</h1><p>Choose a profile for chat, completion, repository-save and Performance.</p></div>
       <p>One active saved profile is shared by this server. Saving replaces it for future profile-backed requests, not running sessions. Staged builder/integrator runs reject saved profiles, including Azure profiles. Realtime voice is configured separately.</p>
       <div className="settings-source">Active configuration: <strong>{!saved ? "Not loaded" : saved.source === "settings" ? "Saved settings" : saved.source === "environment" ? "Server environment" : "None"}</strong>{saved && <span>{providers[saved.provider].name} / {saved.hasApiKey ? "Key configured on server" : "No key configured"}</span>}</div>
@@ -136,6 +138,7 @@ export function Settings({ api, onClose, onChanged }: { api: Api; onClose: () =>
         </fieldset>
         <p className="settings-footnote">Reset removes the saved profile: chat and completions return to the server environment, while repository-save and Performance return to execution host defaults. Staged builds reject all saved profiles and require host-configured Astra, with optional Sol advisory supervision. Resetting does not configure or verify those host agents. Saving does not test connectivity or download a model.</p>
       </form>}
+      <ExaSettings api={api} onBusy={setExaBusy} />
       <StorageSettings api={api} />
     </div>
   </main>

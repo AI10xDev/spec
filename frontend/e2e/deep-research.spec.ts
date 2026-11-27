@@ -9,6 +9,7 @@ import type { ResearchOutput } from "../src/deep-research-export"
 
 let server: ChildProcess
 let directory: string
+let privateDirectory: string
 let url: string
 const saved = "# Completed context\nPending spec unchanged."
 const fixture: ResearchOutput = {
@@ -19,9 +20,10 @@ const fixture: ResearchOutput = {
 test.beforeAll(async () => {
   directory = await mkdtemp(path.join(tmpdir(), "spec-research-e2e-"))
   await writeFile(path.join(directory, "research.md"), saved)
+  privateDirectory = await mkdtemp(path.join(tmpdir(), "spec-exa-private-e2e-"))
   server = spawn(path.resolve("../backend/target/debug/spec"), [], {
     cwd: path.resolve("../backend"),
-    env: { HOME: directory, PATH: "/usr/bin:/bin", SPEC_WORKSPACE: directory, SPEC_PORT: "0", SPEC_UI_DIR: path.resolve("dist"), SPEC_AI_ENV_FILE: "/dev/null" },
+    env: { HOME: directory, PATH: "/usr/bin:/bin", SPEC_WORKSPACE: directory, SPEC_PORT: "0", SPEC_UI_DIR: path.resolve("dist"), SPEC_AI_ENV_FILE: "/dev/null", SPEC_SETTINGS_FILE: path.join(privateDirectory, "settings/profile.json") },
     stdio: ["ignore", "pipe", "pipe"],
   })
   url = await new Promise<string>((resolve, reject) => {
@@ -45,6 +47,7 @@ test.afterAll(async () => {
     })
   }
   if (directory) await rm(directory, { recursive: true, force: true })
+  if (privateDirectory) await rm(privateDirectory, { recursive: true, force: true })
 })
 test.beforeEach(async ({ page }) => {
   await writeFile(path.join(directory, "research.md"), saved)
@@ -182,4 +185,40 @@ test("ordinary autosave continues independently and editor selection survives re
   expect(await editor.evaluate((element: HTMLTextAreaElement) => [element.selectionStart, element.selectionEnd])).toEqual([2, 9])
   await expect(page.locator(".editor-pane .badge")).toHaveText("Saved")
   expect(mutations.filter((entry) => !["POST /api/research", "PUT /api/files/research.md"].includes(entry))).toEqual([])
+})
+
+test("real Settings API applies Exa preferences and disable/reset to reopened research without reload", async ({ page }) => {
+  const requests: string[] = []
+  page.on("request", (r) => { if (r.method() !== "GET") requests.push(`${r.method()} ${new URL(r.url()).pathname}`) })
+  await page.goto(url)
+  await page.getByRole("button", { name: "Settings", exact: true }).click()
+  const section = page.getByRole("region", { name: "Exa Deep Search" })
+  await section.getByLabel("Exa API key").fill("fake-e2e-key-never-submitted")
+  await section.getByLabel("Returned pages").fill("4")
+  await section.getByLabel("Source filter").selectOption("exclude")
+  await section.getByLabel("Domain names").fill("Example.org")
+  await section.getByRole("button", { name: "Save Exa settings", exact: true }).click()
+  await expect(section.getByRole("status")).toContainText("Exa settings saved")
+  await expect(section.getByLabel("Exa API key")).toHaveValue("")
+  await page.getByRole("button", { name: "Back to workspace" }).click()
+  let dialog = await open(page)
+  await expect(dialog.getByRole("button", { name: "Start research", exact: true })).toBeEnabled()
+  await expect(dialog.getByText(/Server settings when opened/)).toContainText("4 returned pages; exclude domains: example.org")
+  await expect(dialog.getByText(/configured search filters are sent/)).toBeVisible()
+  await dialog.getByRole("button", { name: "Close deep research" }).click()
+  await page.getByRole("button", { name: "Settings", exact: true }).click()
+  await section.getByLabel("Enable Deep Search").uncheck()
+  await section.getByRole("button", { name: "Save Exa settings", exact: true }).click()
+  await expect(section.getByRole("status")).toContainText("New research is disabled")
+  await page.getByRole("button", { name: "Back to workspace" }).click()
+  dialog = await open(page)
+  await expect(dialog.getByRole("status")).toContainText("disabled in Settings")
+  await expect(dialog.getByRole("button", { name: "Start research", exact: true })).toBeDisabled()
+  await dialog.getByRole("button", { name: "Close deep research" }).click()
+  await page.getByRole("button", { name: "Settings", exact: true }).click()
+  page.once("dialog", (d) => d.accept())
+  await section.getByRole("button", { name: "Reset Exa settings", exact: true }).click()
+  await expect(section.getByRole("status")).toContainText("No key is configured")
+  expect(await readFile(path.join(privateDirectory, "settings/profile.json.research.json"), "utf8")).toBe("null")
+  expect(requests).toEqual(["PUT /api/settings/research", "PUT /api/settings/research", "DELETE /api/settings/research"])
 })

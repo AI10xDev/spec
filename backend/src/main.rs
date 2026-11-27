@@ -43,6 +43,7 @@ mod realtime;
 mod recovery;
 mod remote;
 mod research;
+mod research_settings;
 mod settings;
 mod storage;
 mod workflow;
@@ -65,7 +66,7 @@ struct App {
     remote: Option<Remote>,
     computeruse: Arc<computeruse::Bridge>,
     completion: Option<Completion>,
-    research: Option<research::Research>,
+    research: Arc<research_settings::Store>,
     settings: Arc<settings::Store>,
     storage: Arc<storage::Store>,
     realtime: Option<Realtime>,
@@ -1429,6 +1430,13 @@ fn router(app: App) -> Router {
                 .delete(settings::delete)
                 .layer(DefaultBodyLimit::max(settings::MAX_BODY)),
         )
+        .route(
+            "/api/settings/research",
+            get(research_settings::get)
+                .put(research_settings::put)
+                .delete(research_settings::delete)
+                .layer(DefaultBodyLimit::max(research_settings::MAX_BODY)),
+        )
         .route("/api/files", get(list))
         .route(
             "/api/settings/storage",
@@ -1592,10 +1600,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         remote,
         computeruse,
         completion,
-        research: research::Research::from_env().unwrap_or_else(|error| {
-            eprintln!("Deep research disabled: {error}");
-            None
-        }),
+        research: Arc::new(research_settings::Store::open(
+            settings.research_file(),
+            research::Research::from_env().unwrap_or_else(|error| {
+                eprintln!("Deep research environment key disabled: {error}");
+                None
+            }),
+        )),
         settings,
         storage,
         realtime,

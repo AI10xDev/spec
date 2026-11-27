@@ -12,14 +12,15 @@ const MAX_QUERY: usize = 8 * 1024;
 const MAX_RESPONSE: usize = 1024 * 1024;
 const MAX_REPORT: usize = 64 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(90);
-const SETUP: &str = "Deep research is unavailable. Set a valid EXA_API_KEY in the server environment or shared .env (SPEC_AI_ENV_FILE), then restart. Never enter keys in the research question.";
+const SETUP: &str = "Deep research is unavailable. Set a valid EXA_API_KEY in the server environment or shared .env (SPEC_AI_ENV_FILE), then restart, or configure Exa in Settings. Never enter keys in the research question.";
 
 #[derive(Clone)]
 pub(super) struct Research {
     client: Client,
     key: HeaderValue,
     url: Url,
-    slots: Arc<Semaphore>,
+    pub(super) slots: Arc<Semaphore>,
+    pub(super) preferences: crate::research_settings::Preferences,
     timeout: Duration,
 }
 
@@ -34,7 +35,7 @@ impl Research {
         Self::configured(key.as_deref())
     }
 
-    fn configured(key: Option<&str>) -> std::result::Result<Option<Self>, &'static str> {
+    pub(super) fn configured(key: Option<&str>) -> std::result::Result<Option<Self>, &'static str> {
         let Some(key) = key else { return Ok(None) };
         if key.is_empty() {
             return Ok(None);
@@ -57,6 +58,7 @@ impl Research {
             url: Url::parse("https://api.exa.ai/search").unwrap(),
             slots: Arc::new(Semaphore::new(1)),
             timeout: TIMEOUT,
+            preferences: Default::default(),
         }))
     }
 
@@ -69,7 +71,7 @@ impl Research {
                 .client
                 .post(self.url.clone())
                 .header("x-api-key", self.key.clone())
-                .json(&payload(query))
+                .json(&payload(query, &self.preferences))
                 .send()
                 .await
                 .map_err(transport)?;
@@ -128,15 +130,22 @@ fn validate_query(query: &str) -> Result<()> {
     }
     Ok(())
 }
-fn payload(query: &str) -> Value {
-    json!({"query": query, "type": "deep", "numResults": 10,
+fn payload(query: &str, preferences: &crate::research_settings::Preferences) -> Value {
+    let mut value = json!({"query": query, "type": "deep", "numResults": preferences.num_results,
     "outputSchema": {"type": "object", "additionalProperties": false,
         "required": ["title", "summary", "findings", "limitations"],
         "properties": {
             "title": {"type": "string"}, "summary": {"type": "string"},
             "findings": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
             "limitations": {"type": "array", "maxItems": 20, "items": {"type": "string"}}
-        }}})
+        }}});
+    use crate::research_settings::DomainMode;
+    match preferences.domain_mode {
+        DomainMode::Any => {}
+        DomainMode::Include => value["includeDomains"] = json!(preferences.domains),
+        DomainMode::Exclude => value["excludeDomains"] = json!(preferences.domains),
+    }
+    value
 }
 
 #[derive(Deserialize)]
@@ -309,12 +318,25 @@ fn add_source(sources: &mut Vec<Source>, value: &Value) -> Result<Option<usize>>
 }
 
 pub(super) async fn status(State(app): State<App>) -> Json<Value> {
-    Json(
-        json!({"configured": app.research.is_some(), "maxQueryBytes": MAX_QUERY,
-        "timeoutSeconds": TIMEOUT.as_secs(), "message": if app.research.is_some() {
+    let view = app.research.view();
+    let configured = view
+        .as_ref()
+        .is_ok_and(|v| v.preferences.enabled && v.has_api_key);
+    let message = match &view {
+        Err(_) => {
+            "Exa settings unavailable. Ask an operator to repair private Exa settings storage and restart."
+        }
+        Ok(v) if !v.preferences.enabled => {
+            "Deep research is disabled in Settings. Enable Exa Deep Search to submit a question."
+        }
+        _ if configured => {
             "Exa configuration is present; availability is checked only on submission."
-        } else { SETUP }}),
-    )
+        }
+        _ => SETUP,
+    };
+    Json(json!({"configured": configured, "maxQueryBytes": MAX_QUERY,
+        "timeoutSeconds": TIMEOUT.as_secs(), "message": message,
+        "preferences": view.ok().map(|v| v.preferences)}))
 }
 pub(super) async fn research(
     State(app): State<App>,
@@ -322,7 +344,7 @@ pub(super) async fn research(
 ) -> Result<Json<Output>> {
     validate_query(&input.query)?;
     app.research
-        .as_ref()
+        .snapshot()
         .ok_or_else(|| Error(StatusCode::SERVICE_UNAVAILABLE, SETUP.into()))?
         .run(&input.query)
         .await

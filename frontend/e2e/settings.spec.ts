@@ -31,6 +31,11 @@ async function workspace(page: Page) {
     storageUploads: [] as { method: string; body: Record<string, unknown> }[],
     storageResponses: [] as unknown[],
     storageCounts: { uploaded: 2, skipped: 3, failed: 0 },
+    exa: { preferences: { enabled: true, numResults: 10, domainMode: "any", domains: [] as string[] }, hasApiKey: true, hasSavedKey: false, keySource: "environment", preferenceSource: "defaults" },
+    exaLoadError: false, exaSaveError: false, exaEnvironment: true,
+    exaLoading: null as Promise<void> | null, exaSaving: null as Promise<void> | null,
+    exaWrites: [] as { method: string; body: Record<string, unknown> }[],
+
   }
   page.on("console", (message) => state.console.push(message.text()))
   page.on("pageerror", (error) => state.console.push(error.message))
@@ -62,6 +67,23 @@ async function workspace(page: Page) {
           state.responses.push(body)
         }
       }
+    } else if (path === "/api/settings/research") {
+      if (method === "GET") {
+        await state.exaLoading
+        status = state.exaLoadError ? 503 : 200
+      } else {
+        const payload = route.request().postDataJSON() as Record<string, unknown>
+        state.exaWrites.push({ method, body: payload })
+        await state.exaSaving
+        status = state.exaSaveError ? 400 : 200
+        if (status === 200) {
+          const hasSavedKey = method === "DELETE" ? false : "apiKey" in payload ? !!payload.apiKey : state.exa.hasSavedKey
+          state.exa = { preferences: method === "DELETE" ? { enabled: true, numResults: 10, domainMode: "any", domains: [] } : payload.preferences as typeof state.exa.preferences,
+            hasApiKey: hasSavedKey || state.exaEnvironment, hasSavedKey,
+            keySource: hasSavedKey ? "settings" : state.exaEnvironment ? "environment" : "none", preferenceSource: method === "DELETE" ? "defaults" : "settings" }
+        }
+      }
+      body = status === 200 ? { ...state.exa, apiKey: "unexpected-response-secret" } : { error: `Never render raw Exa errors: ${secret}` }
     } else if (path === "/api/settings/storage") {
       if (method === "GET") {
         state.storageReads++
@@ -214,7 +236,7 @@ test("saved profiles switch only after saving and block rather than replace stag
   await save.click()
   await expect(page.getByRole("alert")).toContainText("Enter an API key")
   expect(state.writes).toHaveLength(0)
-  await page.getByLabel("API key").fill(secret)
+  await page.getByLabel("API key", { exact: true }).fill(secret)
   await save.click()
   await expect(summary).toContainText("Blocked by saved profile: OpenRouter / anthropic/claude-sonnet-4.5")
   await expect(summary).toContainText("Reset to environment before starting or continuing a staged build. This profile does not replace Astra or Sol.")
@@ -222,12 +244,12 @@ test("saved profiles switch only after saving and block rather than replace stag
   await page.getByRole("button", { name: "Back to workspace" }).click()
   await settings(page)
   await expect(page.getByLabel("Model ID")).toHaveValue("anthropic/claude-sonnet-4.5")
-  await expect(page.getByLabel("API key")).toHaveValue("")
+  await expect(page.getByLabel("API key", { exact: true })).toHaveValue("")
   await provider.selectOption("azure")
   await expect(summary).toContainText("Blocked by saved profile: OpenRouter / anthropic/claude-sonnet-4.5")
   await page.getByLabel("Deployment name").fill("chosen-azure-deployment")
   await page.getByLabel("Azure resource endpoint").fill(environment.endpoint)
-  await page.getByLabel("API key").fill(secret)
+  await page.getByLabel("API key", { exact: true }).fill(secret)
   await save.click()
   await expect(summary).toContainText("Blocked by saved profile: Azure OpenAI / chosen-azure-deployment")
   await expect(summary).toContainText("This profile does not replace Astra or Sol.")
@@ -253,16 +275,16 @@ test("retains a key only for the same provider and endpoint and clears abandoned
   await page.getByRole("button", { name: "Save settings", exact: true }).click()
   await expect(page.getByRole("alert")).toContainText("same provider and endpoint")
   expect(state.writes).toHaveLength(1)
-  await page.getByLabel("API key").fill(secret)
+  await page.getByLabel("API key", { exact: true }).fill(secret)
   await page.getByLabel("Provider", { exact: true }).selectOption("openai")
-  await expect(page.getByLabel("API key")).toHaveValue("")
+  await expect(page.getByLabel("API key", { exact: true })).toHaveValue("")
   await page.getByRole("button", { name: "Save settings", exact: true }).click()
   await expect(page.getByRole("alert")).toContainText("Enter an API key")
   expect(state.writes).toHaveLength(1)
-  await page.getByLabel("API key").fill(secret)
+  await page.getByLabel("API key", { exact: true }).fill(secret)
   await page.getByRole("button", { name: "Back to workspace" }).click()
   await settings(page)
-  await expect(page.getByLabel("API key")).toHaveValue("")
+  await expect(page.getByLabel("API key", { exact: true })).toHaveValue("")
 })
 
 test("local keys are retained by omission, replaced, and removed only explicitly", async ({ page }) => {
@@ -345,14 +367,14 @@ for (const suffix of ["/openai/v1", "/openai/v1/", "/openai/v1/responses", "/ope
     await expect(page.getByRole("status")).toContainText("Settings saved")
     expect(state.writes[0].body.apiVersion).toBe("")
     await endpoint.fill(environment.endpoint + "/")
-    await page.getByLabel("API key").fill(secret)
+    await page.getByLabel("API key", { exact: true }).fill(secret)
     await expect(version).toHaveJSProperty("required", true)
     await save.click()
     await expect(version).toBeFocused()
     expect(state.writes).toHaveLength(1)
     await version.fill("2024-10-21")
     await save.click()
-    await expect(page.getByLabel("API key")).toHaveValue("")
+    await expect(page.getByLabel("API key", { exact: true })).toHaveValue("")
     expect(state.writes[1].body.apiVersion).toBe("2024-10-21")
   })
 }
@@ -394,11 +416,11 @@ test("loading and save failures are retryable without rendering secret-bearing e
   state.loadError = false
   await page.getByRole("button", { name: "Retry loading settings" }).click()
   await expect(page.getByLabel("Provider", { exact: true })).toBeVisible()
-  await page.getByLabel("API key").fill(secret)
+  await page.getByLabel("API key", { exact: true }).fill(secret)
   state.saveError = true
   await page.getByRole("button", { name: "Save settings", exact: true }).click()
   await expect(page.getByRole("alert")).toContainText("Could not save settings")
-  await expect(page.getByLabel("API key")).toHaveValue(secret)
+  await expect(page.getByLabel("API key", { exact: true })).toHaveValue(secret)
   await expect(page.locator("body")).not.toContainText(secret)
   expect(state.console.join("\n")).not.toContain(secret)
   expect(await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }))).not.toContain(secret)
@@ -407,7 +429,7 @@ test("loading and save failures are retryable without rendering secret-bearing e
   await page.getByRole("button", { name: "Save settings", exact: true }).click()
   await expect(page.getByRole("status")).toContainText("Settings saved")
   await expect(page.getByRole("alert")).toContainText("capability refresh failed")
-  await expect(page.getByLabel("API key")).toHaveValue("")
+  await expect(page.getByLabel("API key", { exact: true })).toHaveValue("")
 })
 
 test("pending loads and saves expose progress and prevent duplicate mutations", async ({ page }) => {
@@ -791,7 +813,7 @@ test("storage is keyboard usable at 320px without horizontal overflow", async ({
   await page.setViewportSize({ width: 320, height: 740 })
   await settings(page)
   const storage = page.getByRole("region", { name: "Azure Blob Storage" })
-  await page.getByRole("button", { name: "Save settings", exact: true }).focus()
+  await page.getByRole("button", { name: "Save Exa settings", exact: true }).focus()
   await page.keyboard.press("Tab")
   await expect(storage.getByLabel("Storage account name")).toBeFocused()
   await page.keyboard.press("Tab")
@@ -815,4 +837,125 @@ test("storage is keyboard usable at 320px without horizontal overflow", async ({
   await expect(storage.getByRole("button", { name: "Remove storage settings" })).toBeInViewport()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath("storage-settings-mobile.png"), fullPage: true })
+})
+
+test("Exa independent settings save and key retention never change model profiles or build state", async ({ page }) => {
+  const state = await workspace(page)
+  await settings(page)
+  const section = page.getByRole("region", { name: "Exa Deep Search" })
+  await expect(section.getByText(/Active key source: environment/)).toBeVisible()
+  await expect(section.getByText(/multiple web searches/)).toBeVisible()
+  expect(await section.getByLabel("Exa API key").getAttribute("type")).toBe("password")
+  await section.getByLabel("Exa API key").fill(secret)
+  await section.getByLabel("Returned pages").fill("3")
+  await section.getByLabel("Source filter").selectOption("include")
+  await section.getByLabel("Domain names").fill(" EXAMPLE.org, docs.example.org\nexample.org")
+  await section.getByRole("button", { name: "Save Exa settings", exact: true }).click()
+  await expect(section.getByRole("status")).toContainText("Exa settings saved")
+  await expect(section.getByLabel("Exa API key")).toHaveValue("")
+  expect(state.exaWrites).toEqual([{ method: "PUT", body: { preferences: { enabled: true, numResults: 3, domainMode: "include", domains: ["example.org", "docs.example.org"] }, apiKey: secret } }])
+  await section.getByLabel("Enable Deep Search").uncheck()
+  await section.getByRole("button", { name: "Save Exa settings", exact: true }).click()
+  await expect(section.getByRole("status")).toContainText("New research is disabled")
+  expect(state.exaWrites[1].body).not.toHaveProperty("apiKey")
+  expect(state.writes).toEqual([]); expect(state.storageWrites).toEqual([]); expect(state.builds).toBe(0)
+  expect(await page.locator("body").innerHTML()).not.toContain(secret)
+  expect(await page.locator("body").innerHTML()).not.toContain("unexpected-response-secret")
+  expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain(secret)
+  expect(state.console.join("\n")).not.toContain(secret)
+})
+
+test("Exa explicit remove and reset accurately disclose environment fallback and no-key state", async ({ page }) => {
+  const state = await workspace(page)
+  state.exa.hasSavedKey = true; state.exa.keySource = "settings"; state.exa.preferenceSource = "settings"
+  state.exa.preferences.numResults = 2
+  await settings(page)
+  const section = page.getByRole("region", { name: "Exa Deep Search" })
+  page.once("dialog", (d) => d.dismiss())
+  await section.getByRole("button", { name: "Remove saved key", exact: true }).click()
+  expect(state.exaWrites).toEqual([])
+  page.once("dialog", async (d) => { expect(d.message()).toContain("environment key"); await d.accept() })
+  await section.getByRole("button", { name: "Remove saved key", exact: true }).click()
+  await expect(section.getByRole("status")).toContainText("server environment")
+  expect(state.exaWrites[0].body.apiKey).toBe("")
+  expect(state.exa.preferences.numResults).toBe(2)
+  state.exaEnvironment = false
+  page.once("dialog", (d) => d.accept())
+  await section.getByRole("button", { name: "Reset Exa settings", exact: true }).click()
+  await expect(section.getByRole("status")).toContainText("No key is configured")
+  await expect(section.getByLabel("Returned pages")).toHaveValue("10")
+  expect(state.exaWrites[1]).toEqual({ method: "DELETE", body: {} })
+  expect(state.writes).toEqual([])
+})
+
+test("Exa loading, failure and retry remain independent of failed model settings", async ({ page }) => {
+  const state = await workspace(page)
+  state.loadError = true; state.exaLoadError = true
+  await page.getByRole("button", { name: "Settings", exact: true }).click()
+  const section = page.getByRole("region", { name: "Exa Deep Search" })
+  await expect(section.getByRole("alert")).toContainText("Could not confirm Exa settings")
+  state.exaLoadError = false
+  let release!: () => void
+  state.exaLoading = new Promise<void>((resolve) => { release = resolve })
+  await section.getByRole("button", { name: "Retry loading Exa settings" }).click()
+  await expect(section.getByRole("status")).toContainText("Loading Exa")
+  release()
+  await expect(section.getByLabel("Exa API key")).toBeVisible()
+  state.exaSaveError = true
+  await section.getByLabel("Exa API key").fill(secret)
+  await section.getByRole("button", { name: "Save Exa settings", exact: true }).click()
+  await expect(section.getByRole("alert")).toContainText("Check the key")
+  expect(await section.innerText()).not.toContain(secret)
+  state.exaSaveError = false
+  await section.getByRole("button", { name: "Save Exa settings", exact: true }).click()
+  await expect(section.getByLabel("Exa API key")).toHaveValue("")
+  await expect(page.getByRole("button", { name: "Retry loading settings", exact: true })).toBeVisible()
+  expect(state.writes).toEqual([])
+})
+
+test("Exa busy duplicate guard blocks Back; invalid form data never submits", async ({ page }) => {
+  const state = await workspace(page)
+  await settings(page)
+  const section = page.getByRole("region", { name: "Exa Deep Search" })
+  await section.getByLabel("Source filter").selectOption("exclude")
+  await section.getByLabel("Domain names").fill("https://example.org")
+  await section.getByRole("button", { name: "Save Exa settings", exact: true }).click()
+  await expect(section.getByRole("alert")).toContainText("plain domain names")
+  expect(state.exaWrites).toEqual([])
+  await section.getByLabel("Domain names").fill("example.org")
+  await section.getByLabel("Returned pages").fill("11")
+  await section.getByRole("button", { name: "Save Exa settings", exact: true }).click()
+  expect(state.exaWrites).toEqual([])
+  await section.getByLabel("Returned pages").fill("1")
+  let release!: () => void
+  state.exaSaving = new Promise<void>((resolve) => { release = resolve })
+  await section.getByRole("button", { name: "Save Exa settings", exact: true }).click()
+  await expect(page.getByRole("button", { name: "Back to workspace" })).toBeDisabled()
+  await section.locator("form").evaluate((form: HTMLFormElement) => form.requestSubmit())
+  expect(state.exaWrites).toHaveLength(1)
+  release()
+  await expect(page.getByRole("button", { name: "Back to workspace" })).toBeEnabled()
+  await section.getByLabel("Exa API key").fill("discard-on-leave")
+  await page.getByRole("button", { name: "Back to workspace" }).click()
+  await settings(page)
+  await expect(section.getByLabel("Exa API key")).toHaveValue("")
+})
+
+test("Exa ignores late load after navigation and fits 320px keyboard-accessible settings", async ({ page }) => {
+  const state = await workspace(page)
+  let release!: () => void
+  state.exaLoading = new Promise<void>((resolve) => { release = resolve })
+  await settings(page)
+  const section = page.getByRole("region", { name: "Exa Deep Search" })
+  await expect(section.getByRole("status")).toContainText("Loading Exa")
+  await page.getByRole("button", { name: "Back to workspace" }).click()
+  release(); state.exaLoading = null
+  await page.setViewportSize({ width: 320, height: 700 })
+  await settings(page)
+  await section.getByLabel("Source filter").selectOption("include")
+  await section.getByLabel("Exa API key").focus()
+  await page.keyboard.press("Tab")
+  await expect(section.getByLabel("Returned pages")).toBeFocused()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  expect(state.exaWrites).toEqual([])
 })

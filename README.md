@@ -24,7 +24,7 @@ never grant approval. See [staged builds](docs/SUPERVISED_BUILDS.md).
 | Write clearer tasks | Use the [everyday examples](#everyday-examples). |
 | Understand every setting | Read [Installation](docs/INSTALLATION.md) and the [configuration reference](REFERENCE.md#configuration). |
 | Compare repository features | Use **Feature review** beside **Performance output** for cited PDF and Markdown reports. See [scope and Azure image setup](docs/FEATURE_REVIEW.md). |
-| Research a question on the web | Use **Deep research** beside the editor's **Saved/Unsaved** badge for a read-only Exa report and Markdown download. Requires a server-side `EXA_API_KEY`; see [privacy, limits and setup](docs/DEEP_RESEARCH.md). |
+| Research a question on the web | Use **Deep research** beside the editor's **Saved/Unsaved** badge for a read-only Exa report and Markdown download. Configure the key and preferences in **Settings → Exa Deep Search** (or server-side `EXA_API_KEY`); see [privacy, limits and setup](docs/DEEP_RESEARCH.md). |
 
 ## Install And Open Spec
 
@@ -188,6 +188,15 @@ tool rules and advisory host policy do not sandbox shell effects. Do not
 give it customer data, secrets, or access it does not need.
 
 ### What About AI Settings?
+
+**Exa Deep Search** has a separate Settings section: a server-held key,
+enable switch, 1–10 returned pages, and optional include/exclude domain filters.
+A saved Exa key overrides `EXA_API_KEY`; blank retains it, Remove saved key
+restores environment fallback, and Reset Exa settings restores defaults too.
+Saves apply to future research immediately without paid queries or changes to
+model profiles/build approvals. The restricted server file is not encrypted.
+Only explicitly submitted questions and configured filters go to Exa; usage may
+incur charges. See [Exa setup, privacy and reset semantics](docs/DEEP_RESEARCH.md).
 
 **Settings** lets you configure a provider for optional chat and writing
 suggestions, and select a profile for supported separate agent workflows. It does
